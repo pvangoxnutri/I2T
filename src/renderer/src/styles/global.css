@@ -4,34 +4,66 @@
    display headings. Deliberately NOT a colorful SaaS look.
    ═══════════════════════════════════════════════════════════════════════ */
 
+/**
+ * I2T — Image 2 Transition.
+ *
+ * MONOCHROME BY DESIGN. This is professional media tooling, not a SaaS
+ * dashboard: black through off-white, a single near-white accent, and
+ * colour reserved almost entirely for state that must not be missed.
+ * The previous palette was warm bronze on a serif display face, which
+ * read as a marketing product rather than an editor.
+ *
+ * The token NAMES are unchanged on purpose — every existing rule keeps
+ * working, and the whole identity moves by changing values here. Only
+ * `--accent*` shifted meaning: it is now light-on-dark emphasis rather
+ * than a colour, so anything that used it for hierarchy still reads
+ * correctly.
+ *
+ * STATE COLOUR IS NEVER THE ONLY SIGNAL. --ok/--err/--info are muted and
+ * always accompany a word ("Ready", "Failed"), so the timeline stays
+ * legible without relying on hue.
+ */
 :root {
-  --bg: #101214;
-  --bg-raised: #15181b;
-  --bg-card: #1a1e22;
-  --bg-inset: #0c0e10;
-  --border: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.14);
+  --bg: #0a0a0b;
+  --bg-raised: #121213;
+  --bg-card: #171718;
+  --bg-inset: #060607;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.18);
 
-  --text: #e9e6e0;
-  --text-dim: #a09a8f;
-  --text-mute: #6d6860;
+  --text: #f2f2f0;
+  --text-dim: #9b9b98;
+  --text-mute: #6a6a68;
 
-  --accent: #c9a86a;
-  --accent-bright: #ddbe85;
-  --accent-ink: #171208;
-  --accent-soft: rgba(201, 168, 106, 0.12);
-  --accent-border: rgba(201, 168, 106, 0.35);
+  /* Emphasis, not colour. */
+  --accent: #f2f2f0;
+  --accent-bright: #ffffff;
+  --accent-ink: #0a0a0b;
+  --accent-soft: rgba(255, 255, 255, 0.08);
+  --accent-border: rgba(255, 255, 255, 0.28);
+  --accent-hover: #ffffff;
 
-  --ok: #7fbf96;
-  --err: #d4796a;
-  --info: #8fa8bf;
+  /* Desaturated on purpose — a status tint, never a brand colour. */
+  --ok: #8fae97;
+  --err: #c98b81;
+  --warn: #c2ac7e;
+  --info: #93a3b0;
 
-  --radius: 10px;
-  --radius-lg: 14px;
+  /* Editor chrome: sharper than the old rounded-card look. */
+  --radius: 4px;
+  --radius-lg: 6px;
+
+  --toolbar-h: 46px;
+  --timeline-h: 132px;
+  --inspector-h: 214px;
+  --left-panel-w: 300px;
 
   --font-body:
-    'Segoe UI', -apple-system, BlinkMacSystemFont, 'Inter', 'Helvetica Neue', Arial, sans-serif;
-  --font-display: Georgia, 'Times New Roman', 'Palatino Linotype', serif;
+    'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+  /* Geometric and tight — the mark and headings, not a serif. */
+  --font-display:
+    'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'SF Mono', monospace;
 }
 
 * {
@@ -92,10 +124,16 @@ textarea {
 
 .app-main {
   flex: 1;
+  min-width: 0;
   overflow-y: auto;
-  background:
-    radial-gradient(1200px 500px at 85% -10%, rgba(201, 168, 106, 0.05), transparent 60%),
-    var(--bg);
+  /* Flat. The old warm radial wash read as a marketing page; editors are
+     a neutral ground so the footage is the only thing with colour. */
+  background: var(--bg);
+}
+
+/* The editor owns its viewport and never lets the page itself scroll. */
+.app-main:has(.editor) {
+  overflow: hidden;
 }
 
 /* ── Sidebar ──────────────────────────────────────────────────────────── */
@@ -1105,6 +1143,1357 @@ textarea {
   padding: 2px;
 }
 
+/* ── Production panel & workflow ──────────────────────────────────────── */
+
+.production-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 12px 18px;
+  margin-bottom: 12px;
+}
+
+.production-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.production-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--text-mute);
+}
+
+.production-value {
+  font-family: var(--font-display);
+  font-size: 18px;
+  color: var(--text);
+}
+
+.production-value.accent {
+  color: var(--accent-bright);
+}
+
+.production-value.warn {
+  color: var(--err);
+}
+
+.production-missing {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  color: var(--err);
+}
+
+.production-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 4px;
+}
+
+.production-note {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--accent-bright);
+}
+
+.workflow-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.workflow-step {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.workflow-step:hover {
+  border-color: var(--border-strong);
+}
+
+.workflow-step.is-done {
+  border-color: rgba(127, 191, 150, 0.4);
+  background: rgba(127, 191, 150, 0.07);
+}
+
+.workflow-check {
+  color: var(--text-mute);
+  font-size: 14px;
+}
+
+.workflow-step.is-done .workflow-check {
+  color: var(--ok);
+}
+
+.workflow-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+  min-width: 0;
+}
+
+.workflow-label {
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.workflow-date {
+  font-size: 11px;
+  color: var(--text-mute);
+}
+
+/* ── Project status chips ─────────────────────────────────────────────── */
+
+.project-status-draft {
+  color: var(--text-dim);
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.05);
+}
+.project-status-ready {
+  color: var(--info);
+  border-color: rgba(143, 168, 191, 0.4);
+  background: rgba(143, 168, 191, 0.1);
+}
+.project-status-queued,
+.project-status-generating {
+  color: var(--accent-bright);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+.project-status-review {
+  color: #d9b45f;
+  border-color: rgba(217, 180, 95, 0.4);
+  background: rgba(217, 180, 95, 0.1);
+}
+.project-status-completed {
+  color: var(--ok);
+  border-color: rgba(127, 191, 150, 0.4);
+  background: rgba(127, 191, 150, 0.1);
+}
+
+.project-card-status {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  backdrop-filter: blur(4px);
+}
+
+.project-card-price {
+  color: var(--accent-bright);
+}
+
+.project-card-scheduled {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--info);
+}
+
+/* ── Filters ──────────────────────────────────────────────────────────── */
+
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.filter-pill {
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.filter-pill:hover {
+  color: var(--text);
+}
+
+.filter-pill.is-active {
+  color: var(--accent-bright);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.filter-count {
+  opacity: 0.6;
+  margin-left: 2px;
+}
+
+/* ── Generation toolbar & selection ───────────────────────────────────── */
+
+.generation-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.generation-toolbar-title {
+  flex: 1;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-mute);
+}
+
+.transition-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.transition-select input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.transition-head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.mock-warning {
+  font-size: 11px;
+  color: var(--err);
+  border: 1px dashed rgba(212, 121, 106, 0.45);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+/* ── Queue controls & dialog ──────────────────────────────────────────── */
+
+.queue-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.queue-paused-hint {
+  font-size: 12px;
+  color: var(--err);
+  font-family: var(--font-body);
+}
+
+.queue-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.queue-row-mock {
+  font-size: 11px;
+  color: var(--text-mute);
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.queue-row.status-scheduled {
+  border-color: rgba(143, 168, 191, 0.35);
+}
+
+.status-chip-scheduled {
+  color: var(--info);
+  border-color: rgba(143, 168, 191, 0.4);
+  background: rgba(143, 168, 191, 0.1);
+}
+
+.status-chip-cancelled {
+  color: var(--text-mute);
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+
+.dialog-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+}
+
+.dialog-title {
+  margin: 0 0 6px;
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 18px;
+}
+
+.dialog-body {
+  margin: 0 0 16px;
+  font-size: 12.5px;
+  color: var(--text-mute);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* ── Provider settings & request preview ──────────────────────────────── */
+
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.key-row .input {
+  flex: 1;
+}
+
+.provider-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 10px;
+}
+
+.provider-warning {
+  color: var(--err);
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 11.5px;
+  font-style: italic;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.dialog-card-wide {
+  max-width: 640px;
+}
+
+.request-preview {
+  max-height: 50vh;
+  overflow: auto;
+  margin: 0 0 4px;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  font-family: var(--font-mono, 'Consolas', monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  user-select: text;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── Live mode, safety lock & confirmation ────────────────────────────── */
+
+.live-indicator {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--accent-bright);
+}
+
+.safety-lock {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.contract-block {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.contract-block summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+
+.contract-block code {
+  background: var(--bg-inset);
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.contract-status {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.contract-status li {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-mute);
+  padding-left: 10px;
+  border-left: 2px solid var(--border-strong);
+}
+
+.contract-status li.is-confirmed {
+  border-left-color: var(--ok);
+}
+
+.contract-status li.is-unconfirmed {
+  border-left-color: var(--err);
+}
+
+.contract-status strong {
+  color: var(--text-dim);
+}
+
+.confirm-list {
+  margin: 0 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.confirm-list > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 12.5px;
+}
+
+.confirm-list dt {
+  color: var(--text-mute);
+}
+
+.confirm-list dd {
+  margin: 0;
+  color: var(--text);
+  text-align: right;
+}
+
+.confirm-customer {
+  color: var(--accent-bright);
+}
+
+/* Free auth/config test for fal.ai. */
+.conn-test {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.conn-test-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.conn-test-detail {
+  list-style: none;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-mute);
+  /* Diagnostic blocks are multi-line on purpose. */
+  white-space: pre-line;
+  word-break: break-word;
+}
+
+/* Failure notes carry multi-line diagnostics — keep the line breaks. */
+.queue-row-note {
+  white-space: pre-line;
+}
+
+/* The exact frames being sent, start → end. */
+.confirm-frames {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+}
+
+.confirm-frames figure {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+.confirm-frames img {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  display: block;
+}
+
+.confirm-frames figcaption {
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--text-mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.confirm-frames-arrow {
+  color: var(--text-mute);
+  font-size: 16px;
+}
+
+.confirm-prompt {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* How a number was reached — the API cost and the customer price each carry
+   their own basis line so the two can never be read as the same thing. */
+.confirm-basis {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-mute);
+  font-weight: 400;
+  margin-top: 1px;
+}
+
+/* An unverified rate is styled as ABSENT, not as a number in a quieter
+   colour. Anything that still reads like a figure would be reconciled
+   against an invoice it cannot match. */
+.confirm-unverified {
+  color: var(--warn);
+  font-style: italic;
+}
+
+/* The three consequences that must not be inferred from the table above:
+   everything is sent, it is only a draft, nothing changes yet. */
+.confirm-statements {
+  margin: 0 0 10px;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-mute);
+}
+
+.confirm-statements strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* The remaining unconfirmed values sit OUTSIDE the collapsed developer
+   block — the operator must see them without opening anything. */
+.contract-open {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-inset);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.contract-locked {
+  margin: 0 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.contract-locked > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 11.5px;
+}
+
+.contract-locked dt {
+  color: var(--text-mute);
+}
+
+.contract-locked dd {
+  margin: 0;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.contract-rates {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-mute);
+}
+
+.contract-rates strong {
+  color: var(--text-dim);
+}
+
+/* The remote provider task id — deliberately prominent and selectable: if
+   our status path is wrong, this is the only handle on a paid generation. */
+.queue-task {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.queue-task-label {
+  font-size: 10.5px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+
+.queue-task-id {
+  user-select: all;
+  font-size: 11.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-endpoint-warning {
+  margin: 6px 0 0;
+  padding: 7px 9px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(212, 121, 106, 0.35);
+  background: rgba(212, 121, 106, 0.07);
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+/* ── Job output clips ─────────────────────────────────────────────────── */
+
+.queue-clips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.queue-clip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.queue-clip-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.queue-clip-label {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.queue-clip-ok {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--ok);
+  border: 1px solid rgba(127, 191, 150, 0.35);
+  background: rgba(127, 191, 150, 0.1);
+}
+
+.queue-clip-missing {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--err);
+  border: 1px solid rgba(212, 121, 106, 0.35);
+  background: rgba(212, 121, 106, 0.08);
+}
+
+.queue-clip-player {
+  width: 100%;
+  max-width: 420px;
+  max-height: 200px;
+  border-radius: 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+}
+
+.confirm-warning {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(212, 121, 106, 0.4);
+  background: rgba(212, 121, 106, 0.08);
+  color: var(--err);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.confirm-blockers {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--err);
+}
+
+/* ── Pricing ──────────────────────────────────────────────────────────── */
+
+.pricing-summary {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  padding: 12px 16px;
+  margin-bottom: 20px;
+}
+
+.pricing-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  padding: 3px 0;
+}
+
+.pricing-row.pricing-total {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.pricing-total span:last-child {
+  font-family: var(--font-display);
+  font-size: 16px;
+  color: var(--accent-bright);
+}
+
+/* Kept: other rules may still reference it. */
+.queue-price {
+  font-family: var(--font-display);
+  font-size: 14.5px;
+  color: var(--accent-bright);
+  white-space: nowrap;
+}
+
+/**
+ * Customer value vs generation cost.
+ *
+ * Both are labelled, and they are styled DIFFERENTLY on purpose: revenue
+ * keeps the accent colour it always had, our production cost is neutral.
+ * Two numbers in two currencies that must never be read as one figure.
+ */
+.queue-money {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  white-space: nowrap;
+}
+
+.queue-money-label {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.queue-money-value {
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-money-customer .queue-money-value {
+  color: var(--accent-bright);
+}
+
+.queue-money-generation .queue-money-value {
+  color: var(--text-dim);
+}
+
+/* ── Transition clips ─────────────────────────────────────────────────── */
+
+.clip-row {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.clip-preview {
+  width: 100%;
+  max-height: 160px;
+  border-radius: 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+}
+
+.clip-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.clip-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Where the clip came from. A paid generation should say so plainly —
+   otherwise a real fal.ai render looks exactly like a dev test file. */
+.clip-source {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: var(--bg-inset);
+}
+
+.clip-source-fal,
+.clip-source-kling {
+  color: var(--accent-bright);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.clip-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/** File size sits beside the name — small, dim, never competing with it. */
+.clip-size {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+.clip-missing {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  font-size: 12px;
+  color: var(--err);
+}
+
+.clip-missing p {
+  margin: 0;
+}
+
+.clip-missing-hint {
+  color: var(--text-dim);
+}
+
+/**
+ * "The provider finished, we still owe a download." Deliberately NOT styled
+ * as an error: nothing is wrong and nothing is lost — the result is sitting
+ * on the provider, already paid for. The one action offered here is free.
+ */
+.clip-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.clip-pending-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.clip-pending-body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.clip-attach {
+  align-self: flex-start;
+  border-style: dashed;
+  color: var(--text-dim);
+}
+
+/* ── Production cost ───────────────────────────────────────────────────
+   OUR spend. Visually distinct from the customer price panel above it so
+   the two figures can never be read as the same number. */
+.cost-figures {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.cost-figure {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.cost-figure-total {
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.cost-figure-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.cost-figure-value {
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.cost-figure-hint {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.cost-history-toggle {
+  margin-top: 10px;
+}
+
+.cost-history {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cost-history-pair ul {
+  margin: 4px 0 0;
+  padding-left: 14px;
+  list-style: none;
+}
+
+.cost-history-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.cost-attempt {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-attempt {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 0;
+}
+
+.cost-attempt-money {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.cost-attempt-when {
+  font-size: 10.5px;
+  opacity: 0.7;
+}
+
+.cost-attempt-failed .cost-attempt-money {
+  color: var(--err);
+}
+
+/* ── Prompt provenance ─────────────────────────────────────────────── */
+.prompt-provenance {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.prompt-provenance-tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+/* A hand-written prompt is protected state, so it is marked, not hidden. */
+.prompt-provenance-tag.is-manual {
+  border-color: var(--accent-bright);
+  color: var(--accent-bright);
+}
+
+.prompt-provenance-note {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+/* ── Rebuild confirmation ──────────────────────────────────────────── */
+.rebuild-summary {
+  margin: 10px 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text);
+}
+
+.rebuild-list {
+  margin: 4px 0 8px;
+  padding: 0;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.rebuild-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.rebuild-list li:last-child {
+  border-bottom: none;
+}
+
+.rebuild-list-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.rebuild-list-basis {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.rebuild-list-preview {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.rebuild-preserved {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.analysis-plan-basis.is-manual {
+  border-color: var(--accent-bright);
+  color: var(--accent-bright);
+}
+
+/* Development-only actions read as such — dashed, never a primary CTA. */
+.btn-dev {
+  border-style: dashed;
+  color: var(--text-dim);
+}
+
+/* ── Regenerate spend block ────────────────────────────────────────── */
+.confirm-spend {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.confirm-spend.is-regeneration {
+  border-color: var(--accent-bright);
+}
+
+.confirm-spend-head {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.confirm-spend-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+}
+
+.confirm-spend-list > div {
+  display: contents;
+}
+
+.confirm-spend-list dt {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.confirm-spend-list dd {
+  margin: 0;
+  font-size: 12.5px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.confirm-spend-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+/* ── Property analysis ─────────────────────────────────────────────── */
+.analysis-intro {
+  margin: 8px 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.analysis-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.analysis-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.analysis-room,
+.analysis-image,
+.analysis-edge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.analysis-room-label {
+  flex: 1;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.analysis-room-count {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.analysis-image select,
+.analysis-edge select {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.analysis-plan {
+  padding: 8px 10px;
+  border-left: 2px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.analysis-plan-pair {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin-right: 8px;
+}
+
+.analysis-plan-basis {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+/* Unknown is styled plainly, not as a warning: it is the CORRECT and safe
+   answer when we cannot see how two rooms connect. */
+.analysis-plan-adjacent-room {
+  border-color: rgba(255, 255, 255, 0.28);
+  color: var(--text);
+}
+
+.analysis-plan-text {
+  margin: 6px 0 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.analysis-plan-why {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.btn-tiny {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.export-missing {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--err);
+}
+
+.export-note {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--accent-bright);
+}
+
+.queue-row-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.queue-row-output {
+  color: var(--ok);
+  word-break: break-all;
+}
+
 /* ── Queue ────────────────────────────────────────────────────────────── */
 
 .queue-columns {
@@ -1171,6 +2560,15 @@ textarea {
   padding: 1px 8px;
 }
 
+/* Which provider a generation job belongs to. */
+.queue-row-provider {
+  font-size: 11px;
+  color: var(--accent-bright);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
 .queue-row-meta {
   font-size: 12.5px;
   color: var(--text-mute);
@@ -1211,3 +2609,1569 @@ textarea {
   gap: 10px;
   padding-bottom: 8px;
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+   I2T EDITOR — desktop video-editing workspace
+   ══════════════════════════════════════════════════════════════════════
+
+   Grid sized to the viewport so the PAGE never scrolls: preview and
+   timeline stay in view while working, and only panels scroll inside
+   themselves. Sized for 1440x900 upward; at narrower widths the left
+   panel shrinks and the timeline scrolls horizontally rather than
+   pushing the layout sideways. */
+
+.editor {
+  display: grid;
+  grid-template-rows: var(--toolbar-h) minmax(0, 1fr) var(--timeline-h) var(--inspector-h);
+  height: 100vh;
+  min-width: 0;
+  background: var(--bg);
+}
+
+/* ── Brand mark ─────────────────────────────────────────────────────── */
+
+.brand-mark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: none;
+}
+
+.brand-mark-text {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  color: var(--text);
+  line-height: 1;
+}
+
+/* The 2 carried as its own element so a real logo file can replace the
+   whole mark without touching a caller. */
+.brand-mark-two {
+  color: var(--text-mute);
+  font-weight: 500;
+}
+
+.brand-mark-sm .brand-mark-text { font-size: 15px; }
+.brand-mark-md .brand-mark-text { font-size: 20px; }
+.brand-mark-lg .brand-mark-text { font-size: 30px; }
+
+.brand-mark-full {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Toolbar ────────────────────────────────────────────────────────── */
+
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  min-width: 0;
+}
+
+.toolbar-back {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+}
+
+.toolbar-back:hover { color: var(--text); background: var(--accent-soft); }
+
+.toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  flex: none;
+}
+
+.toolbar-project-name {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  font-weight: 500;
+  padding: 5px 8px;
+  min-width: 140px;
+  max-width: 320px;
+}
+
+.toolbar-project-name:hover { border-color: var(--border); }
+.toolbar-project-name:focus { border-color: var(--border-strong); outline: none; }
+
+.toolbar-status {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+
+.toolbar-spacer { flex: 1; }
+
+.toolbar-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  white-space: nowrap;
+}
+
+.toolbar-metric-label {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-mute);
+}
+
+.toolbar-metric-value {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+/* Revenue is the only figure allowed emphasis; production spend stays
+   quiet so the two can never be mistaken for one number. */
+.toolbar-metric-value.is-customer { color: var(--text); }
+
+/* ── Stage: left panel + preview ────────────────────────────────────── */
+
+.editor-stage {
+  display: grid;
+  grid-template-columns: var(--left-panel-w) minmax(0, 1fr);
+  min-height: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.left-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+.left-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.left-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-mute);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 9px 4px;
+  cursor: pointer;
+}
+
+.left-tab:hover { color: var(--text-dim); }
+.left-tab.is-active { color: var(--text); border-bottom-color: var(--text); }
+
+.left-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.left-production { display: flex; flex-direction: column; gap: 14px; }
+
+/* ── Media browser ──────────────────────────────────────────────────── */
+
+.media-drop {
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 12px;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--text-mute);
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+
+.media-drop.is-active { border-color: var(--text); color: var(--text); }
+
+.media-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+
+.media-list li { display: flex; align-items: center; gap: 4px; }
+
+.media-item {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 5px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.media-item:hover { background: var(--accent-soft); }
+.media-item.is-selected { border-color: var(--border-strong); background: var(--accent-soft); }
+
+.media-item img {
+  width: 46px;
+  height: 30px;
+  object-fit: cover;
+  border-radius: 2px;
+  flex: none;
+  background: var(--bg-inset);
+}
+
+.media-item-text { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+
+.media-item-no { font-size: 9.5px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
+
+.media-item-name {
+  font-size: 11.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.media-item-room { font-size: 10px; color: var(--text-mute); }
+
+.media-remove {
+  background: none;
+  border: none;
+  color: var(--text-mute);
+  cursor: pointer;
+  font-size: 15px;
+  padding: 2px 5px;
+  border-radius: var(--radius);
+}
+
+.media-remove:hover { color: var(--err); background: var(--accent-soft); }
+
+.media-empty { font-size: 11.5px; color: var(--text-mute); padding: 8px 2px; }
+
+/* ── Preview stage ──────────────────────────────────────────────────── */
+
+.preview-stage {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px 14px 12px;
+  gap: 8px;
+}
+
+.preview-modes { display: flex; align-items: center; gap: 4px; flex: none; }
+
+.preview-mode {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--text-mute);
+  font-size: 11.5px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.preview-mode:hover:not(:disabled) { color: var(--text-dim); }
+.preview-mode.is-active { color: var(--text); border-color: var(--border-strong); background: var(--accent-soft); }
+.preview-mode:disabled { opacity: 0.35; cursor: default; }
+
+.preview-modes-spacer { flex: 1; }
+
+.preview-seam { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-mute); }
+
+.preview-seam select,
+.analysis-inline select,
+.analysis-edge-row select,
+.inspector-inline select {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 11.5px;
+  padding: 3px 6px;
+}
+
+/* The footage itself: pure black, the only true black in the app. */
+.preview-frame {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.preview-video,
+.preview-still {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.preview-video { cursor: pointer; }
+
+.preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  text-align: center;
+  padding: 20px;
+  max-width: 420px;
+}
+
+.preview-empty-title { font-size: 13px; color: var(--text-dim); }
+.preview-empty-body { font-size: 11.5px; line-height: 1.5; color: var(--text-mute); }
+
+.preview-transport { display: flex; align-items: center; gap: 10px; flex: none; }
+
+.preview-play {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+  width: 30px;
+  height: 26px;
+}
+
+.preview-play:disabled { opacity: 0.3; cursor: default; }
+
+.preview-scrub { flex: 1; accent-color: var(--text); }
+
+.preview-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.preview-stale,
+.preview-note {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  flex: none;
+}
+
+.linklike {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--text);
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: inherit;
+}
+
+/* ── Timeline ───────────────────────────────────────────────────────── */
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+
+.timeline-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 14px 4px;
+  flex: none;
+}
+
+.timeline-title {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+}
+
+.timeline-hint { font-size: 10.5px; color: var(--text-mute); }
+
+.timeline-track {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 14px 8px;
+}
+
+.timeline-empty { font-size: 12px; color: var(--text-mute); align-self: center; }
+
+.timeline-cell { display: flex; align-items: stretch; position: relative; flex: none; }
+
+.timeline-drop {
+  position: absolute;
+  left: -3px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: var(--text);
+}
+
+.timeline-image {
+  position: relative;
+  width: 108px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0;
+  cursor: grab;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+}
+
+.timeline-image:hover { border-color: var(--border-strong); }
+.timeline-image:active { cursor: grabbing; }
+
+.timeline-image img { width: 100%; height: 52px; object-fit: cover; background: var(--bg-inset); }
+
+.timeline-image-no {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.7);
+  padding: 0 4px;
+  border-radius: 2px;
+}
+
+.timeline-image-meta { display: flex; flex-direction: column; gap: 1px; padding: 4px 5px; min-width: 0; }
+
+.timeline-image-name {
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-image-room { font-size: 9.5px; color: var(--text-mute); }
+
+/* Transition blocks sit BETWEEN images and are visually narrower, so the
+   sequence reads as images joined by clips rather than a row of equals. */
+.timeline-transition {
+  width: 92px;
+  margin: 0 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 5px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-self: center;
+  text-align: left;
+}
+
+.timeline-transition:hover { border-color: var(--border-strong); }
+
+.timeline-transition.is-selected {
+  border-color: var(--text);
+  background: var(--accent-soft);
+}
+
+.timeline-transition-pair {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.timeline-transition-strip { display: block; height: 22px; border-radius: 2px; overflow: hidden; background: var(--bg-inset); }
+.timeline-transition-strip img { width: 100%; height: 100%; object-fit: cover; opacity: 0.75; }
+.timeline-transition-strip.is-blank { background: repeating-linear-gradient(45deg, var(--bg-inset), var(--bg-inset) 4px, rgba(255,255,255,0.03) 4px, rgba(255,255,255,0.03) 8px); }
+
+.timeline-transition-state {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9.5px;
+  color: var(--text-dim);
+}
+
+.timeline-transition-meta { font-size: 9px; color: var(--text-mute); }
+
+/* State is carried by the WORD next to this dot; the dot only reinforces. */
+.state-dot { width: 5px; height: 5px; border-radius: 50%; flex: none; background: var(--text-mute); }
+.state-dot-ready { background: var(--ok); }
+.state-dot-failed { background: var(--err); }
+.state-dot-busy { background: var(--info); }
+.state-dot-pending { background: var(--info); }
+.state-dot-missing { background: var(--text-mute); }
+
+.timeline-tail-drop { width: 24px; position: relative; flex: none; }
+
+/* ── Inspector ──────────────────────────────────────────────────────── */
+
+.inspector {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-raised);
+}
+
+.inspector-empty {
+  align-items: center;
+  justify-content: center;
+  color: var(--text-mute);
+  font-size: 12px;
+}
+
+.inspector-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.inspector-pair {
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.inspector-tabs { display: flex; gap: 2px; }
+
+.inspector-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-mute);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.inspector-tab:hover { color: var(--text-dim); }
+.inspector-tab.is-active { color: var(--text); border-bottom-color: var(--text); }
+
+.inspector-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 14px; }
+
+.inspector-motion,
+.inspector-generation,
+.inspector-clip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 26px;
+  align-items: flex-start;
+}
+
+.inspector-field { display: flex; flex-direction: column; gap: 2px; min-width: 150px; }
+
+.inspector-field-label {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-mute);
+}
+
+.inspector-field-value { font-size: 12px; color: var(--text); }
+
+.inspector-unknown {
+  border-left: 2px solid var(--border-strong);
+  padding-left: 10px;
+  max-width: 380px;
+}
+
+.inspector-unknown-title { font-size: 12px; color: var(--text); display: block; margin-bottom: 3px; }
+.inspector-unknown p { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--text-dim); }
+
+.inspector-planned { flex-basis: 100%; max-width: 640px; }
+.inspector-planned-label {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-mute);
+}
+.inspector-planned p { margin: 3px 0 0; font-size: 12px; line-height: 1.55; color: var(--text-dim); }
+
+.inspector-prompt { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 14px; }
+
+/* Grows on focus, never permanently. */
+.inspector-textarea {
+  width: 100%;
+  height: 96px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 8px 10px;
+  resize: none;
+  transition: height 0.14s ease;
+}
+
+.inspector-textarea:focus { height: 150px; border-color: var(--border-strong); outline: none; }
+
+.inspector-prompt-side { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+
+.inspector-hint { margin: 0; font-size: 11px; line-height: 1.45; color: var(--text-mute); }
+
+.inspector-inline { display: flex; flex-direction: column; gap: 2px; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-mute); }
+
+.inspector-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+.inspector-attempts { list-style: none; margin: 6px 0 0; padding: 0; flex-basis: 100%; }
+.inspector-attempts li { font-size: 11px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
+
+.inspector-note { margin: 0; padding: 4px 14px 8px; font-size: 11.5px; color: var(--text-dim); }
+
+/* ── Analysis workspace ─────────────────────────────────────────────── */
+
+.analysis-workspace { display: flex; flex-direction: column; gap: 12px; }
+
+.analysis-status-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+
+.analysis-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: var(--text-dim);
+}
+
+.analysis-status-ready { border-color: var(--border-strong); color: var(--text); }
+.analysis-status-needs-review { border-color: var(--info); color: var(--info); }
+
+.analysis-status-detail { font-size: 10.5px; color: var(--text-mute); }
+
+.analysis-pipeline {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-mute);
+  font-family: var(--font-mono);
+}
+
+.analysis-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+
+.analysis-hint { margin: 0; font-size: 10.5px; line-height: 1.45; color: var(--text-mute); }
+
+.analysis-review {
+  border: 1px solid var(--info);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.analysis-review-title { font-size: 11px; color: var(--text); }
+.analysis-review p { margin: 0; font-size: 11px; color: var(--text-dim); line-height: 1.45; }
+.analysis-review-actions { display: flex; gap: 6px; }
+
+.analysis-map { display: flex; flex-direction: column; gap: 4px; }
+
+.analysis-map-title {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-mute);
+}
+
+.scene-graph { width: 100%; height: auto; background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--radius); }
+.scene-node circle { fill: var(--text); }
+.scene-node text { fill: var(--text-dim); font-size: 8px; font-family: var(--font-body); }
+.scene-empty { fill: var(--text-mute); font-size: 9px; }
+
+/* Edge style IS the claim: solid = confirmed, dashed = probable. An
+   unknown relationship draws no edge at all — absence, not a faint line. */
+.scene-edge { stroke-width: 1; }
+.scene-edge-confirmed { stroke: var(--text-dim); }
+.scene-edge-probable { stroke: var(--text-mute); stroke-dasharray: 3 3; }
+
+.analysis-section { display: flex; flex-direction: column; gap: 5px; }
+
+.analysis-section-title {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-mute);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 3px;
+}
+
+.analysis-room-block { display: flex; flex-direction: column; gap: 2px; padding: 4px 0; }
+
+.analysis-room-label {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.analysis-room-label:hover { border-color: var(--border); }
+.analysis-room-label:focus { border-color: var(--border-strong); outline: none; }
+
+.analysis-room-images,
+.analysis-room-landmarks { font-size: 10.5px; color: var(--text-mute); padding-left: 4px; }
+
+.analysis-edge-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 11.5px; color: var(--text-dim); }
+.analysis-edge-name { flex: 1; min-width: 0; }
+
+.confidence {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-mute);
+}
+
+.confidence-confirmed { border-color: var(--border-strong); color: var(--text); }
+.confidence-probable { color: var(--text-dim); }
+
+.analysis-inline,
+.analysis-tagfield { display: flex; flex-direction: column; gap: 3px; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-mute); }
+
+.analysis-tagfield input {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 11.5px;
+  text-transform: none;
+  letter-spacing: 0;
+  padding: 4px 7px;
+}
+
+/* ── Export drawer ──────────────────────────────────────────────────── */
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 40;
+}
+
+.drawer {
+  width: 420px;
+  max-width: 92vw;
+  height: 100%;
+  background: var(--bg-raised);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  animation: drawer-in 0.16s ease;
+}
+
+@keyframes drawer-in {
+  from { transform: translateX(14px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.drawer-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); }
+
+.drawer-close { background: none; border: none; color: var(--text-dim); font-size: 20px; cursor: pointer; }
+.drawer-close:hover { color: var(--text); }
+
+.drawer-body { flex: 1; overflow-y: auto; padding: 12px; }
+
+/* ── Narrower desktops ──────────────────────────────────────────────── */
+
+@media (max-width: 1500px) {
+  :root { --left-panel-w: 260px; --inspector-h: 200px; }
+}
+
+@media (max-width: 1280px) {
+  :root { --left-panel-w: 232px; --timeline-h: 124px; --inspector-h: 190px; }
+  .toolbar-project-name { max-width: 190px; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   I2T BRAND MARK
+   ══════════════════════════════════════════════════════════════════════ */
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+  color: var(--text);
+}
+
+.brand-tone-light { color: var(--bg); }
+
+/* The wordmark: tight tracking so I-2-T reads as one object, with the 2
+   and T touching. The streak trails off the T. */
+.brand-word {
+  display: inline-flex;
+  align-items: baseline;
+  position: relative;
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.06em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.brand-i { opacity: 0.92; }
+
+/* Lighter, so the 2 reads as the hinge between the two letters rather
+   than a third equal character. */
+.brand-2 {
+  font-weight: 300;
+  opacity: 0.7;
+  margin: 0 -0.02em;
+}
+
+.brand-t { margin-left: -0.03em; }
+
+.brand-streak {
+  position: absolute;
+  left: 100%;
+  bottom: 0.14em;
+  margin-left: 0.16em;
+  height: 0.52em;
+  width: 1.5em;
+  color: currentColor;
+  pointer-events: none;
+}
+
+.brand-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+/* Generous tracking, uppercase, thin — the editorial half of the lockup. */
+.brand-name {
+  font-size: 0.44em;
+  text-transform: uppercase;
+  letter-spacing: 0.26em;
+  font-weight: 400;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.brand-tagline {
+  font-size: 0.34em;
+  text-transform: uppercase;
+  letter-spacing: 0.3em;
+  font-weight: 300;
+  color: var(--text-mute);
+  white-space: nowrap;
+}
+
+.brand-sm .brand-word { font-size: 17px; }
+.brand-md .brand-word { font-size: 23px; }
+.brand-lg .brand-word { font-size: 34px; }
+.brand-xl .brand-word { font-size: 56px; }
+
+.brand-sm .brand-lines,
+.brand-md .brand-lines,
+.brand-lg .brand-lines,
+.brand-xl .brand-lines { font-size: inherit; }
+
+.brand-sm { font-size: 17px; }
+.brand-md { font-size: 23px; }
+.brand-lg { font-size: 34px; }
+.brand-xl { font-size: 56px; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   A3 — FLATTER SURFACES
+   Cards, pills and boxed sections dialled back so the editor reads as
+   tooling: thin dividers, dark neutral grounds, restrained borders.
+   ══════════════════════════════════════════════════════════════════════ */
+
+.editor .btn {
+  border-radius: var(--radius);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+}
+
+.editor .btn-tiny { padding: 4px 9px; }
+
+/* Selected state is a ground change, not a coloured chip. */
+.editor .btn-ghost {
+  background: none;
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+
+.editor .btn-ghost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.editor .btn-primary {
+  background: var(--text);
+  color: var(--accent-ink);
+  border-color: var(--text);
+  font-weight: 500;
+}
+
+.editor .btn-primary:hover:not(:disabled) { background: #fff; border-color: #fff; }
+
+/* Panels inside the editor lose their card treatment entirely. */
+.editor .section-card {
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  padding: 12px 0 0;
+}
+
+.editor .section-card:first-child { border-top: none; padding-top: 0; }
+
+/* ── A4: NLE-style timeline ─────────────────────────────────────────── */
+
+.timeline-track {
+  /* Darker than the surrounding chrome — the track is a well, the way a
+     professional editor separates media from UI. */
+  background: var(--bg-inset);
+  border-top: 1px solid var(--border);
+  align-items: center;
+}
+
+.timeline-image,
+.timeline-transition {
+  /* Shared baseline: both block types centre on the same line so the
+     sequence reads as one strip rather than two rows of cards. */
+  align-self: center;
+  border-radius: 3px;
+}
+
+.timeline-image { height: 86px; }
+.timeline-transition { height: 74px; justify-content: space-between; }
+
+/* The selection is unmistakable: a bright left edge, like a playhead
+   anchored to the clip, plus a lifted ground. */
+.timeline-transition.is-selected {
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 2px 0 0 var(--text);
+}
+
+.timeline-transition:focus-visible { outline: 1px solid var(--text); outline-offset: 1px; }
+
+/* ── A5: preview chrome recedes ─────────────────────────────────────── */
+
+.preview-frame { border-color: rgba(255, 255, 255, 0.05); border-radius: 3px; }
+
+.preview-mode {
+  border-radius: 3px;
+  letter-spacing: 0.03em;
+}
+
+.preview-transport { gap: 12px; padding: 0 2px; }
+
+.preview-play { border-radius: 3px; }
+
+/* ── A6: inspector as a control surface ────────────────────────────── */
+
+.inspector-body { padding: 12px 16px; }
+
+.inspector-field {
+  border-left: 1px solid var(--border);
+  padding-left: 10px;
+}
+
+.inspector-field:first-child { border-left: none; padding-left: 0; }
+
+.inspector-field-label { letter-spacing: 0.09em; }
+
+.inspector-textarea { border-radius: 3px; }
+
+/* ── Analyzer + plan review ─────────────────────────────────────────── */
+
+.analysis-analyzer {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.analysis-analyzer-meta {
+  font-size: 10.5px;
+  color: var(--text-mute);
+  padding-bottom: 4px;
+}
+
+.analysis-diff {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.analysis-diff .is-loss { color: var(--err); }
+
+.plan-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.plan-row:last-child { border-bottom: none; }
+
+.plan-pair {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text);
+  min-width: 34px;
+}
+
+.plan-relation { color: var(--text); }
+
+.plan-nav {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+  color: var(--text-mute);
+}
+
+.plan-nav.is-allowed { border-color: var(--border-strong); color: var(--text); }
+
+.plan-landmarks,
+.plan-motion { flex-basis: 100%; font-size: 10.5px; color: var(--text-mute); line-height: 1.45; }
+
+/* A review, not the evidence, is what closed this transition down — worth
+   saying, because the operator can reverse their own verdict. */
+.plan-review-block {
+  flex-basis: 100%;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--warn);
+}
+
+/* ── Ground-truth review ──────────────────────────────────────────────
+   A dense tool, not a questionnaire. One line per fact, three glyph
+   buttons, and a running tally in the header that is legible without
+   opening anything. */
+
+.review-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+}
+
+.review-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-mute);
+}
+
+.review-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: var(--text-dim);
+}
+
+.review-counts { color: var(--text); }
+
+.review-tally { display: flex; gap: 7px; font-variant-numeric: tabular-nums; }
+.review-tally-correct { color: var(--ok); }
+.review-tally-incorrect { color: var(--err); }
+.review-tally-unsure { color: var(--warn); }
+
+.review-accuracy {
+  margin-left: auto;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A percentage of four facts is noise. Dimmed, and the caveat below says
+   so in words rather than leaving it to be inferred from a tint. */
+.review-accuracy.is-weak { color: var(--text-mute); font-style: italic; }
+
+.review-caveat,
+.review-note {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-mute);
+}
+
+.review-warning {
+  margin: 0 0 6px;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--warn);
+}
+
+.review-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.review-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+}
+
+.review-row:last-child { border-bottom: none; }
+
+.review-row-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.review-row.verdict-correct .review-row-label,
+.review-row.verdict-incorrect .review-row-label,
+.review-row.verdict-unsure .review-row-label { color: var(--text); }
+
+/* Confirmed connections are what license driving the camera through a
+   doorway. If one of those is wrong the video walks through a wall, so
+   they are marked out from the image assignments around them. */
+.review-risk-dot { margin-right: 5px; font-size: 7px; color: var(--warn); vertical-align: middle; }
+
+.review-verdicts { display: flex; gap: 2px; }
+
+.review-vote {
+  width: 20px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-mute);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.review-vote:hover { border-color: var(--border-strong); color: var(--text); }
+
+.review-vote-correct.is-active { border-color: var(--ok); color: var(--ok); }
+.review-vote-incorrect.is-active { border-color: var(--err); color: var(--err); }
+.review-vote-unsure.is-active { border-color: var(--warn); color: var(--warn); }
+
+.cost-categories {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cost-category {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-category.is-total { color: var(--text); padding-top: 3px; }
+
+.analyzer-roadmap {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.analyzer-roadmap li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+}
+
+.analyzer-roadmap li:last-child { border-bottom: none; }
+
+.analyzer-roadmap-name { flex: 1; color: var(--text); }
+.analyzer-roadmap-provider { font-family: var(--font-mono); font-size: 10px; color: var(--text-mute); }
+
+.analyzer-roadmap-state {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-mute);
+}
+
+.analyzer-roadmap li.is-planned { opacity: 0.55; }
+.analyzer-roadmap li.is-available .analyzer-roadmap-state { color: var(--text-dim); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   EDITOR SIMPLIFICATION
+   ═══════════════════════════════════════════════════════════════════════
+   The normal flow is: add images → arrange → analyze → review problems →
+   generate → export. Everything below serves that path; the expert
+   surfaces are styled to recede, not to compete with it.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── Project readiness ────────────────────────────────────────────────
+   A readout, never a gate. Nothing here disables anything. */
+
+.readiness {
+  flex: none;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-inset);
+}
+
+.readiness-title {
+  display: block;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--text-mute);
+  margin-bottom: 5px;
+}
+
+.readiness-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+
+.readiness-step {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--text-mute);
+  line-height: 1.4;
+}
+
+.readiness-step.is-done { color: var(--text-dim); }
+.readiness-step.is-done .readiness-mark { color: var(--ok); }
+.readiness-step.is-attention .readiness-mark { color: var(--warn); }
+.readiness-step.is-todo .readiness-mark { color: var(--text-mute); }
+
+/* The one worth doing next. Emphasis only — the others stay clickable
+   and nothing is withheld until this one is finished. */
+.readiness-step.is-next { color: var(--text); }
+
+.readiness-mark { width: 10px; flex: none; font-size: 10px; }
+.readiness-label { flex: 1; min-width: 0; }
+
+.readiness-hint {
+  margin: 5px 0 0;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--text-mute);
+}
+
+/* ── Property Analysis summary ────────────────────────────────────────
+   Two sentences and three buttons. The detail is behind Advanced. */
+
+.analysis-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-inset);
+}
+
+.analysis-summary-head {
+  font-family: var(--font-display);
+  font-size: 14px;
+  color: var(--text);
+}
+
+.analysis-summary-sub { font-size: 11.5px; color: var(--text-dim); line-height: 1.45; }
+
+.analysis-counts { list-style: none; margin: 3px 0 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.analysis-counts li { font-size: 11px; color: var(--text-mute); }
+.analysis-counts strong { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+.analysis-counts li.is-warn strong { color: var(--warn); }
+
+.analysis-summary-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+
+.analysis-summary-meta {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-mute);
+}
+
+/* ── Issue list ───────────────────────────────────────────────────────
+   Resolving warnings, the way professional software presents them:
+   a list you click into, not a form you fill in. */
+
+.issue-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+
+.issue-row {
+  width: 100%;
+  display: flex;
+  gap: 8px;
+  text-align: left;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: inherit;
+  cursor: pointer;
+}
+
+.issue-row:hover { border-color: var(--border-strong); }
+.issue-row.is-warning { border-left: 2px solid var(--warn); }
+.issue-row.is-info { border-left: 2px solid var(--border-strong); }
+
+.issue-icon { flex: none; font-size: 11px; color: var(--text-mute); }
+.issue-row.is-warning .issue-icon { color: var(--warn); }
+
+.issue-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.issue-title { font-size: 11.5px; color: var(--text); }
+.issue-detail { font-size: 10.5px; color: var(--text-mute); line-height: 1.45; }
+
+/* ── Advanced / Fine Tune ─────────────────────────────────────────────
+   Complete, reachable, and deliberately quieter than the summary. */
+
+.analysis-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
+.analysis-disclosure {
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.inspector-tab.is-advanced { color: var(--text-mute); }
+
+/* ── Provenance badges ────────────────────────────────────────────────
+   An analyzer's guess and a person's correction read identically as
+   text. Confusing the two is how a manual fix gets silently reverted. */
+
+.source-tag,
+.override-badge {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 8.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-mute);
+  white-space: nowrap;
+}
+
+.source-tag.is-manual,
+.override-badge { border-color: var(--warn); color: var(--warn); }
+.source-tag.is-none { opacity: 0.7; }
+
+/* ── Required / optional hierarchy ────────────────────────────────────
+   Nothing in the editor is Required today — the safety rules enforce
+   themselves in the planner rather than through a form. The tag exists
+   so an optional field can SAY it is optional rather than looking like
+   work owed. */
+
+.req-tag {
+  margin-left: 6px;
+  font-size: 8.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.req-optional { color: var(--text-mute); }
+.req-recommended { color: var(--warn); }
+
+/* ── Image inspector ──────────────────────────────────────────────────*/
+
+.inspector-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 14px;
+  width: 100%;
+}
+
+.inspector-span { flex-basis: 100%; }
+
+.review-vote-wide { width: auto; padding: 0 8px; font-size: 10px; }
+
+/* ── Preview ──────────────────────────────────────────────────────────*/
+
+/* What the preview is SHOWING, stated. Not a control that can disagree
+   with the timeline — that disagreement was the old four-mode row. */
+.preview-context {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  padding: 4px 8px 4px 0;
+  border-right: 1px solid var(--border);
+  margin-right: 6px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-context-image { color: var(--text); }
+
+/* `contain`, always. A property photo stretched to the frame
+   misrepresents the room it shows. */
+.preview-still { width: 100%; height: 100%; object-fit: contain; }
+
+.preview-endpoints {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 12px;
+}
+
+.preview-endpoints figure { margin: 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.preview-endpoints img { max-width: 100%; max-height: 40vh; object-fit: contain; border: 1px solid var(--border); }
+.preview-endpoints figcaption { font-size: 10px; color: var(--text-mute); text-align: center; }
+
+/* ── Timeline blocks ──────────────────────────────────────────────────
+   Images larger than transitions: the photograph must be recognisable
+   at a glance, the transition only has to be identifiable. */
+
+.timeline-image { width: 124px; height: 96px; }
+.timeline-image img { height: 62px; }
+.timeline-transition { width: 84px; }
+
+.timeline-image.is-selected {
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 2px 0 0 var(--text);
+}
+
+.timeline-image:focus-visible { outline: 1px solid var(--text); outline-offset: 1px; }
+
+/* The block being dragged fades so the insertion marker is what the eye
+   follows, not the block leaving the gap. */
+.timeline-cell.is-dragging { opacity: 0.4; }
+
+.timeline-drop {
+  /* Wider and brighter than the old hairline — during a drag this is the
+     only thing that answers "where will it land?". */
+  width: 3px;
+  left: -4px;
+  background: var(--text);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.4);
+  z-index: 2;
+}
+
+.timeline-tail-drop { position: relative; flex: none; width: 28px; }
+
+.timeline-image-warn,
+.timeline-transition-warn {
+  color: var(--warn);
+  font-size: 10px;
+}
+
+.timeline-image-warn {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+
+.timeline-transition-warn { margin-left: 4px; }

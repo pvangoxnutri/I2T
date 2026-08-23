@@ -1,3 +1,6 @@
+import { useAppState } from '../state/AppState'
+import { BrandMark } from './common/Brand'
+
 export type NavSection = 'projects' | 'queue' | 'settings'
 
 const NAV_ITEMS: { key: NavSection; label: string; hint: string; icon: React.JSX.Element }[] = [
@@ -44,18 +47,21 @@ export function Sidebar({
   active: NavSection
   onNavigate: (section: NavSection) => void
 }): React.JSX.Element {
+  const { settings } = useAppState()
+  // Paid-mode indicator for whichever provider is ACTIVE.
+  const providerId = settings.activeProviderId ?? settings.providers[0]?.id
+  const provider = settings.providers.find((p) => p.id === providerId) ?? settings.providers[0]
+  const lockOn =
+    provider?.id === 'fal'
+      ? settings.production.allowLiveFalRequests
+      : settings.production.allowLiveKlingRequests
+  const liveActive = Boolean(lockOn && provider?.mode === 'live')
+  const liveLabel = provider?.id === 'fal' ? '● fal.ai Live' : '● Kling Live'
+
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        <div className="sidebar-brand-mark" aria-hidden>
-          <span>F</span>
-          <span className="sidebar-brand-arrow">→</span>
-          <span>F</span>
-        </div>
-        <div className="sidebar-brand-text">
-          <span className="sidebar-brand-name">FrameToFrame</span>
-          <span className="sidebar-brand-tag">Property Video Studio</span>
-        </div>
+        <BrandMark variant="full" size="md" />
       </div>
 
       <nav className="sidebar-nav">
@@ -76,6 +82,12 @@ export function Sidebar({
       </nav>
 
       <div className="sidebar-footer">
+        {/* Subtle but unmistakable: paid API mode is on. */}
+        {liveActive && (
+          <span className="live-indicator" title="Live mode — paid API requests are enabled">
+            {liveLabel}
+          </span>
+        )}
         <span className="sidebar-version">v0.1.0 · local preview</span>
       </div>
     </aside>

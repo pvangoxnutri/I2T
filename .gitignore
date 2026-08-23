@@ -1,5 +1,77 @@
+# ── Dependencies & build output ──────────────────────────────────────
 node_modules/
 out/
 dist/
+dist-electron/
+release/
+*.tsbuildinfo
+
+# ── Secrets ──────────────────────────────────────────────────────────
+#
+# No API key is ever read from a file: keys live only in the settings row
+# inside the userData database, written through a write-only IPC channel
+# and never returned across the bridge. These patterns exist so a key
+# cannot be introduced here by accident later, not because one is
+# expected now.
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+secrets.json
+credentials.json
+
+# ── Local application data ───────────────────────────────────────────
+#
+# The real store lives in Electron's userData directory, OUTSIDE this
+# repository — %APPDATA%/frametoframe on Windows. These patterns catch a
+# stray copy dragged in for debugging: the database holds provider API
+# keys in its settings row, and the project folders hold the customer's
+# own property photographs and generated video.
+*.db
+*.db.tmp
+*.sqlite
+*.sqlite3
+frametoframe.db*
+userData/
+projects/
+exports/
+
+# ── Generated & customer media ───────────────────────────────────────
+#
+# Property photographs belong to the customer whose home they show, and
+# generated clips cost real money to produce. Neither belongs in a public
+# repository. Repository-owned assets under src/ and build/ are allowed
+# back in explicitly.
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.heic
+!src/**/*.png
+!src/**/*.svg
+!build/**/*.png
+!build/**/*.ico
+
+# ── Logs, temp and scratch ───────────────────────────────────────────
 *.log
+npm-debug.log*
+*.tmp
+*.tmp.js
+*.tmp.ts
+tmp/
+scratch/
+.cache/
+
+# ── Editor & OS ──────────────────────────────────────────────────────
 .DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+*.swp
+.vscode/*
+!.vscode/extensions.json
