@@ -12,6 +12,7 @@ import { listProjects, saveProject } from '../db/projectsRepo'
 import { readAnalysis } from '../db/analysisRepo'
 import { listOverrides } from '../db/overrideRepo'
 import { applyImageOverrides } from '../../shared/imageFacts'
+import { resolveTransitionMode } from '../../shared/transitionMode'
 import { logicalTransitionCount, logicalTransitions } from '../../shared/logicalTransitions'
 import { getSettingsJson } from '../db/projectsRepo'
 import type { AppSettings } from '../../shared/types'
@@ -88,6 +89,7 @@ export function planPromptRebuild(projectId: string): RebuildPlanSummary {
     rebuildable: [],
     preserved: [],
     unchanged: [],
+    skipped: [],
     logicalTransitionCount: 0,
     hasAnalysis: false,
     analysisIsMock: false
@@ -103,6 +105,7 @@ export function planPromptRebuild(projectId: string): RebuildPlanSummary {
   const rebuildable: RebuildPlanSummary['rebuildable'] = []
   const preserved: RebuildPlanSummary['preserved'] = []
   const unchanged: RebuildPlanSummary['unchanged'] = []
+  const skipped: RebuildPlanSummary['skipped'] = []
 
   // ── EVERY LOGICAL TRANSITION ─────────────────────────────────────────
   //
@@ -112,6 +115,21 @@ export function planPromptRebuild(projectId: string): RebuildPlanSummary {
   // all — not as unchanged, not as preserved, just gone. Absence of a row
   // means unconfigured, never non-existent.
   for (const t of logicalTransitions(project, defaultDurationSec())) {
+    // ── A CUT HAS NO PROMPT ───────────────────────────────────────────
+    //
+    // No video is generated for it, so planning motion wording would
+    // create a row purely to hold text nothing will ever read — and would
+    // report work the operator is not doing.
+    const effective = resolveTransitionMode(
+      t.persisted?.mode ?? 'auto',
+      plans[t.position] ?? null,
+      Boolean(t.persisted?.clip)
+    ).effectiveMode
+    if (effective !== 'ai') {
+      skipped.push({ pairKey: t.pairKey, label: t.label, mode: effective })
+      continue
+    }
+
     if (!canRebuildPrompt(t.persisted?.promptProvenance)) {
       preserved.push({ pairKey: t.pairKey, label: t.label })
       continue
@@ -141,6 +159,7 @@ export function planPromptRebuild(projectId: string): RebuildPlanSummary {
     rebuildable,
     preserved,
     unchanged,
+    skipped,
     logicalTransitionCount: logicalTransitionCount(project),
     hasAnalysis,
     // A placeholder structure is not a spatial map. Rebuilding every
@@ -180,6 +199,15 @@ export function rebuildPromptsFromAnalysis(projectId: string): RebuildResult {
   // thirty-image project rebuild two prompts and silently leave 27
   // untouched — see the note in shared/logicalTransitions.ts.
   for (const t of logicalTransitions(project, defaultDurationSec())) {
+    // A cut or a crossfade generates no video, so it needs no prompt and
+    // gets no row created for one.
+    if (
+      resolveTransitionMode(t.persisted?.mode ?? 'auto', plans[t.position] ?? null, Boolean(t.persisted?.clip))
+        .effectiveMode !== 'ai'
+    ) {
+      continue
+    }
+
     if (!canRebuildPrompt(t.persisted?.promptProvenance)) {
       preservedCount++
       continue

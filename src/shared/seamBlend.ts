@@ -78,6 +78,28 @@ export interface SeamPlanInput {
   durationsSec: number[]
   blend: SeamBlend
   fps: number
+  /**
+   * Per-boundary seam length in seconds, overriding `blend` (length n−1).
+   *
+   * ── WHY PER-SEAM ─────────────────────────────────────────────────────
+   *
+   * Once a sequence can mix AI clips with cuts and crossfades, one global
+   * blend is no longer enough: a CUT must be exactly 0 whatever the
+   * project setting says, and a CROSSFADE must be its own length. Passing
+   * the durations in keeps this function the single owner of the timeline
+   * arithmetic instead of growing a second one beside it.
+   *
+   * `null` at a position means "use the project blend".
+   */
+  seamOverrideSec?: (number | null)[]
+  /**
+   * Segments that must NOT be trimmed at their edges (length n).
+   *
+   * The one-frame trim exists to remove a duplicated key frame where two
+   * generated clips meet. A held still has no such frame — trimming it
+   * would just make the hold shorter for no reason.
+   */
+  noTrim?: boolean[]
 }
 
 export interface SeamPlan {
@@ -119,16 +141,29 @@ export function planSeams(input: SeamPlanInput): SeamPlan {
   const trimStartSec = new Array<number>(n).fill(0)
   const trimEndSec = new Array<number>(n).fill(0)
 
-  if (requested > 0 && n > 1) {
+  const override = input.seamOverrideSec
+  /** What is asked for at boundary i, before any clamping. */
+  const wanted = (i: number): number => {
+    const o = override?.[i]
+    return o === null || o === undefined ? requested : o
+  }
+  const anyWanted = n > 1 && Array.from({ length: n - 1 }, (_, i) => wanted(i)).some((s) => s > 0)
+
+  if (anyWanted) {
     const trim = SEAM_TRIM_FRAMES * frame
     for (let i = 0; i < n; i++) {
+      if (input.noTrim?.[i]) continue
       const dur = durationsSec[i]
-      // Only trim at a real seam, and only when the clip can spare it.
-      // Two trims plus a seam must still leave most of the clip intact.
-      const canSpare = dur > (requested + trim * 2) * 2
-      if (!canSpare) continue
-      if (i > 0) trimStartSec[i] = ms(trim)
-      if (i < n - 1) trimEndSec[i] = ms(trim)
+      // Trim only at a boundary that actually blends. A hard cut needs no
+      // frame removed, and removing one would shorten the segment for
+      // nothing.
+      const blendsBefore = i > 0 && wanted(i - 1) > 0
+      const blendsAfter = i < n - 1 && wanted(i) > 0
+      const biggest = Math.max(blendsBefore ? wanted(i - 1) : 0, blendsAfter ? wanted(i) : 0)
+      // Two trims plus a seam must still leave most of the segment intact.
+      if (dur <= (biggest + trim * 2) * 2) continue
+      if (blendsBefore) trimStartSec[i] = ms(trim)
+      if (blendsAfter) trimEndSec[i] = ms(trim)
     }
   }
 
@@ -136,14 +171,17 @@ export function planSeams(input: SeamPlanInput): SeamPlan {
 
   const seamSec: number[] = []
   for (let i = 0; i < n - 1; i++) {
-    if (requested <= 0) {
+    const want = wanted(i)
+    if (want <= 0) {
+      // A HARD CUT. Exactly zero — never a short fade, and never a gap
+      // that could show through as a black frame.
       seamSec.push(0)
       continue
     }
-    // A seam may never be longer than a large fraction of either clip it
-    // joins — otherwise xfade would eat the whole shorter clip.
+    // A seam may never be longer than a large fraction of either segment
+    // it joins — otherwise xfade would eat the whole shorter one.
     const shorter = Math.min(effectiveSec[i], effectiveSec[i + 1])
-    seamSec.push(ms(Math.min(requested, shorter * 0.4)))
+    seamSec.push(ms(Math.min(want, shorter * 0.4)))
   }
 
   // Running xfade output length: A⊕B lasts durA + durB − seam.

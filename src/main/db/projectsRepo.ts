@@ -4,6 +4,7 @@ import type {
   BrandSignature,
   ClipSource,
   Project,
+  TransitionMode,
   TransitionSettings
 } from '../../shared/types'
 import type { PromptPlanBasis } from '../../shared/promptPlanner'
@@ -76,6 +77,7 @@ interface TransitionRow {
   prompt_manually_edited: number | null
   prompt_planned_at: number | null
   prompt_analysis_at: number | null
+  mode: string | null
 }
 
 export function listProjects(): Project[] {
@@ -134,6 +136,8 @@ export function listProjects(): Project[] {
             prompt: t.prompt,
             durationSec: t.duration_sec,
             status: t.status,
+            // NULL is `auto`: never configured, so the evidence decides.
+            mode: (t.mode ?? 'auto') as TransitionMode,
             clip: t.clip_name
               ? {
                   storedName: t.clip_name,
@@ -219,8 +223,8 @@ export function saveProject(project: Project): void {
             clip_name, clip_original_name, clip_source,
             prompt_base, prompt_motion, prompt_effective, prompt_basis,
             prompt_rationale, prompt_manually_edited, prompt_planned_at,
-            prompt_analysis_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            prompt_analysis_at, mode)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           project.id,
           pairKey,
@@ -237,7 +241,12 @@ export function saveProject(project: Project): void {
           t.promptProvenance?.rationale ?? null,
           t.promptProvenance?.manuallyEdited ? 1 : 0,
           t.promptProvenance?.plannedAt ?? null,
-          t.promptProvenance?.analysisUpdatedAt ?? null
+          t.promptProvenance?.analysisUpdatedAt ?? null,
+          // NULL means `auto` — nobody has decided, and the evidence does.
+          // Storing 'auto' explicitly would be indistinguishable from a
+          // deliberate choice, and re-analysis must be free to revisit one
+          // but never the other.
+          t.mode && t.mode !== 'auto' ? t.mode : null
         ]
       )
     }

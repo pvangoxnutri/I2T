@@ -9,6 +9,7 @@ import { PropertyAnalysisPanel } from './PropertyAnalysisPanel'
 import { ProductionCostPanel } from './ProductionCostPanel'
 import { ProductionPanel } from './ProductionPanel'
 import { ProjectReadiness } from './ProjectReadiness'
+import { tallyModes, type ResolvedModeRow } from '../../../../shared/transitionMode'
 
 type PanelTab = 'media' | 'analysis' | 'production'
 
@@ -26,12 +27,15 @@ export function LeftPanel({
   project,
   analysis,
   selection,
+  modes,
   onSelect,
   onAnalysisChange
 }: {
   project: Project
   analysis: PropertyAnalysis | null
   selection: EditorSelection
+  /** How each transition will behave, so readiness counts only real work. */
+  modes: ResolvedModeRow[]
   onSelect: (selection: EditorSelection) => void
   onAnalysisChange: () => void
 }): React.JSX.Element {
@@ -52,7 +56,7 @@ export function LeftPanel({
 
   return (
     <aside className="left-panel">
-      <ProjectReadiness project={project} summary={summary} />
+      <ProjectReadiness project={project} summary={summary} tally={tallyModes(modes)} />
 
       <nav className="left-tabs" role="tablist">
         {(

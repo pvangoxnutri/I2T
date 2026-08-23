@@ -418,6 +418,22 @@ const MIGRATIONS: Migration[] = [
         CREATE INDEX idx_image_overrides ON image_overrides(project_id);
       `)
     }
+  },
+  {
+    /**
+     * Transition type: generated, cut or dissolved.
+     *
+     * NULL is the important value here and means `auto` — the transition
+     * has never been configured and the spatial evidence decides. Every
+     * row written before this column existed reads as NULL, which is
+     * exactly right: nobody chose anything for them.
+     *
+     * A stored value is a DECISION, and re-analysis never overwrites one.
+     */
+    version: 14,
+    up: (db) => {
+      db.run(`ALTER TABLE transitions ADD COLUMN mode TEXT`)
+    }
   }
 ]
 

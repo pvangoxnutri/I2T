@@ -107,9 +107,33 @@ export function probeDurationSec(file: string): number {
 
 // ── Assembly ─────────────────────────────────────────────────────────────
 
+/**
+ * One piece of the output timeline.
+ *
+ * A generated clip, or a still photograph held for a duration. Stills
+ * exist so a CUT sequence can put an image on screen that no clip covers —
+ * see shared/assemblyPlan.ts, which decides where they are needed.
+ */
+export interface AssembleSegment {
+  kind: 'clip' | 'still'
+  path: string
+  /** Stills only: how long to hold. Clips are probed. */
+  holdSeconds?: number
+}
+
 export interface AssembleOptions {
   /** Ordered clip paths — image-sequence order, N-1 clips for N images. */
   clipPaths: string[]
+  /**
+   * Mixed timeline, when the project has cuts or crossfades.
+   *
+   * Takes precedence over `clipPaths`. Supplied together with
+   * `seamOverrideSec` so a cut is exactly zero and a crossfade is its own
+   * length, whatever the project's seam setting says.
+   */
+  segments?: AssembleSegment[]
+  /** Per-boundary seam seconds (length segments − 1). */
+  seamOverrideSec?: (number | null)[]
   defaults: ExportDefaults
   /** Full-frame transparent PNG overlays, applied bottom-up in order
    * (watermark first, signature last so it stays on top). */
@@ -139,14 +163,37 @@ export function assemble(options: AssembleOptions): AssembleHandle {
   const fps = defaults.fps
   const blend: SeamBlend = options.seamBlend ?? defaults.seamBlend ?? 'subtle'
 
-  const durations = clipPaths.map((p) => probeDurationSec(p))
-  const plan = planSeams({ durationsSec: durations, blend, fps })
+  // A plain clip list is the ordinary case and stays exactly as it was.
+  // Segments are used only when the project mixes cuts or crossfades in.
+  const segments: AssembleSegment[] =
+    options.segments ?? clipPaths.map((path) => ({ kind: 'clip' as const, path }))
+
+  const durations = segments.map((s) =>
+    s.kind === 'still' ? (s.holdSeconds ?? 1.5) : probeDurationSec(s.path)
+  )
+  const plan = planSeams({
+    durationsSec: durations,
+    blend,
+    fps,
+    seamOverrideSec: options.seamOverrideSec,
+    // A held still has no duplicated key frame to remove, so trimming one
+    // would only shorten the hold.
+    noTrim: segments.map((s) => s.kind === 'still')
+  })
   // Progress is measured against the OUTPUT timeline, which is shorter than
   // the sum of inputs once seams overlap.
   const totalSec = plan.totalSec > 0 ? plan.totalSec : durations.reduce((s, d) => s + d, 0)
 
   const args: string[] = ['-y', '-hide_banner']
-  for (const clip of clipPaths) args.push('-i', clip)
+  for (const segment of segments) {
+    if (segment.kind === 'still') {
+      // A looped image for a fixed duration. `-t` before `-i` bounds the
+      // input itself, so the still can never run forever if a downstream
+      // filter changes.
+      args.push('-loop', '1', '-framerate', String(fps), '-t', String(segment.holdSeconds ?? 1.5))
+    }
+    args.push('-i', segment.path)
+  }
   for (const overlay of overlayPngPaths) args.push('-i', overlay)
 
   // Per-clip normalization so heterogeneous clips can be joined safely.
@@ -155,7 +202,7 @@ export function assemble(options: AssembleOptions): AssembleHandle {
   // makes seamless mode work on mixed-resolution sources.
   const chains: string[] = []
   const labels: string[] = []
-  clipPaths.forEach((_, i) => {
+  segments.forEach((_, i) => {
     // Trim the duplicated key frame at each seam BEFORE blending, so a clip
     // that eases to a stop on its last frame does not stack that hold on
     // top of the next clip's identical first frame. `setpts` rebases the
@@ -168,35 +215,57 @@ export function assemble(options: AssembleOptions): AssembleHandle {
         : ''
     chains.push(
       `[${i}:v]${trimmed}scale=${w}:${h}:force_original_aspect_ratio=decrease,` +
-        `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p[v${i}]`
+        `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},` +
+        // A COMMON TIMEBASE. A looped still enters the graph with a
+        // different one from a decoded video, and xfade refuses to join
+        // two inputs whose timebases disagree — "does not match the
+        // corresponding second input link xfade timebase". Concat is more
+        // forgiving, which is why this only surfaced once cuts and
+        // crossfades put stills and clips in the same timeline.
+        `settb=1/${fps},format=yuv420p[v${i}]`
     )
     labels.push(`[v${i}]`)
   })
 
-  if (plan.blended && clipPaths.length > 1) {
+  if (plan.blended && segments.length > 1) {
     // SEAMLESS: chain xfade across the sequence. Each step consumes the
-    // running result and the next clip, so the offsets come from the
+    // running result and the next segment, so the offsets come from the
     // accumulated output timeline, not from the raw input durations.
+    //
+    // A seam of 0 is a HARD CUT. xfade with duration=0 is not reliable, so
+    // those boundaries concat instead — which is what a cut is, and leaves
+    // no gap for a black frame to appear in.
     let previous = 'v0'
-    for (let i = 0; i < clipPaths.length - 1; i++) {
-      const out = i === clipPaths.length - 2 ? 'cat' : `xf${i}`
-      chains.push(
-        `[${previous}][v${i + 1}]xfade=transition=fade:` +
-          `duration=${plan.seamSec[i]}:offset=${plan.offsetSec[i]}[${out}]`
-      )
+    for (let i = 0; i < segments.length - 1; i++) {
+      const out = i === segments.length - 2 ? 'cat' : `xf${i}`
+      // `settb` is re-applied to every intermediate result: xfade takes
+      // its output timebase from its first input, so the running chain can
+      // drift away from the normalized segments it is about to be joined
+      // with, and the next xfade then refuses the pair.
+      if (plan.seamSec[i] > 0) {
+        chains.push(
+          `[${previous}][v${i + 1}]xfade=transition=fade:` +
+            `duration=${plan.seamSec[i]}:offset=${plan.offsetSec[i]},` +
+            `settb=1/${fps},setpts=PTS-STARTPTS[${out}]`
+        )
+      } else {
+        chains.push(
+          `[${previous}][v${i + 1}]concat=n=2:v=1:a=0,settb=1/${fps},setpts=PTS-STARTPTS[${out}]`
+        )
+      }
       previous = out
     }
   } else {
     // PLAIN CONCAT — the original path, kept intact as the fallback for
-    // 'off', for single-clip exports, and for any clip set too short to
+    // 'off', for single-segment exports, and for any set too short to
     // give a seam away.
-    chains.push(`${labels.join('')}concat=n=${clipPaths.length}:v=1:a=0[cat]`)
+    chains.push(`${labels.join('')}concat=n=${segments.length}:v=1:a=0[cat]`)
   }
 
   // Overlays are pre-rendered full-frame PNGs → always composited at 0:0.
   let current = 'cat'
   overlayPngPaths.forEach((_, idx) => {
-    const inputIndex = clipPaths.length + idx
+    const inputIndex = segments.length + idx
     const next = `ov${idx}`
     chains.push(`[${current}][${inputIndex}:v]overlay=0:0:format=auto[${next}]`)
     current = next

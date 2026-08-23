@@ -5,6 +5,7 @@ import { SEAM_SECONDS, type SeamBlend } from '../../../../shared/seamBlend'
 import type { EditorSelection, PreviewMode } from '../../../../shared/editorSelection'
 import { resolvePreviewSource, statusWordFor } from '../../../../shared/previewSource'
 import type { TransitionRecovery } from '../../../../shared/transitionRecovery'
+import { MODE_LABEL, type ResolvedModeRow } from '../../../../shared/transitionMode'
 
 export type { PreviewMode }
 
@@ -50,6 +51,7 @@ export function PreviewStage({
   onShowFullVideo,
   onRecover,
   recovery,
+  transitionMode,
   generating = false
 }: {
   project: Project
@@ -65,6 +67,8 @@ export function PreviewStage({
   onRecover?: () => void
   /** What to offer for the selected transition, decided in `shared`. */
   recovery?: TransitionRecovery | null
+  /** How the selected transition will behave — generated, cut, dissolved. */
+  transitionMode?: ResolvedModeRow | null
   generating?: boolean
 }): React.JSX.Element {
   const { settings, updateSettings } = useAppState()
@@ -111,6 +115,8 @@ export function PreviewStage({
   const src =
     source.kind === 'clip' ? source.src : source.kind === 'full' ? source.src : null
   const stillSrc = source.kind === 'image' ? source.src : null
+  // Only an AI transition has anything to generate or recover.
+  const aiMode = !transitionMode || transitionMode.effectiveMode === 'ai'
 
   // Reset transport state whenever the source changes.
   useEffect(() => {
@@ -235,34 +241,50 @@ export function PreviewStage({
               <span
                 className={`preview-endpoints-status${source.status === 'failed' ? ' is-failed' : ''}`}
               >
-                {source.status === 'failed'
-                  ? `Transition ${source.index + 1} → ${source.index + 2} failed`
-                  : statusWordFor(source.status)}
+                {transitionMode && transitionMode.effectiveMode !== 'ai'
+                  ? transitionMode.requestedMode === 'auto'
+                    ? `AUTO → ${MODE_LABEL[transitionMode.effectiveMode]}`
+                    : MODE_LABEL[transitionMode.effectiveMode]
+                  : source.status === 'failed'
+                    ? `Transition ${source.index + 1} → ${source.index + 2} failed`
+                    : statusWordFor(source.status)}
               </span>
+
+              {/* ── A CUT IS FINISHED, NOT MISSING ─────────────────────────
+                  No Generate, because there is nothing to generate and
+                  nothing to pay for. Offering one here would invite
+                  someone to buy a transition the project decided against. */}
+              {transitionMode && transitionMode.effectiveMode !== 'ai' && (
+                <span className="preview-recovery-detail">{transitionMode.reason}</span>
+              )}
 
               {/* ── RECOVERY, WHERE THE FAILURE IS ─────────────────────────
                   Resume, Retry download and Regenerate are three different
                   things costing wildly different amounts, so they get three
                   different words — and the right one is offered here rather
                   than behind an inspector tab. */}
-              {recovery && recovery.kind !== 'generate' && recovery.kind !== 'preview' && (
+              {aiMode && recovery && recovery.kind !== 'generate' && recovery.kind !== 'preview' && (
                 <span className="preview-recovery-detail">{recovery.detail}</span>
               )}
-              {onRecover && recovery && recovery.kind !== 'preview' && recovery.kind !== 'waiting' && (
-                <button
-                  type="button"
-                  className={`btn btn-tiny ${recovery.costsMoney ? 'btn-primary' : 'btn-ghost'}`}
-                  onClick={onRecover}
-                  disabled={generating}
-                  title={
-                    recovery.costsMoney
-                      ? 'Opens the paid-request confirmation before anything is sent'
-                      : 'Costs nothing — the provider work is already paid for'
-                  }
-                >
-                  {generating ? 'Working…' : recovery.label}
-                </button>
-              )}
+              {aiMode &&
+                onRecover &&
+                recovery &&
+                recovery.kind !== 'preview' &&
+                recovery.kind !== 'waiting' && (
+                  <button
+                    type="button"
+                    className={`btn btn-tiny ${recovery.costsMoney ? 'btn-primary' : 'btn-ghost'}`}
+                    onClick={onRecover}
+                    disabled={generating}
+                    title={
+                      recovery.costsMoney
+                        ? 'Opens the paid-request confirmation before anything is sent'
+                        : 'Costs nothing — the provider work is already paid for'
+                    }
+                  >
+                    {generating ? 'Working…' : recovery.label}
+                  </button>
+                )}
             </div>
             <figure>
               <img src={source.endSrc} alt="" />

@@ -8,6 +8,7 @@ import { relateImages, type PropertyAnalysis } from '../../../../shared/property
 import { attemptsForPair, formatSpend, type GenerationCostEntry } from '../../../../shared/costLedger'
 import { latestJobForPair, transitionRecovery } from '../../../../shared/transitionRecovery'
 import { NEUTRAL_MOTION, planSequence } from '../../../../shared/transitionPlan'
+import { MODE_LABEL, type ResolvedModeRow } from '../../../../shared/transitionMode'
 import { orientationLabel } from '../../../../shared/transitionEvidence'
 
 type Tab = 'motion' | 'prompt' | 'generation' | 'clip'
@@ -28,11 +29,14 @@ type Tab = 'motion' | 'prompt' | 'generation' | 'clip'
 export function TransitionInspector({
   project,
   analysis,
-  pairKey
+  pairKey,
+  modes
 }: {
   project: Project
   analysis: PropertyAnalysis | null
   pairKey: string | null
+  /** Resolved once in main so nothing here can disagree with the timeline. */
+  modes: ResolvedModeRow[]
 }): React.JSX.Element {
   const { updateTransition, settings, queue, refreshProjects } = useAppState()
   const [tab, setTab] = useState<Tab>('motion')
@@ -109,6 +113,7 @@ export function TransitionInspector({
     `${index + 1} → ${index + 2}`
   )
 
+  const mode = modes.find((m) => m.pairKey === pairKey) ?? null
   const hasAnalysis = analysis !== null && analysis.rooms.length > 0
   // The plan for THIS pair, from the whole-sequence planner so continuity
   // is the same value the prompt was built with.
@@ -159,6 +164,61 @@ export function TransitionInspector({
           ))}
         </nav>
       </header>
+
+      {/* ── TRANSITION TYPE ─────────────────────────────────────────────
+          The first control, not something hidden in Advanced. Whether a
+          pair becomes generated video, a cut or a dissolve is the most
+          consequential decision about it: it decides whether anything is
+          paid for at all, and whether the model is asked to move a camera
+          through architecture the photographs never showed. */}
+      <div className="transition-mode-row">
+        <span className="transition-mode-label">Transition type</span>
+        <div className="transition-mode-options" role="radiogroup" aria-label="Transition type">
+          {(
+            [
+              ['auto', 'Auto'],
+              ['ai', 'AI'],
+              ['cut', 'Cut'],
+              ['crossfade', 'Crossfade']
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="radio"
+              aria-checked={(transition.mode ?? 'auto') === value}
+              className={`transition-mode-option${
+                (transition.mode ?? 'auto') === value ? ' is-active' : ''
+              }`}
+              onClick={() => updateTransition(project.id, start.id, end.id, { mode: value })}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {mode && (
+          <span className={`transition-mode-effect is-${mode.effectiveMode}`}>
+            {mode.requestedMode === 'auto'
+              ? `Auto → ${MODE_LABEL[mode.effectiveMode]}`
+              : MODE_LABEL[mode.effectiveMode]}
+            <span className="transition-mode-reason">{mode.reason}</span>
+          </span>
+        )}
+        {mode?.forcedAgainstEvidence && (
+          /* Not blocked — an expert may know the property better than the
+             photographs show. But the risk is stated, and the generation
+             path asks again before anything is paid for. */
+          <p className="transition-mode-warning">
+            ⚠ AI navigation is not spatially supported here and may invent architecture.
+          </p>
+        )}
+        {mode?.recommendationDiffers && (
+          <p className="transition-mode-note">
+            Transition recommendation changed — the current analysis would choose{' '}
+            {MODE_LABEL[mode.recommendedMode]}. Your manual choice is kept.
+          </p>
+        )}
+      </div>
 
       <div className="inspector-body">
         {/* ── MOTION: what the system believes about these two frames ── */}
@@ -429,6 +489,18 @@ export function TransitionInspector({
                   : 'Nothing yet'
               }
             />
+            {mode && mode.effectiveMode !== 'ai' ? (
+              /* ── NOTHING TO GENERATE ───────────────────────────────────
+                 A cut or a crossfade produces no provider request, no
+                 prompt, no queue job and no charge. Offering Generate here
+                 would invite someone to pay for a transition the project
+                 has decided not to generate. */
+              <p className="inspector-cost-note is-free inspector-span">
+                This transition is a {MODE_LABEL[mode.effectiveMode].toLowerCase()} — no video is
+                generated, nothing is sent to a provider and nothing is charged. Change the
+                transition type above to generate one.
+              </p>
+            ) : (
             <div className="inspector-actions">
               {/* ── THREE ACTIONS, THREE COSTS ────────────────────────────
                   Resume continues a paid task that is already running.
@@ -476,8 +548,9 @@ export function TransitionInspector({
                 Add to Queue
               </button>
             </div>
+            )}
             <p className={`inspector-cost-note${recovery.costsMoney ? '' : ' is-free'}`}>
-              {recovery.detail}
+              {mode && mode.effectiveMode !== 'ai' ? '' : recovery.detail}
             </p>
             {transition.clip && (
               <p className="inspector-cost-note">

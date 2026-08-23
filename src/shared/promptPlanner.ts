@@ -241,6 +241,14 @@ export interface RebuildPlanSummary {
    * of these three lists.
    */
   unchanged: Array<{ pairKey: string; label: string }>
+  /**
+   * Transitions that need no prompt at all — cuts and crossfades.
+   *
+   * Generating motion wording for them would create a row purely to hold
+   * text nothing will read, and would report work the operator is not
+   * doing.
+   */
+  skipped: Array<{ pairKey: string; label: string; mode: 'cut' | 'crossfade' }>
   /** Images − 1. The number every list above must add up to. */
   logicalTransitionCount: number
   /** Whether an analysis exists at all. */

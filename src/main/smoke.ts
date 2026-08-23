@@ -140,6 +140,21 @@ import {
   strandedTransitionKeys
 } from '../shared/logicalTransitions'
 import { motionDiversity, planningQuality } from '../shared/planningQuality'
+import {
+  CROSSFADE_SECONDS,
+  DEFAULT_TRANSITION_MODE,
+  incursGenerationCost,
+  recommendationChanged,
+  recommendedMode,
+  requiresGeneratedClip,
+  resolveTransitionMode,
+  STILL_HOLD_SECONDS,
+  tallyModes,
+  type ResolvedModeRow
+} from '../shared/transitionMode'
+import { planAssembly } from '../shared/assemblyPlan'
+import type { TransitionPlan } from '../shared/transitionPlan'
+import { defaultTransitionSettings } from '../shared/types'
 import { deriveRotation } from '../shared/transitionEvidence'
 import type { RoomRecord } from '../shared/propertyAnalysis'
 import {
@@ -185,7 +200,7 @@ import {
   summarizeSpend
 } from '../shared/costLedger'
 import { DEFAULT_PRICING } from '../shared/pricing'
-import { missingClipPairs } from './services/exportService'
+import { missingClipPairs, projectAssembly } from './services/exportService'
 import {
   cancelJob,
   enqueue,
@@ -354,6 +369,8 @@ export async function runSmokeTest(): Promise<void> {
     testProjectDeletionCascade(workDir)
     testEditorSelection()
     testAnalysisWorkflow()
+    testTransitionModes()
+    testMixedAssemblyPlan()
     testEvidenceDrivenPlanning()
     testLogicalTransitions(workDir, createdProjects)
     await testGeminiModelConfig(workDir, createdProjects)
@@ -777,13 +794,33 @@ function testPromptProvenance(workDir: string, created: string[]): void {
 
   // ── Rebuild writes analysis-derived prompts + provenance ─────────────
   const firstPlan = planPromptRebuild(project.id)
-  assert.strictEqual(firstPlan.rebuildable.length, 3, 'all three transitions are rebuildable')
+  // The analysis covers images 1–3 only, so the fourth pair has no
+  // evidenced route and resolves to a CUT — which needs no prompt at all.
+  // Two AI transitions are planned; the cut is reported as skipped rather
+  // than silently absent.
+  assert.strictEqual(firstPlan.rebuildable.length, 2, 'the two AI transitions are rebuildable')
+  assert.strictEqual(firstPlan.skipped.length, 1, 'and the third is skipped')
+  assert.strictEqual(firstPlan.skipped[0].mode, 'cut', 'because it is a cut')
+  assert.strictEqual(
+    firstPlan.rebuildable.length + firstPlan.preserved.length + firstPlan.unchanged.length + firstPlan.skipped.length,
+    firstPlan.logicalTransitionCount,
+    'and every logical transition is still accounted for exactly once'
+  )
   assert.strictEqual(firstPlan.preserved.length, 0, 'nothing to preserve yet')
   assert.ok(firstPlan.hasAnalysis, 'the plan knows an analysis exists')
 
   const firstRun = rebuildPromptsFromAnalysis(project.id)
-  assert.strictEqual(firstRun.rebuiltCount, 3, 'three prompts rebuilt')
+  assert.strictEqual(firstRun.rebuiltCount, 2, 'the two AI prompts were written')
   assert.strictEqual(firstRun.preservedCount, 0, 'none preserved')
+  // The cut already had a row from the fixture, so the point is not that
+  // no row exists — it is that the rebuild did not TOUCH it. A transition
+  // that generates nothing gets no analysis-managed prompt written into
+  // it, and no provenance claiming one was planned.
+  assert.strictEqual(
+    listProjects().find((p) => p.id === project.id)!.transitions[pairs[2]].promptProvenance ?? null,
+    null,
+    'the cut was left entirely alone — no planned prompt, no provenance'
+  )
 
   const rebuilt = listProjects().find((p) => p.id === project.id)!
   assert.ok(rebuilt.transitions[pairs[0]].prompt.length > 0, 'a prompt was written')
@@ -824,9 +861,13 @@ function testPromptProvenance(workDir: string, created: string[]): void {
   // not exist" are different facts, and the summary now tells them apart
   // instead of one of them silently vanishing.
   assert.strictEqual(secondPlan.rebuildable.length, 0, 'nothing would actually change')
-  assert.strictEqual(secondPlan.unchanged.length, 2, 'the other two are already up to date')
+  assert.strictEqual(secondPlan.unchanged.length, 1, 'the remaining AI prompt is up to date')
+  assert.strictEqual(secondPlan.skipped.length, 1, 'and the cut needs no prompt')
   assert.strictEqual(
-    secondPlan.rebuildable.length + secondPlan.preserved.length + secondPlan.unchanged.length,
+    secondPlan.rebuildable.length +
+      secondPlan.preserved.length +
+      secondPlan.unchanged.length +
+      secondPlan.skipped.length,
     secondPlan.logicalTransitionCount,
     'and every logical transition is accounted for exactly once'
   )
@@ -905,11 +946,8 @@ function testPromptProvenance(workDir: string, created: string[]): void {
     0,
     'and a rebuild would change nothing, because the two paths agree on the prompt'
   )
-  assert.strictEqual(
-    afterOverride.unchanged.length,
-    3,
-    'all three are up to date'
-  )
+  assert.strictEqual(afterOverride.unchanged.length, 2, 'both AI prompts are up to date')
+  assert.strictEqual(afterOverride.skipped.length, 1, 'and the cut still needs none')
   assert.strictEqual(afterOverride.logicalTransitionCount, 3, 'four images, three transitions')
 
   log('prompt provenance: manual edits protected across restart, rebuild skips them, override warns')
@@ -1876,6 +1914,347 @@ function testAnalysisWorkflow(): void {
 }
 
 /**
+ * TRANSITION MODES — not every pair deserves generated video.
+ *
+ * ── THE STAIRCASE PROBLEM ────────────────────────────────────────────
+ *
+ * A ground-floor living room followed by an upstairs bedroom, with no
+ * photograph of the staircase anywhere in the set. There is no visual
+ * evidence of a route between them, so asking a video model to move the
+ * camera from one to the other can only produce invented stairs.
+ *
+ * The correct editorial answer is a CUT — which costs nothing, needs no
+ * clip, and cannot misrepresent the property.
+ */
+function testTransitionModes(): void {
+  const ids = ['down', 'up', 'a', 'b']
+  const plan = (over: Partial<TransitionPlan>): TransitionPlan =>
+    ({
+      fromImageId: 'x',
+      toImageId: 'y',
+      relationType: 'UNKNOWN',
+      confidence: 'unknown',
+      sharedLandmarks: [],
+      leavingLandmarks: [],
+      enteringLandmarks: [],
+      visibleOpenings: [],
+      anchorLandmark: null,
+      startOrientation: 'unknown',
+      endOrientation: 'unknown',
+      rotationDirection: 'unknown',
+      translationDirection: 'unknown',
+      visiblePassage: null,
+      evidenceImageIds: [],
+      hasEvidence: false,
+      physicalNavigationAllowed: false,
+      useBaseSafetyMotion: true,
+      motionInstruction: null,
+      continuity: {
+        incomingRotation: 'none',
+        outgoingRotation: 'none',
+        speed: 'slow',
+        staticEndpoint: true
+      },
+      rationale: '',
+      ...over
+    }) as TransitionPlan
+
+  // ── 1. The default ───────────────────────────────────────────────────
+  assert.strictEqual(DEFAULT_TRANSITION_MODE, 'auto', 'an unconfigured transition is Auto')
+  assert.strictEqual(
+    defaultTransitionSettings(5).mode,
+    'auto',
+    'and the default settings object says so'
+  )
+
+  // ── 4. THE MISSING STAIRCASE ─────────────────────────────────────────
+  //
+  // Different spaces, no confirmed navigable connection, no opening
+  // anywhere. This is the scenario that matters.
+  const staircase = plan({
+    relationType: 'UNKNOWN',
+    physicalNavigationAllowed: false,
+    visibleOpenings: []
+  })
+  const resolvedStaircase = resolveTransitionMode('auto', staircase)
+  assert.strictEqual(
+    resolvedStaircase.effectiveMode,
+    'cut',
+    'AUTO RESOLVES TO CUT — no evidenced route means no generated camera move'
+  )
+  assert.strictEqual(resolvedStaircase.requestedMode, 'auto')
+  assert.match(resolvedStaircase.reason, /invent the route/i, 'and says why in words')
+  assert.ok(!resolvedStaircase.forcedAgainstEvidence)
+  assert.ok(
+    !requiresGeneratedClip(resolvedStaircase.effectiveMode),
+    'no clip is required, so it can never appear as missing'
+  )
+  assert.ok(
+    !incursGenerationCost(resolvedStaircase.effectiveMode),
+    'and it can never cost anything'
+  )
+  assert.strictEqual(staircase.physicalNavigationAllowed, false, 'navigation stays refused')
+
+  // ── 3. Unknown relationship generally ────────────────────────────────
+  assert.strictEqual(resolveTransitionMode('auto', null).effectiveMode, 'cut', 'no analysis → cut')
+
+  // ── 2. Same space WITH evidence → AI ─────────────────────────────────
+  const sameRoom = plan({
+    relationType: 'SAME_ROOM',
+    confidence: 'confirmed',
+    hasEvidence: true,
+    sharedLandmarks: ['kitchen island'],
+    motionInstruction: 'keeping the kitchen island in view.'
+  })
+  const resolvedSame = resolveTransitionMode('auto', sameRoom)
+  assert.strictEqual(resolvedSame.effectiveMode, 'ai', 'same space with evidence supports a move')
+  assert.ok(incursGenerationCost(resolvedSame.effectiveMode), 'and it is a paid generation')
+
+  // Same space WITHOUT evidence is a cut — generating a camera move from
+  // nothing is how twenty-nine identical invented pans happened.
+  assert.strictEqual(
+    resolveTransitionMode('auto', plan({ relationType: 'SAME_ROOM', hasEvidence: false }))
+      .effectiveMode,
+    'cut',
+    'same space with NO pair evidence is still a cut'
+  )
+
+  // ── 5. Confirmed connection with a visible passage → AI ──────────────
+  const navigable = plan({
+    relationType: 'ADJACENT_ROOM',
+    confidence: 'confirmed',
+    physicalNavigationAllowed: true,
+    visibleOpenings: ['kitchen doorway'],
+    visiblePassage: 'kitchen doorway',
+    hasEvidence: true
+  })
+  assert.strictEqual(resolveTransitionMode('auto', navigable).effectiveMode, 'ai')
+  assert.match(resolveTransitionMode('auto', navigable).reason, /kitchen doorway/)
+
+  // Confirmed adjacency with NO visible opening is a cut — the existing
+  // safety rule, unchanged.
+  assert.strictEqual(
+    resolveTransitionMode(
+      'auto',
+      plan({
+        relationType: 'ADJACENT_ROOM',
+        confidence: 'confirmed',
+        physicalNavigationAllowed: false,
+        visibleOpenings: []
+      })
+    ).effectiveMode,
+    'cut',
+    'no visible opening, no generated walk-through'
+  )
+
+  // ── 6. A manual choice wins ──────────────────────────────────────────
+  const manualCut = resolveTransitionMode('cut', navigable)
+  assert.strictEqual(manualCut.effectiveMode, 'cut', 'manual Cut overrides a recommendation of AI')
+  assert.ok(!manualCut.forcedAgainstEvidence, 'choosing LESS than the evidence allows is not a risk')
+  assert.strictEqual(resolveTransitionMode('crossfade', navigable).effectiveMode, 'crossfade')
+
+  // ── 7. Manual AI against the evidence is allowed, and flagged ────────
+  const forced = resolveTransitionMode('ai', staircase)
+  assert.strictEqual(forced.effectiveMode, 'ai', 'an expert override is not refused')
+  assert.ok(
+    forced.forcedAgainstEvidence,
+    'but it is FLAGGED, so the warning and the extra confirmation appear'
+  )
+  assert.ok(
+    !resolveTransitionMode('ai', navigable).forcedAgainstEvidence,
+    'while manual AI on good evidence is not flagged'
+  )
+
+  // ── 16 & 17. Re-analysis recomputes AUTO ONLY ────────────────────────
+  assert.ok(
+    recommendationChanged('auto', 'cut', navigable),
+    'an AUTO transition whose evidence improved is reported as changed'
+  )
+  assert.ok(
+    !recommendationChanged('cut', 'cut', navigable),
+    'A MANUAL CUT IS NEVER REVISITED — a decision is not a suggestion'
+  )
+  assert.ok(!recommendationChanged('ai', 'cut', staircase), 'nor a manual AI')
+  assert.ok(!recommendationChanged('crossfade', 'crossfade', navigable), 'nor a manual crossfade')
+  assert.ok(!recommendationChanged('auto', 'cut', staircase), 'and an unchanged Auto is quiet')
+
+  // The analyzer's role is binary: is navigation supported? It is not
+  // asked to choose between a cut and a crossfade.
+  assert.strictEqual(recommendedMode(navigable).mode, 'ai')
+  assert.strictEqual(recommendedMode(staircase).mode, 'cut')
+  assert.strictEqual(recommendedMode(null).mode, 'cut')
+
+  // ── 10 & 12. Tallies drive readiness and cost ────────────────────────
+  const rows: ResolvedModeRow[] = [
+    { pairKey: 'a', position: 0, label: '1 → 2', requestedMode: 'auto', effectiveMode: 'ai', reason: '', forcedAgainstEvidence: false, recommendedMode: 'ai', recommendationReason: '', recommendationDiffers: false, hasClip: true },
+    { pairKey: 'b', position: 1, label: '2 → 3', requestedMode: 'auto', effectiveMode: 'ai', reason: '', forcedAgainstEvidence: false, recommendedMode: 'ai', recommendationReason: '', recommendationDiffers: false, hasClip: false },
+    { pairKey: 'c', position: 2, label: '3 → 4', requestedMode: 'auto', effectiveMode: 'cut', reason: '', forcedAgainstEvidence: false, recommendedMode: 'cut', recommendationReason: '', recommendationDiffers: false, hasClip: false },
+    { pairKey: 'd', position: 3, label: '4 → 5', requestedMode: 'crossfade', effectiveMode: 'crossfade', reason: '', forcedAgainstEvidence: false, recommendedMode: 'cut', recommendationReason: '', recommendationDiffers: false, hasClip: false }
+  ]
+  const tally = tallyModes(rows)
+  assert.strictEqual(tally.total, 4)
+  assert.strictEqual(tally.ai, 2)
+  assert.strictEqual(tally.cut, 1)
+  assert.strictEqual(tally.crossfade, 1)
+  assert.strictEqual(tally.aiReady, 1)
+  assert.strictEqual(
+    tally.aiMissing,
+    1,
+    'ONLY the ungenerated AI transition is missing — not the cut, not the crossfade'
+  )
+  assert.ok(
+    !requiresGeneratedClip('cut') && !requiresGeneratedClip('crossfade'),
+    'a cut and a crossfade need no clip'
+  )
+  assert.ok(
+    !incursGenerationCost('cut') && !incursGenerationCost('crossfade'),
+    'and neither can ever cost money'
+  )
+
+  void ids
+  log('transition modes: no evidenced route means a cut, and a cut costs nothing')
+}
+
+/**
+ * THE MIXED ASSEMBLY TIMELINE.
+ *
+ * A CUT usually needs no filler at all: the clip before it ends on image
+ * i, the clip after begins on image i+1, and joining them with a
+ * zero-length seam IS the cut. A still is held only where an image would
+ * otherwise never reach the screen.
+ */
+function testMixedAssemblyPlan(): void {
+  const imageIds = ['i1', 'i2', 'i3', 'i4']
+  const imagePaths = ['p1.jpg', 'p2.jpg', 'p3.jpg', 'p4.jpg']
+  const clip = (n: string): string => `${n}.mp4`
+
+  // ── AI · CUT · AI ────────────────────────────────────────────────────
+  const mixed = planAssembly({
+    imageIds,
+    modes: ['ai', 'cut', 'ai'],
+    clipPaths: [clip('c1'), null, clip('c3')],
+    imagePaths,
+    seamBlend: 'subtle'
+  })
+  assert.ok(mixed.ok, 'a cut in the middle blocks nothing')
+  assert.deepStrictEqual(mixed.missingClipPairs, [], 'and the cut is never reported as missing')
+  assert.deepStrictEqual(mixed.cutPairs, ['2 → 3'])
+  assert.strictEqual(
+    mixed.segments.length,
+    2,
+    'TWO segments and no filler — the clips already show images 2 and 3'
+  )
+  assert.deepStrictEqual(
+    mixed.segments.map((s) => s.kind),
+    ['clip', 'clip']
+  )
+  assert.deepStrictEqual(
+    mixed.seamSeconds,
+    [0],
+    'A HARD CUT IS EXACTLY ZERO — never a short fade, and no gap for a black frame'
+  )
+
+  // ── A CROSSFADE dissolves at that boundary ───────────────────────────
+  const dissolve = planAssembly({
+    imageIds,
+    modes: ['ai', 'crossfade', 'ai'],
+    clipPaths: [clip('c1'), null, clip('c3')],
+    imagePaths,
+    seamBlend: 'off'
+  })
+  assert.strictEqual(dissolve.seamSeconds[0], CROSSFADE_SECONDS)
+  assert.ok(
+    dissolve.seamSeconds[0] > 0,
+    'a crossfade blends even when the project seam setting is off — it is a deliberate dissolve, not a seam'
+  )
+  assert.deepStrictEqual(dissolve.crossfadePairs, ['2 → 3'])
+
+  // ── AN IMAGE NO CLIP SHOWS IS HELD ───────────────────────────────────
+  // Cut first: image 1 would never reach the screen.
+  const cutFirst = planAssembly({
+    imageIds,
+    modes: ['cut', 'ai', 'ai'],
+    clipPaths: [null, clip('c2'), clip('c3')],
+    imagePaths,
+    seamBlend: 'subtle'
+  })
+  assert.strictEqual(cutFirst.segments[0].kind, 'still', 'image 1 is held so it is actually seen')
+  assert.strictEqual(cutFirst.segments[0].imageId, 'i1')
+  assert.strictEqual(cutFirst.segments[0].holdSeconds, STILL_HOLD_SECONDS)
+  assert.strictEqual(cutFirst.seamSeconds[0], 0, 'and the boundary after it is a hard cut')
+
+  // Two consecutive cuts lose the image between them without a hold.
+  const twoCuts = planAssembly({
+    imageIds: ['a', 'b', 'c'],
+    modes: ['cut', 'cut'],
+    clipPaths: [null, null],
+    imagePaths: ['a.jpg', 'b.jpg', 'c.jpg'],
+    seamBlend: 'subtle'
+  })
+  assert.strictEqual(twoCuts.segments.length, 3, 'all three images are held')
+  assert.ok(
+    twoCuts.segments.every((s) => s.kind === 'still'),
+    'an all-cut project is a sequence of stills, and still produces a video'
+  )
+  assert.deepStrictEqual(twoCuts.seamSeconds, [0, 0], 'joined by hard cuts')
+  assert.ok(twoCuts.ok, 'and it needs no clip at all')
+
+  // ── 10. ONLY MISSING AI CLIPS BLOCK ──────────────────────────────────
+  const blocked = planAssembly({
+    imageIds,
+    modes: ['ai', 'cut', 'ai'],
+    clipPaths: [null, null, clip('c3')],
+    imagePaths,
+    seamBlend: 'subtle'
+  })
+  assert.ok(!blocked.ok)
+  assert.deepStrictEqual(
+    blocked.missingClipPairs,
+    ['1 → 2'],
+    'only the AI pair is missing — the cut is finished the moment it was chosen'
+  )
+
+  // ── 15. A generated clip is IGNORED, never destroyed, under Cut ──────
+  const withClipButCut = planAssembly({
+    imageIds,
+    modes: ['ai', 'cut', 'ai'],
+    // The middle pair HAS a clip someone already paid for.
+    clipPaths: [clip('c1'), clip('paid-for'), clip('c3')],
+    imagePaths,
+    seamBlend: 'subtle'
+  })
+  assert.ok(
+    !withClipButCut.segments.some((s) => s.clipPath === 'paid-for'),
+    'assembly ignores the clip while Cut is active'
+  )
+  assert.strictEqual(
+    withClipButCut.segments.length,
+    2,
+    'and the timeline is the same as if it had never been generated'
+  )
+  // Nothing in this function deletes anything — the clip and its ledger
+  // entry are untouched, so switching back to AI reuses them.
+
+  // ── Seam planning honours the overrides ──────────────────────────────
+  const seams = planSeams({
+    durationsSec: [5, 5, 5],
+    blend: 'smooth',
+    fps: 25,
+    seamOverrideSec: [0, CROSSFADE_SECONDS]
+  })
+  assert.strictEqual(seams.seamSec[0], 0, 'a cut boundary is exactly zero despite a smooth project')
+  assert.ok(seams.seamSec[1] > 0, 'while the crossfade boundary blends')
+  assert.strictEqual(
+    seams.trimStartSec[1],
+    0,
+    'and no frame is trimmed at a hard cut — there is no duplicate key frame to remove'
+  )
+  assert.ok(seams.totalSec > 0 && Number.isFinite(seams.totalSec), 'the timeline stays sane')
+
+  log('mixed assembly: cuts need no filler, hard cuts are exactly zero, paid clips survive')
+}
+
+/**
  * EVIDENCE-DRIVEN MOTION PLANNING.
  *
  * ── WHAT WENT WRONG ──────────────────────────────────────────────────
@@ -2300,12 +2679,16 @@ function testLogicalTransitions(workDir: string, created: string[]): void {
     ...emptyAnalysis(project.id),
     state: 'accepted',
     source: 'provider',
-    rooms: [{ id: 'r', label: 'Open Plan', imageIds: ids, landmarks: [] }],
+    rooms: [{ id: 'r', label: 'Open Plan', imageIds: ids, landmarks: ['island'] }],
+    // Every image shares a landmark, so every pair has pair-specific
+    // evidence and Auto resolves to AI. Without that they would all be
+    // cuts — correctly — and this test would stop exercising the prompt
+    // path it exists to cover.
     images: ids.map((id) => ({
       imageId: id,
       roomId: 'r',
-      orientation: 'unknown' as const,
-      landmarks: [],
+      orientation: 'into-room' as const,
+      landmarks: ['island'],
       openings: []
     })),
     edges: []
@@ -2321,7 +2704,8 @@ function testLogicalTransitions(workDir: string, created: string[]): void {
     !plan.analysisIsMock,
     'a provider analysis is not flagged as a placeholder, so rebuild is offered normally'
   )
-  const accounted = plan.rebuildable.length + plan.preserved.length + plan.unchanged.length
+  const accounted =
+    plan.rebuildable.length + plan.preserved.length + plan.unchanged.length + plan.skipped.length
   assert.strictEqual(
     accounted,
     29,
@@ -2388,7 +2772,7 @@ function testLogicalTransitions(workDir: string, created: string[]): void {
   assert.strictEqual(second.unchanged.length, 28, 'a second pass finds nothing to change')
   assert.strictEqual(second.rebuildable.length, 0)
   assert.strictEqual(
-    second.rebuildable.length + second.preserved.length + second.unchanged.length,
+    second.rebuildable.length + second.preserved.length + second.unchanged.length + second.skipped.length,
     29,
     'and still accounts for all twenty-nine'
   )
@@ -4712,7 +5096,16 @@ async function testEditorPreview(workDir: string, created: string[]): Promise<vo
   ])
   const pairs = [0, 1].map((i) => transitionKey(project.images[i].id, project.images[i + 1].id))
   for (const key of pairs) {
-    project.transitions[key] = { prompt: '', durationSec: 2, status: 'not-generated', clip: null }
+    // Explicitly AI: this test is about Build Preview refusing to assemble
+    // from clips that do not exist, which only means anything for
+    // transitions that actually need one.
+    project.transitions[key] = {
+      prompt: '',
+      durationSec: 2,
+      status: 'not-generated',
+      mode: 'ai',
+      clip: null
+    }
   }
   saveProject(project)
 
@@ -5148,7 +5541,77 @@ async function testSeamAssembly(workDir: string): Promise<void> {
   const tiny = await run('tiny', 'smooth', shortClips, base, [])
   assert.ok(tiny.sec > 0, 'very short clips still assemble without failing')
 
-  log('seamless assembly: 2/3+ clips, mixed resolutions, all aspect ratios, overlays, no audio, H.264')
+  // ── 13 & 14. A MIXED SEQUENCE, THROUGH REAL FFMPEG ───────────────────
+  //
+  //   still · CUT · clip · CROSSFADE · clip
+  //
+  // Not every adjacent pair has an MP4, which is the whole point: the
+  // timeline mixes generated clips with held stills, joined by hard cuts
+  // and deliberate dissolves.
+  const stillPng = join(workDir, 'seam-still.jpg')
+  spawnSync(
+    ffmpegPath(),
+    ['-y', '-f', 'lavfi', '-i', 'color=c=blue:s=640x360:d=1', '-frames:v', '1', stillPng],
+    { encoding: 'utf8', timeout: 60_000 }
+  )
+  assert.ok(existsSync(stillPng), 'a still fixture exists')
+
+  const mixedOut = join(workDir, 'seam-mixed.mp4')
+  await assemble({
+    clipPaths: [],
+    segments: [
+      { kind: 'still', path: stillPng, holdSeconds: 1.5 },
+      { kind: 'clip', path: clips[0] },
+      { kind: 'clip', path: clips[1] }
+    ],
+    // Hard cut into the first clip, dissolve into the second.
+    seamOverrideSec: [0, 0.5],
+    defaults: base,
+    overlayPngPaths: [],
+    outputPath: mixedOut
+  }).done
+
+  assert.ok(existsSync(mixedOut), 'the mixed timeline produced a file')
+  const mixedInfo = `${spawnSync(ffmpegPath(), ['-hide_banner', '-i', mixedOut], { encoding: 'utf8', timeout: 30_000 }).stderr}`
+  assert.match(mixedInfo, /Video: h264/, 'H.264 out, like every other export')
+  assert.ok(!/Stream #0:\d+.*Audio/.test(mixedInfo), 'and still no audio stream')
+
+  const mixedSec = probeDurationSec(mixedOut)
+  const clipSecs = probeDurationSec(clips[0]) + probeDurationSec(clips[1])
+  assert.ok(mixedSec > clipSecs, 'the held still genuinely added time to the timeline')
+  // ── NO BLACK FRAME AT THE CUT ────────────────────────────────────────
+  //
+  // The failure mode a hard cut can produce is a gap: an xfade of length
+  // zero, or a segment that ends before the next begins, shows through as
+  // black. The timeline arithmetic must account for every frame, so the
+  // output is the sum of the parts minus exactly the dissolve.
+  const expected = 1.5 + clipSecs - 0.5
+  assert.ok(
+    Math.abs(mixedSec - expected) < 0.35,
+    `mixed duration ${mixedSec.toFixed(2)}s ≈ ${expected.toFixed(2)}s — no gap, so no black frame at the cut`
+  )
+
+  // An ALL-CUT sequence is a real video too, not an empty one.
+  const allCutOut = join(workDir, 'seam-allcut.mp4')
+  await assemble({
+    clipPaths: [],
+    segments: [
+      { kind: 'still', path: stillPng, holdSeconds: 1 },
+      { kind: 'still', path: stillPng, holdSeconds: 1 },
+      { kind: 'still', path: stillPng, holdSeconds: 1 }
+    ],
+    seamOverrideSec: [0, 0],
+    defaults: base,
+    overlayPngPaths: [],
+    outputPath: allCutOut
+  }).done
+  assert.ok(existsSync(allCutOut) && statSync(allCutOut).size > 0, 'an all-cut project still exports')
+  assert.ok(
+    Math.abs(probeDurationSec(allCutOut) - 3) < 0.35,
+    'and its length is exactly the sum of the holds'
+  )
+
+  log('seamless assembly: 2/3+ clips, mixed cut/crossfade timeline, all aspect ratios, overlays, H.264')
 }
 
 /**
@@ -7628,9 +8091,36 @@ async function testVideoPipeline(workDir: string, created: string[]): Promise<vo
   project.images = imported
   saveProject(project)
 
+  // ── WHAT "MISSING" MEANS NOW ─────────────────────────────────────────
+  //
+  // With no analysis and no clips, every transition resolves Auto → CUT:
+  // nothing evidences a camera route, so nothing is generated and nothing
+  // is missing. The project assembles as held stills joined by hard cuts.
+  // This function reports work that is genuinely owed, not every pair.
   const early = listProjects().find((p) => p.id === project.id)!
-  assert.strictEqual(missingClipPairs(early).length, 3, 'N-1 = 3 transitions required')
-  assert.deepStrictEqual(missingClipPairs(early), ['1 → 2', '2 → 3', '3 → 4'])
+  assert.deepStrictEqual(
+    missingClipPairs(early),
+    [],
+    'an unanalysed project owes no AI clips — every transition is a cut until evidence or a manual choice says otherwise'
+  )
+  const earlyPlan = projectAssembly(early).plan
+  assert.ok(earlyPlan.ok, 'and it can still be assembled')
+  assert.strictEqual(earlyPlan.cutPairs.length, 3, 'as three cuts')
+  assert.strictEqual(earlyPlan.segments.length, 4, 'holding all four images')
+
+  // Ask for AI explicitly and the clips become genuinely owed.
+  const forced = listProjects().find((p) => p.id === project.id)!
+  for (let i = 0; i < 3; i++) {
+    const key = transitionKey(imported[i].id, imported[i + 1].id)
+    forced.transitions[key] = { ...defaultTransitionSettings(4), mode: 'ai' }
+  }
+  saveProject(forced)
+  const reread = listProjects().find((p) => p.id === project.id)!
+  assert.deepStrictEqual(
+    missingClipPairs(reread),
+    ['1 → 2', '2 → 3', '3 → 4'],
+    'a transition set to AI with no clip IS missing one'
+  )
 
   const pairs = [0, 1, 2].map((i) => transitionKey(imported[i].id, imported[i + 1].id))
   const attached = clips.map((src) => attachClipFromPath(project.id, src, 'manual'))
@@ -7639,6 +8129,9 @@ async function testVideoPipeline(workDir: string, created: string[]): Promise<vo
       prompt: `transition ${i + 1}`,
       durationSec: 4,
       status: 'completed',
+      // Explicitly AI: this test is about generated clips reaching the
+      // assembly, so the transitions must be the kind that needs one.
+      mode: 'ai',
       clip: attached[i]
     }
   })

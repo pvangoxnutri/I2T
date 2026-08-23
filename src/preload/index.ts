@@ -27,6 +27,7 @@ import type { GenerationCostEntry, ProjectSpendSummary } from '../shared/costLed
 import type { CompareAssemblyResult } from '../shared/seamBlend'
 import type { ImageFacts, ImageOverride, OverrideField } from '../shared/imageFacts'
 import type { AnalyzerStatus } from '../shared/analysisWorkflow'
+import type { ResolvedModeRow } from '../shared/transitionMode'
 
 export interface ReviewFactsPayload {
   facts: Array<ReviewableFact & { verdict: ReviewVerdict }>
@@ -240,6 +241,13 @@ const api = {
       /** Structured plan for every transition, for the plan review list. */
       transitionPlans: (projectId: string): Promise<TransitionPlan[]> =>
         ipcRenderer.invoke('analysis:transitionPlans', projectId),
+      /**
+       * How every logical transition will actually behave — generated, cut
+       * or dissolved — resolved once in main so nothing downstream can
+       * disagree about the same transition.
+       */
+      transitionModes: (projectId: string): Promise<ResolvedModeRow[]> =>
+        ipcRenderer.invoke('analysis:transitionModes', projectId),
       /** What a draft would change about the accepted analysis. */
       diff: (projectId: string, draft: PropertyAnalysis): Promise<AnalysisDiff> =>
         ipcRenderer.invoke('analysis:diff', projectId, draft),

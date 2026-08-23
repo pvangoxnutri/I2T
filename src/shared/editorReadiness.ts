@@ -1,6 +1,7 @@
 import type { Project } from './types'
 import type { AnalysisSummary } from './analysisSummary'
 import { pairKeysFor } from './editorSelection'
+import type { ModeTally } from './transitionMode'
 
 /**
  * WHAT MATTERS NEXT — and nothing else.
@@ -58,12 +59,20 @@ export interface EditorReadiness {
 
 export function editorReadiness(
   project: Project,
-  summary: AnalysisSummary
+  summary: AnalysisSummary,
+  /**
+   * How each transition will behave. Without it every pair is assumed to
+   * need a generated clip — which is what made a project of mostly cuts
+   * report "27 transitions missing clips" and look permanently unfinished.
+   */
+  tally?: ModeTally
 ): EditorReadiness {
   const imageIds = project.images.map((i) => i.id)
   const pairs = pairKeysFor(imageIds)
-  const withClips = pairs.filter((k) => project.transitions[k]?.clip).length
-  const missingClips = pairs.length - withClips
+  const withClips = tally ? tally.aiReady : pairs.filter((k) => project.transitions[k]?.clip).length
+  // ONLY missing AI clips block a complete video. A cut is finished the
+  // moment it is chosen; a crossfade is rendered locally by FFmpeg.
+  const missingClips = tally ? tally.aiMissing : pairs.length - withClips
   const warnings = summary.issues.filter((i) => i.severity === 'warning').length
 
   const steps: ReadinessStep[] = [
@@ -115,9 +124,11 @@ export function editorReadiness(
         pairs.length === 0
           ? 'No transitions yet'
           : missingClips > 0
-            ? `${missingClips} transition${missingClips === 1 ? '' : 's'} missing clips`
-            : `All ${pairs.length} clip${pairs.length === 1 ? '' : 's'} generated`,
-      hint: 'Generate from the transition inspector, one at a time.'
+            ? `${missingClips} AI clip${missingClips === 1 ? '' : 's'} missing`
+            : tally
+              ? `${tally.total} transitions · ${tally.ai} AI · ${tally.cut} cut${tally.cut === 1 ? '' : 's'}${tally.crossfade > 0 ? ` · ${tally.crossfade} crossfade` : ''}`
+              : `All ${pairs.length} clip${pairs.length === 1 ? '' : 's'} generated`,
+      hint: 'Generate from the transition inspector, one at a time. Cuts and crossfades need none.'
     }
   ]
 

@@ -657,6 +657,25 @@ export function PropertyAnalysisPanel({
                 <strong>{rebuild.preserved.length}</strong> manually edited prompt
                 {rebuild.preserved.length === 1 ? '' : 's'} preserved
               </li>
+              {/* A cut or a crossfade generates no video, so it needs no
+                  prompt — and reporting them as work nobody is doing was
+                  the other half of the miscount. */}
+              {rebuild.skipped.filter((s) => s.mode === 'cut').length > 0 && (
+                <li>
+                  <strong>{rebuild.skipped.filter((s) => s.mode === 'cut').length}</strong> cut
+                  {rebuild.skipped.filter((s) => s.mode === 'cut').length === 1 ? '' : 's'} skipped
+                </li>
+              )}
+              {rebuild.skipped.filter((s) => s.mode === 'crossfade').length > 0 && (
+                <li>
+                  <strong>{rebuild.skipped.filter((s) => s.mode === 'crossfade').length}</strong>{' '}
+                  crossfade
+                  {rebuild.skipped.filter((s) => s.mode === 'crossfade').length === 1
+                    ? ''
+                    : 's'}{' '}
+                  skipped
+                </li>
+              )}
             </ul>
 
             <p className="rebuild-note">

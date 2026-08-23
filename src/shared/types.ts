@@ -7,6 +7,9 @@
  * computed from image order rather than stored twice.
  */
 
+import type { TransitionMode } from './transitionMode'
+export type { TransitionMode }
+
 // ── Images & transitions ─────────────────────────────────────────────────
 
 export interface ProjectImage {
@@ -62,6 +65,15 @@ export interface TransitionSettings {
    * the wording, rebuilding from Property Analysis must skip it.
    */
   promptProvenance?: PromptProvenance | null
+  /**
+   * Generated, cut or dissolved.
+   *
+   * ABSENT MEANS `auto`, which is what keeps the row lazy: a transition
+   * nobody has configured stores nothing and lets the spatial evidence
+   * decide. A stored value is a DECISION, and re-analysis never overwrites
+   * one — see shared/transitionMode.ts.
+   */
+  mode?: TransitionMode
 }
 
 export const defaultTransitionSettings = (durationSec: number): TransitionSettings => ({
@@ -69,7 +81,8 @@ export const defaultTransitionSettings = (durationSec: number): TransitionSettin
   durationSec,
   status: 'not-generated',
   clip: null,
-  promptProvenance: null
+  promptProvenance: null,
+  mode: 'auto'
 })
 
 export const transitionKey = (fromImageId: string, toImageId: string): string =>

@@ -26,6 +26,7 @@ import {
   type TransitionRecovery
 } from '../../../../shared/transitionRecovery'
 import { pairIndexOf } from '../../../../shared/previewSource'
+import type { ResolvedModeRow } from '../../../../shared/transitionMode'
 
 /**
  * The I2T editor — a desktop video-editing workspace.
@@ -74,6 +75,10 @@ export function ProjectEditorPage({
   // — and therefore every plan derived from it — is re-read.
   const [factsNonce, setFactsNonce] = useState(0)
   const [liveConfirm, setLiveConfirm] = useState<LiveConfirmationPayload | null>(null)
+  // How every transition will actually behave — generated, cut or
+  // dissolved. Resolved once in main so the timeline, both inspectors,
+  // readiness and the cost estimate cannot disagree.
+  const [modes, setModes] = useState<ResolvedModeRow[]>([])
   const [generateOpening, setGenerateOpening] = useState(false)
   const [submitting, setSubmitting] = useState(false)
 
@@ -86,6 +91,13 @@ export function ProjectEditorPage({
   useEffect(() => {
     void window.f2f.projects.analysis.effective(projectId).then(setAnalysis)
   }, [projectId, factsNonce])
+
+  // Re-read whenever the project changes: a mode is stored on the
+  // transition, and Auto can resolve differently after an accepted
+  // analysis changes.
+  useEffect(() => {
+    void window.f2f.projects.analysis.transitionModes(projectId).then(setModes)
+  }, [projectId, factsNonce, project?.updatedAt, analysis?.updatedAt])
 
   const imageIds = project?.images.map((i) => i.id) ?? []
   const imageIdKey = imageIds.join('|')
@@ -189,6 +201,9 @@ export function ProjectEditorPage({
   }
 
   const inspector = inspectorModeFor(selection)
+  const selectedMode = modes.find(
+    (m) => selection.kind === 'transition' && m.pairKey === selection.pairKey
+  )
 
   // What to offer for the selected transition. Decided in `shared` from
   // the REMOTE task state, so a free recovery is never mislabelled as a
@@ -211,6 +226,7 @@ export function ProjectEditorPage({
           project={project}
           analysis={analysis}
           selection={selection}
+          modes={modes}
           onSelect={setSelection}
           onAnalysisChange={() => setFactsNonce((n) => n + 1)}
         />
@@ -220,6 +236,7 @@ export function ProjectEditorPage({
           mode={previewModeFor(selection)}
           onShowFullVideo={() => setSelection(selectFullVideo())}
           recovery={recovery}
+          transitionMode={selectedMode ?? null}
           onRecover={
             selection.kind === 'transition' && recovery
               ? () => recover(selection.pairKey, recovery)
@@ -233,6 +250,7 @@ export function ProjectEditorPage({
         project={project}
         analysis={analysis}
         selection={selection}
+        modes={modes}
         onSelectImage={(id) => setSelection(selectImage(id))}
         onSelectTransition={(key) => setSelection(selectTransition(key))}
       />
@@ -250,6 +268,7 @@ export function ProjectEditorPage({
           project={project}
           analysis={analysis}
           pairKey={selection.kind === 'transition' ? selection.pairKey : null}
+          modes={modes}
         />
       )}
       {inspector === 'none' && (

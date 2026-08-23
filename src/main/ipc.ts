@@ -57,6 +57,9 @@ import {
 } from './db/overrideRepo'
 import { applyImageOverrides, imageFacts, type OverrideField } from '../shared/imageFacts'
 import type { AnalyzerMode } from '../shared/analysisWorkflow'
+import { logicalTransitions } from '../shared/logicalTransitions'
+import { recommendedMode, resolveTransitionMode } from '../shared/transitionMode'
+import type { ResolvedModeRow } from '../shared/transitionMode'
 import {
   clearDraftReviews,
   listReviews,
@@ -601,6 +604,51 @@ export function registerIpc(): void {
   ipcMain.handle('analysis:diff', (_e, projectId: string, draft: PropertyAnalysis) =>
     diffAnalyses(readAnalysis(projectId), draft)
   )
+
+  /**
+   * How every logical transition will actually behave: generated, cut or
+   * dissolved, and why.
+   *
+   * Resolved in MAIN from the same plans the prompt planner reads, so the
+   * timeline, the inspector, readiness and the cost estimate cannot each
+   * reach a different conclusion about the same transition.
+   */
+  ipcMain.handle('analysis:transitionModes', (_e, projectId: string): ResolvedModeRow[] => {
+    const project = listProjects().find((p) => p.id === projectId)
+    if (!project) return []
+    const analysis = applyImageOverrides(readAnalysis(projectId), listOverrides(projectId))
+    const imageIds = project.images.map((i) => i.id)
+    const plans = planSequence(analysis, imageIds, reviewMap(projectId, 'accepted'))
+
+    return logicalTransitions(project, storedSettings()?.exportDefaults.defaultTransitionDurationSec ?? 5).map(
+      (t) => {
+        const resolved = resolveTransitionMode(
+          t.persisted?.mode ?? 'auto',
+          plans[t.position] ?? null,
+          // An existing clip outranks the evidence for Auto: dropping work
+          // someone paid for out of the video is never the right default.
+          Boolean(t.persisted?.clip)
+        )
+        const recommendation = recommendedMode(plans[t.position] ?? null)
+        return {
+          pairKey: t.pairKey,
+          position: t.position,
+          label: t.label,
+          requestedMode: resolved.requestedMode,
+          effectiveMode: resolved.effectiveMode,
+          reason: resolved.reason,
+          forcedAgainstEvidence: resolved.forcedAgainstEvidence,
+          recommendedMode: recommendation.mode,
+          recommendationReason: recommendation.reason,
+          // Only AUTO transitions can drift when the analysis changes; a
+          // stored choice is a decision and is never revisited.
+          recommendationDiffers:
+            resolved.requestedMode === 'auto' ? false : recommendation.mode !== resolved.effectiveMode,
+          hasClip: Boolean(t.persisted?.clip)
+        }
+      }
+    )
+  })
 
   // ── Manual image overrides ────────────────────────────────────────────
   //

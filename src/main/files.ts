@@ -176,6 +176,23 @@ export function clipPath(projectId: string, storedName: string): string | null {
   }
 }
 
+/**
+ * Absolute path of a managed IMAGE, or null if it does not exist.
+ *
+ * Mirrors `clipPath`. Needed because a sequence containing cuts can put a
+ * still photograph directly into the assembled video, so FFmpeg needs its
+ * real path — still resolved through `safeManagedPath`, so it can only
+ * ever name a file inside this project's own managed directory.
+ */
+export function imagePath(projectId: string, storedName: string): string | null {
+  try {
+    const path = safeManagedPath(projectImagesDir(projectId), storedName)
+    return existsSync(path) ? path : null
+  } catch {
+    return null
+  }
+}
+
 /** Removes one managed image file. Missing files are fine. */
 export function removeImageFile(projectId: string, storedName: string): void {
   try {

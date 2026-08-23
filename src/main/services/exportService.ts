@@ -6,10 +6,20 @@ import { transitionKey, type ExportDefaults, type Project, type QueueJob } from 
 import type { CompareAssemblyResult } from '../../shared/seamBlend'
 import { DEFAULT_PRICING, priceSnapshot } from '../../shared/pricing'
 import { listProjects, getSettingsJson } from '../db/projectsRepo'
-import { clipPath, EDITOR_PREVIEW_NAME, exportUrl } from '../files'
+import { clipPath, EDITOR_PREVIEW_NAME, exportUrl, imagePath } from '../files'
 import { projectDir, safeManagedPath } from '../paths'
-import { assemble } from './ffmpegService'
+import { assemble, type AssembleSegment } from './ffmpegService'
 import { enqueue, registerRunner } from './queueService'
+import { readAnalysis } from '../db/analysisRepo'
+import { listOverrides } from '../db/overrideRepo'
+import { reviewMap } from '../db/reviewRepo'
+import { applyImageOverrides } from '../../shared/imageFacts'
+import { planSequence } from '../../shared/transitionPlan'
+import { planAssembly } from '../../shared/assemblyPlan'
+import {
+  resolveTransitionMode,
+  type EffectiveTransitionMode
+} from '../../shared/transitionMode'
 
 /**
  * Turns "export this project" into a validated, persisted job.
@@ -67,16 +77,65 @@ function readSettings(): { exportDefaults: ExportDefaults; pricing: typeof DEFAU
   }
 }
 
-/** Human list of image pairs that still lack a clip, e.g. ["2 → 3"]. */
-export function missingClipPairs(project: Project): string[] {
-  const missing: string[] = []
-  for (let i = 0; i < project.images.length - 1; i++) {
-    const key = transitionKey(project.images[i].id, project.images[i + 1].id)
-    const clip = project.transitions[key]?.clip
-    const exists = clip ? clipPath(project.id, clip.storedName) !== null : false
-    if (!exists) missing.push(`${i + 1} → ${i + 2}`)
+/**
+ * The assembly timeline for one project, with cuts and crossfades resolved.
+ *
+ * ── ONE PLACE DECIDES ────────────────────────────────────────────────
+ *
+ * Missing-clip checks, the editor preview, Compare Assembly and the export
+ * runner all used to walk the image pairs themselves and demand a clip for
+ * every one. With cuts in the picture that is simply wrong, so they all
+ * come here instead and get the same answer.
+ */
+export function projectAssembly(project: Project): {
+  plan: ReturnType<typeof planAssembly>
+  segments: AssembleSegment[]
+} {
+  const { exportDefaults } = readSettings()
+  const analysis = applyImageOverrides(readAnalysis(project.id), listOverrides(project.id))
+  const imageIds = project.images.map((i) => i.id)
+  const plans = planSequence(analysis, imageIds, reviewMap(project.id, 'accepted'))
+
+  const modes: EffectiveTransitionMode[] = []
+  const clipPaths: (string | null)[] = []
+  for (let i = 0; i < imageIds.length - 1; i++) {
+    const key = transitionKey(imageIds[i], imageIds[i + 1])
+    const stored = project.transitions[key]
+    const clip = stored?.clip
+    modes.push(
+      resolveTransitionMode(stored?.mode ?? 'auto', plans[i] ?? null, Boolean(clip)).effectiveMode
+    )
+    clipPaths.push(clip ? clipPath(project.id, clip.storedName) : null)
   }
-  return missing
+
+  const plan = planAssembly({
+    imageIds,
+    modes,
+    clipPaths,
+    imagePaths: project.images.map((img) => imagePath(project.id, img.storedName) ?? ''),
+    seamBlend: exportDefaults.seamBlend ?? 'subtle'
+  })
+
+  return {
+    plan,
+    segments: plan.segments.map((s) => ({
+      kind: s.kind,
+      path: (s.kind === 'clip' ? s.clipPath : s.imagePath) ?? '',
+      holdSeconds: s.holdSeconds
+    }))
+  }
+}
+
+/**
+ * Image pairs that still lack a clip AND actually need one.
+ *
+ * A cut or a crossfade needs no generated video, so it can never appear
+ * here — reporting "27 transitions missing clips" for a project whose
+ * transitions are mostly cuts was the old behaviour, and it made a
+ * finished project look permanently incomplete.
+ */
+export function missingClipPairs(project: Project): string[] {
+  return projectAssembly(project).plan.missingClipPairs
 }
 
 /**
@@ -143,22 +202,19 @@ export async function buildEditorPreview(
   const project = listProjects().find((p) => p.id === projectId)
   if (!project) return { ok: false, reason: 'Project no longer exists' }
 
-  const missing = missingClipPairs(project)
-  if (missing.length > 0) {
+  // Cuts and crossfades need no clip, so only genuinely missing AI clips
+  // can block a preview.
+  const { plan, segments } = projectAssembly(project)
+  if (!plan.ok) {
     return {
       ok: false,
-      reason: `Missing transition clips: ${missing.join(', ')}. Build Preview only assembles clips that already exist — it never generates.`
+      reason: `Missing transition clips: ${plan.missingClipPairs.join(', ')}. Build Preview only assembles clips that already exist — it never generates.`
     }
   }
-
-  const clipPaths = project.images.slice(0, -1).map((image, i) => {
-    const key = transitionKey(image.id, project.images[i + 1].id)
-    const stored = project.transitions[key]?.clip?.storedName
-    const path = stored ? clipPath(project.id, stored) : null
-    if (!path) throw new Error(`Transition clip ${i + 1} → ${i + 2} is missing on disk`)
-    return path
-  })
-  if (clipPaths.length === 0) return { ok: false, reason: 'Nothing to assemble yet' }
+  if (segments.length === 0) return { ok: false, reason: 'Nothing to assemble yet' }
+  if (segments.some((s) => !s.path)) {
+    return { ok: false, reason: 'An assembly segment is missing its file on disk' }
+  }
 
   const dir = exportsDir(projectId)
   mkdirSync(dir, { recursive: true })
@@ -166,7 +222,9 @@ export async function buildEditorPreview(
   const defaults = readSettings().exportDefaults
 
   await assemble({
-    clipPaths,
+    clipPaths: [],
+    segments,
+    seamOverrideSec: plan.seamSeconds,
     defaults,
     // No overlays: this is for looking at while editing, not for sending.
     // The watermark belongs to the customer preview export.
@@ -198,17 +256,20 @@ export async function compareAssembly(
     }
   }
 
-  const clipPaths = project.images.slice(0, -1).map((image, i) => {
-    const key = transitionKey(image.id, project.images[i + 1].id)
-    const stored = project.transitions[key]?.clip?.storedName
-    const path = stored ? clipPath(project.id, stored) : null
-    if (!path) throw new Error(`Transition clip ${i + 1} → ${i + 2} is missing on disk`)
-    return path
-  })
+  // ── COMPARE ASSEMBLY STAYS ABOUT SEAMS ───────────────────────────────
+  //
+  // This tool exists to judge whether seam blending between two GENERATED
+  // clips is worth having. Deliberately restricted to the clip segments,
+  // because comparing a timeline that also contains cuts and held stills
+  // would answer a different question than the one being asked.
+  const clipPaths = projectAssembly(project)
+    .segments.filter((s) => s.kind === 'clip')
+    .map((s) => s.path)
   if (clipPaths.length < 2) {
     return {
       ok: false,
-      reason: 'Comparing assembly needs at least two clips — a single clip has no seam.'
+      reason:
+        'Comparing assembly needs at least two generated clips — a single clip has no seam, and cuts have nothing to blend.'
     }
   }
 
@@ -257,15 +318,14 @@ const runExportJob = async (
   const outputPath = job.metadata.outputPath
   if (!outputPath) throw new Error('Job is missing its output destination')
 
-  const missing = missingClipPairs(project)
-  if (missing.length > 0) throw new Error(`Missing transition clips: ${missing.join(', ')}`)
-
-  const clipPaths = project.images.slice(0, -1).map((image, i) => {
-    const key = transitionKey(image.id, project.images[i + 1].id)
-    const path = clipPath(project.id, project.transitions[key]!.clip!.storedName)
-    if (!path) throw new Error(`Transition clip ${i + 1} → ${i + 2} is missing on disk`)
-    return path
-  })
+  // The mixed timeline: AI clips where they exist, cuts and crossfades
+  // where the evidence or the operator chose them, and a held still only
+  // where an image would otherwise never reach the screen.
+  const { plan, segments } = projectAssembly(project)
+  if (!plan.ok) throw new Error(plan.reason ?? 'Nothing to assemble')
+  for (const s of segments) {
+    if (!s.path) throw new Error('An assembly segment is missing its file on disk')
+  }
 
   const overlayPngPaths = (job.metadata.overlayFiles ?? [])
     .map((name) => safeManagedPath(exportsDir(project.id), name))
@@ -273,7 +333,9 @@ const runExportJob = async (
 
   try {
     const handle = assemble({
-      clipPaths,
+      clipPaths: [],
+      segments,
+      seamOverrideSec: plan.seamSeconds,
       defaults: readSettings().exportDefaults,
       overlayPngPaths,
       outputPath,

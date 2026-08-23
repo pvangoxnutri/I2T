@@ -1,6 +1,7 @@
 import type { Project } from '../../types'
 import type { AnalysisSummary } from '../../../../shared/analysisSummary'
 import { editorReadiness, type ReadinessStep } from '../../../../shared/editorReadiness'
+import type { ModeTally } from '../../../../shared/transitionMode'
 
 /**
  * WHERE THE PROJECT STANDS.
@@ -24,12 +25,15 @@ const MARK: Record<ReadinessStep['state'], string> = {
 
 export function ProjectReadiness({
   project,
-  summary
+  summary,
+  tally
 }: {
   project: Project
   summary: AnalysisSummary
+  /** Cuts and crossfades need no clip, so they never count as missing. */
+  tally?: ModeTally
 }): React.JSX.Element {
-  const readiness = editorReadiness(project, summary)
+  const readiness = editorReadiness(project, summary, tally)
 
   return (
     <div className="readiness">

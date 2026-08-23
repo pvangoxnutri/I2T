@@ -5,6 +5,7 @@ import { resolveGenerationAction } from '../../../../shared/generationState'
 import { roomOfImage, relateImages, type PropertyAnalysis } from '../../../../shared/propertyAnalysis'
 import { dropTargetIndex, scrollIntoViewOffset } from '../../../../shared/sequence'
 import type { EditorSelection } from '../../../../shared/editorSelection'
+import { MODE_LABEL, type ResolvedModeRow } from '../../../../shared/transitionMode'
 
 /**
  * The sequence, as a horizontal timeline.
@@ -49,12 +50,15 @@ export function TimelineStrip({
   project,
   analysis,
   selection,
+  modes,
   onSelectImage,
   onSelectTransition
 }: {
   project: Project
   analysis: PropertyAnalysis | null
   selection: EditorSelection
+  /** How each transition will behave. Resolved once in main. */
+  modes: ResolvedModeRow[]
   onSelectImage: (imageId: string) => void
   onSelectTransition: (pairKey: string) => void
 }): React.JSX.Element {
@@ -169,6 +173,9 @@ export function TimelineStrip({
               ? relateImages(analysis, image.id, next.id).kind === 'unknown'
               : false
 
+          const modeRow = key ? modes.find((m) => m.pairKey === key) : undefined
+          const modeClass = modeRow?.effectiveMode ?? 'ai'
+
           return (
             <div
               className={`timeline-cell${dragIndex === index ? ' is-dragging' : ''}`}
@@ -224,7 +231,7 @@ export function TimelineStrip({
               {key && next && (
                 <button
                   type="button"
-                  className={`timeline-transition is-${stateClass}${
+                  className={`timeline-transition is-${stateClass} mode-${modeClass}${
                     selectedPairKey === key ? ' is-selected' : ''
                   }`}
                   ref={(el) => {
@@ -251,9 +258,26 @@ export function TimelineStrip({
                   ) : (
                     <span className="timeline-transition-strip is-blank" aria-hidden />
                   )}
-                  <span className="timeline-transition-state">
-                    <span className={`state-dot state-dot-${stateClass}`} aria-hidden />
-                    {word}
+                  {/* ── TYPE, IN WORDS ─────────────────────────────────────
+                      A cut and an ungenerated AI transition look identical
+                      if only the state is shown, and one of them is
+                      finished while the other is waiting to be paid for.
+                      The word carries it; the tint only reinforces. */}
+                  <span className={`timeline-transition-state is-${modeClass}`}>
+                    {modeClass === 'ai' ? (
+                      <>
+                        <span className={`state-dot state-dot-${stateClass}`} aria-hidden />
+                        AI · {word}
+                      </>
+                    ) : (
+                      <>
+                        <span className="timeline-mode-glyph" aria-hidden>
+                          {modeClass === 'cut' ? '▮▮' : '◑'}
+                        </span>
+                        {modeRow?.requestedMode === 'auto' ? 'AUTO → ' : ''}
+                        {MODE_LABEL[modeClass]}
+                      </>
+                    )}
                   </span>
                 </button>
               )}
