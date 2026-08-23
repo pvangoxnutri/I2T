@@ -6,6 +6,7 @@ import type { LiveConfirmationPayload } from '../../../../preload/index'
 import { markManuallyEdited } from '../../../../shared/promptPlanner'
 import { relateImages, type PropertyAnalysis } from '../../../../shared/propertyAnalysis'
 import { attemptsForPair, formatSpend, type GenerationCostEntry } from '../../../../shared/costLedger'
+import { latestJobForPair, transitionRecovery } from '../../../../shared/transitionRecovery'
 
 type Tab = 'motion' | 'prompt' | 'generation' | 'clip'
 
@@ -31,7 +32,7 @@ export function TransitionInspector({
   analysis: PropertyAnalysis | null
   pairKey: string | null
 }): React.JSX.Element {
-  const { updateTransition, settings, refreshProjects } = useAppState()
+  const { updateTransition, settings, queue, refreshProjects } = useAppState()
   const [tab, setTab] = useState<Tab>('motion')
   const [liveConfirm, setLiveConfirm] = useState<LiveConfirmationPayload | null>(null)
   const [submitting, setSubmitting] = useState(false)
@@ -97,6 +98,14 @@ export function TransitionInspector({
       </section>
     )
   }
+
+  // Decided in `shared` from the REMOTE task state — the same answer the
+  // preview shows, so the two can never offer different recoveries.
+  const recovery = transitionRecovery(
+    stored,
+    latestJobForPair(queue, project.id, pairKey),
+    `${index + 1} → ${index + 2}`
+  )
 
   const hasAnalysis = analysis !== null && analysis.rooms.length > 0
   const relation = analysis ? relateImages(analysis, start.id, end.id) : { kind: 'unknown' as const }
@@ -336,19 +345,38 @@ export function TransitionInspector({
               }
             />
             <div className="inspector-actions">
-              {/* ── REGENERATE IS NOT A RETRY ─────────────────────────────
-                  A second generation costs exactly what the first one did.
-                  Styled and worded apart from Generate so it can never be
-                  mistaken for an undo or a refresh, and the cost is stated
-                  next to it rather than only inside the dialog. */}
+              {/* ── THREE ACTIONS, THREE COSTS ────────────────────────────
+                  Resume continues a paid task that is already running.
+                  Retry download fetches a result that already exists and
+                  is already paid for. Regenerate submits a NEW paid task.
+                  Calling all three "Retry" is how someone pays twice for a
+                  clip sitting on the provider's server, so each gets its
+                  own word — and the decision comes from the remote task
+                  state, not from how the UI feels about it. */}
               <button
                 type="button"
-                className={`btn btn-tiny ${transition.clip ? 'btn-ghost btn-regenerate' : 'btn-primary'}`}
-                onClick={openGenerate}
+                className={`btn btn-tiny ${recovery.costsMoney ? 'btn-primary' : 'btn-ghost'}${
+                  recovery.kind === 'regenerate' ? ' btn-regenerate' : ''
+                }`}
+                disabled={recovery.kind === 'waiting'}
+                onClick={() => {
+                  if (recovery.kind === 'resume' || recovery.kind === 'retry-download') {
+                    if (recovery.jobId) {
+                      void window.f2f.queue
+                        .resumePolling(recovery.jobId)
+                        .then(() => refreshProjects())
+                    }
+                    return
+                  }
+                  openGenerate()
+                }}
+                title={
+                  recovery.costsMoney
+                    ? 'Opens the paid-request confirmation before anything is sent'
+                    : 'Costs nothing — the provider work is already paid for'
+                }
               >
-                {transition.clip
-                  ? `Regenerate — costs again`
-                  : `Generate ${index + 1} → ${index + 2} with ${providerName}`}
+                {recovery.kind === 'preview' ? `Regenerate — costs again` : recovery.label}
               </button>
               <button
                 type="button"
@@ -363,6 +391,9 @@ export function TransitionInspector({
                 Add to Queue
               </button>
             </div>
+            <p className={`inspector-cost-note${recovery.costsMoney ? '' : ' is-free'}`}>
+              {recovery.detail}
+            </p>
             {transition.clip && (
               <p className="inspector-cost-note">
                 A clip already exists. Regenerating submits a new paid request and does not replace

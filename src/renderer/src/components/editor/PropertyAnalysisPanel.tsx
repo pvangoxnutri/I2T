@@ -20,6 +20,16 @@ import {
   type EditorSelection
 } from '../../../../shared/editorSelection'
 import type { ReviewVerdict } from '../../../../shared/analysisReview'
+import {
+  analysisWorkflowState,
+  analyzerPresentation,
+  isRealAnalysis,
+  provenanceDetail,
+  provenanceLabel,
+  type AnalyzerPresentation,
+  type AnalyzerStatus
+} from '../../../../shared/analysisWorkflow'
+import { sanitizeReason } from '../../../../shared/transitionRecovery'
 import type { AnalysisConfirmationPayload } from '../../../../preload/index'
 import { AnalyzeConfirmDialog } from './AnalyzeConfirmDialog'
 import { GroundTruthReview } from './GroundTruthReview'
@@ -70,7 +80,9 @@ export function PropertyAnalysisPanel({
   onAnalysisChange: () => void
 }): React.JSX.Element {
   const [analyzers, setAnalyzers] = useState<AnalyzerMetadata[]>([])
-  const [status, setStatus] = useState<AnalysisStatus>('not-analyzed')
+  const [running, setRunning] = useState(false)
+  const [startedAt, setStartedAt] = useState<number | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [pendingResult, setPendingResult] = useState<PropertyAnalysis | null>(null)
   const [diff, setDiff] = useState<AnalysisDiff | null>(null)
   const [analyzerId, setAnalyzerId] = useState('mock')
@@ -83,11 +95,6 @@ export function PropertyAnalysisPanel({
   useEffect(() => {
     void window.f2f.projects.analysis.analyzers().then(setAnalyzers)
   }, [])
-
-  useEffect(() => {
-    if (!analysis) return
-    setStatus(analysis.state ?? (analysis.rooms.length > 0 ? 'accepted' : 'not-analyzed'))
-  }, [analysis?.updatedAt, analysis?.state])
 
   const imageLabel = useCallback(
     (id: string): string => {
@@ -113,25 +120,54 @@ export function PropertyAnalysisPanel({
     reviews
   )
 
-  const selectedAnalyzer = analyzers.find((a) => a.id === analyzerId) ?? null
   const warnings = summary.issues.filter((i) => i.severity === 'warning')
+
+  // ── WHAT THE CONFIGURED ANALYZER ACTUALLY IS ──────────────────────────
+  //
+  // One call, so the panel cannot disagree with itself about whether a run
+  // would be live, mocked or impossible.
+  const [analyzerStatus, setAnalyzerStatus] = useState<AnalyzerStatus | null>(null)
+  useEffect(() => {
+    // Re-read when Advanced closes too: the analyzer, model or mode may
+    // have just been changed there, and a status line describing the old
+    // configuration is exactly the kind of quiet lie this panel exists to
+    // stop telling.
+    void window.f2f.projects.analysis.status(project.id, analyzerId).then(setAnalyzerStatus)
+  }, [project.id, analyzerId, project.images.length, advanced])
+
+  const presentation = analyzerStatus ? analyzerPresentation(analyzerStatus) : null
+
+  // ── THE STATE MACHINE ─────────────────────────────────────────────────
+  //
+  // One value, derived. Progress is never inferred from a button label.
+  const workflow = analysisWorkflowState({
+    hasAcceptedAnalysis: summary.phase === 'analyzed',
+    hasDraft: pendingResult !== null,
+    isRunning: running,
+    isConfirming: confirm !== null,
+    lastError: error,
+    analyzerReady: presentation?.canRun ?? false
+  })
 
   // ── Running it ────────────────────────────────────────────────────────
 
   const executeAnalyzer = (id: string, token?: string): void => {
-    setStatus('analyzing')
+    setRunning(true)
+    setStartedAt(Date.now())
+    setError(null)
     setNote(null)
     void window.f2f.projects.analysis.run(project.id, id, '', token).then((res) => {
       setConfirm(null)
+      setRunning(false)
       if (!res.ok) {
-        setStatus(analysis && analysis.rooms.length > 0 ? 'accepted' : 'not-analyzed')
-        setNote(res.reason)
+        // A failure is a STATE, not a note tucked under the panel. The
+        // operator must never be left wondering whether it is still going.
+        setError(sanitizeReason(res.reason) ?? 'The analysis did not complete.')
         return
       }
       // PROPOSED, not applied. The accepted analysis is untouched until
       // someone explicitly accepts — and the diff shows what that costs.
       setPendingResult(res.analysis)
-      setStatus('needs-review')
       setNote(res.notes.join(' '))
       void window.f2f.projects.analysis.diff(project.id, res.analysis).then(setDiff)
     })
@@ -143,15 +179,15 @@ export function PropertyAnalysisPanel({
    * one-shot token without which main refuses it.
    */
   const requestAnalysis = (id: string): void => {
-    const meta = analyzers.find((a) => a.id === id)
-    if (!meta?.capabilities.incursCost) {
+    setError(null)
+    setNote(null)
+    if (presentation && !presentation.requiresConfirmation) {
       executeAnalyzer(id)
       return
     }
-    setNote(null)
     void window.f2f.projects.analysis.confirmation(project.id, id).then((payload) => {
       if (!payload) {
-        setNote('This analyzer could not be prepared for review.')
+        setError('This analyzer could not be prepared for review.')
         return
       }
       if (!payload.paidLive) {
@@ -162,83 +198,153 @@ export function PropertyAnalysisPanel({
     })
   }
 
-  const busy = status === 'analyzing' || confirm !== null
-  const dryRun = selectedAnalyzer?.capabilities.incursCost === true && confirm === null
-
   return (
     <div className="analysis-workspace">
-      {/* ── SUMMARY ────────────────────────────────────────────────────
-          The default view. Two sentences and three buttons. */}
-      <div className={`analysis-summary is-${summary.phase}`}>
-        <span className="analysis-summary-head">{summaryHeadline(summary)}</span>
-        <span className="analysis-summary-sub">{summarySubline(summary)}</span>
+      {/* ── ONE CARD PER STATE ─────────────────────────────────────────
+          The panel renders the workflow state. Progress is never inferred
+          from a button label, and a mock result never wears a live one's
+          clothes. */}
 
-        {summary.phase !== 'not-analyzed' && (
-          <ul className="analysis-counts">
-            <li>
-              <strong>{summary.imageCount}</strong> images
-            </li>
-            <li>
-              <strong>{summary.spaceCount}</strong> space{summary.spaceCount === 1 ? '' : 's'}{' '}
-              identified
-            </li>
-            <li>
-              <strong>{summary.confidentTransitions}</strong> transition
-              {summary.confidentTransitions === 1 ? '' : 's'} understood confidently
-            </li>
-            {summary.uncertainTransitions > 0 && (
-              <li className="is-warn">
-                <strong>{summary.uncertainTransitions}</strong> transition
-                {summary.uncertainTransitions === 1 ? '' : 's'} need review
-              </li>
-            )}
-          </ul>
-        )}
-
-        <div className="analysis-summary-actions">
-          <button
-            type="button"
-            className="btn btn-primary btn-tiny"
-            disabled={busy || project.images.length < 2}
-            onClick={() => requestAnalysis(analyzerId)}
-            title={selectedAnalyzer?.description}
-          >
-            {status === 'analyzing'
-              ? 'Analyzing…'
-              : summary.phase === 'not-analyzed'
-                ? 'Analyze Property'
-                : 'Re-analyze'}
-          </button>
-
-          {warnings.length > 0 && (
+      {workflow === 'analyzing' ? (
+        <AnalyzingCard
+          presentation={presentation}
+          imageCount={project.images.length}
+          startedAt={startedAt}
+          hasAccepted={summary.phase === 'analyzed'}
+        />
+      ) : workflow === 'failed' ? (
+        <div className="analysis-summary is-failed">
+          <span className="analysis-summary-head">Property analysis failed</span>
+          <span className="analysis-summary-sub">{error}</span>
+          <div className="analysis-summary-actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-tiny"
+              onClick={() => requestAnalysis(analyzerId)}
+            >
+              Try Again
+            </button>
             <button
               type="button"
               className="btn btn-ghost btn-tiny"
-              onClick={() => setShowIssues((v) => !v)}
+              onClick={() => {
+                setAdvanced(true)
+                setError(null)
+              }}
             >
-              {showIssues ? 'Hide issues' : `Review ${warnings.length} Issue${warnings.length === 1 ? '' : 's'}`}
+              Settings
             </button>
+          </div>
+          {summary.phase === 'analyzed' && (
+            <span className="analysis-summary-meta">
+              The accepted analysis is unchanged and still active.
+            </span>
+          )}
+        </div>
+      ) : (
+        <div className={`analysis-summary is-${summary.phase}`}>
+          <span className="analysis-summary-head">{summaryHeadline(summary)}</span>
+          <span className="analysis-summary-sub">{summarySubline(summary)}</span>
+
+          {/* ── WAS THIS ACTUALLY ANALYZED BY GEMINI? ────────────────────
+              Answerable here, from the document's own provenance, without
+              opening logs or settings. */}
+          {summary.phase === 'analyzed' && (
+            <span
+              className={`analysis-provenance${isRealAnalysis(analysis?.provenance) ? ' is-real' : ' is-not-real'}`}
+            >
+              {provenanceLabel(analysis?.provenance)}
+              <span className="analysis-provenance-detail">
+                {provenanceDetail(analysis?.provenance, formatClock)}
+              </span>
+            </span>
           )}
 
-          <button
-            type="button"
-            className="btn btn-ghost btn-tiny"
-            onClick={() => setAdvanced((v) => !v)}
-          >
-            {advanced ? 'Hide Advanced' : 'Advanced Analysis'}
-          </button>
-        </div>
+          {summary.phase !== 'not-analyzed' && (
+            <ul className="analysis-counts">
+              <li>
+                <strong>{summary.imageCount}</strong> images
+              </li>
+              <li>
+                <strong>{summary.spaceCount}</strong> space{summary.spaceCount === 1 ? '' : 's'}{' '}
+                identified
+              </li>
+              <li>
+                <strong>{summary.confidentTransitions}</strong> transition
+                {summary.confidentTransitions === 1 ? '' : 's'} understood confidently
+              </li>
+              {summary.uncertainTransitions > 0 && (
+                <li className="is-warn">
+                  <strong>{summary.uncertainTransitions}</strong> transition
+                  {summary.uncertainTransitions === 1 ? '' : 's'} need review
+                </li>
+              )}
+            </ul>
+          )}
 
-        {/* Which analyzer, and whether it will actually send anything. */}
-        <span className="analysis-summary-meta">
-          {selectedAnalyzer?.displayName ?? 'No analyzer'}
-          {selectedAnalyzer?.capabilities.incursCost
-            ? dryRun
-              ? ' · paid — confirmation required'
-              : ' · paid'
-            : ' · free / local'}
-        </span>
-      </div>
+          {/* ── WHAT ANALYZE WILL ACTUALLY DO ────────────────────────────
+              Stated before the button, not discovered after it. */}
+          {presentation && (
+            <div className={`analyzer-status is-${presentation.mode}`}>
+              <span className="analyzer-status-label">{presentation.label}</span>
+              <span className="analyzer-status-scope">
+                Whole-property analysis · {project.images.length} image
+                {project.images.length === 1 ? '' : 's'}
+              </span>
+              <span className="analyzer-status-note">{presentation.note}</span>
+            </div>
+          )}
+
+          <div className="analysis-summary-actions">
+            {presentation?.action === 'configure' ? (
+              /* NO SILENT FALLBACK. A missing key or a closed lock does not
+                 quietly become a mock run — it becomes a different button. */
+              <button
+                type="button"
+                className="btn btn-primary btn-tiny"
+                onClick={() => setAdvanced(true)}
+              >
+                Configure {analyzerStatus?.displayName ?? 'analyzer'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-primary btn-tiny"
+                disabled={project.images.length < 2 || !presentation?.canRun}
+                onClick={() => requestAnalysis(analyzerId)}
+                title="All project images are analyzed together in one request"
+              >
+                {summary.phase === 'not-analyzed' ? 'Analyze Property' : 'Re-analyze Property'}
+              </button>
+            )}
+
+            {warnings.length > 0 && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-tiny"
+                onClick={() => setShowIssues((v) => !v)}
+              >
+                {showIssues
+                  ? 'Hide issues'
+                  : `Review ${warnings.length} Issue${warnings.length === 1 ? '' : 's'}`}
+              </button>
+            )}
+
+            <button
+              type="button"
+              className="btn btn-ghost btn-tiny"
+              onClick={() => setAdvanced((v) => !v)}
+            >
+              {advanced ? 'Hide Advanced' : 'Advanced'}
+            </button>
+          </div>
+
+          <span className="analysis-summary-helper">
+            All project images are analyzed together to understand rooms, landmarks and spatial
+            relationships.
+          </span>
+        </div>
+      )}
 
       {/* ── ISSUES ─────────────────────────────────────────────────────
           Warnings to resolve, the way professional software presents
@@ -260,12 +366,27 @@ export function PropertyAnalysisPanel({
           A draft NEVER becomes the accepted analysis on its own. */}
       {pendingResult && (
         <div className="analysis-review">
-          <span className="analysis-review-title">Analysis draft — review before accepting</span>
-          <p>
-            {pendingResult.rooms.length} room{pendingResult.rooms.length === 1 ? '' : 's'},{' '}
-            {pendingResult.edges.length} connection{pendingResult.edges.length === 1 ? '' : 's'}{' '}
-            proposed.
-          </p>
+          {/* Something clearly HAPPENED. The old panel dropped straight
+              back to a Re-analyze button with no indication that a result
+              had arrived at all. */}
+          <span className="analysis-review-title">Analysis draft ready</span>
+          <span className={`analysis-provenance is-${pendingResult.provenance?.mode ?? 'manual'}`}>
+            {provenanceLabel(pendingResult.provenance)}
+          </span>
+          <ul className="analysis-counts">
+            <li>
+              <strong>{pendingResult.provenance?.imageCount ?? project.images.length}</strong> images
+              analyzed
+            </li>
+            <li>
+              <strong>{pendingResult.rooms.length}</strong> space
+              {pendingResult.rooms.length === 1 ? '' : 's'} identified
+            </li>
+            <li>
+              <strong>{pendingResult.edges.length}</strong> connection
+              {pendingResult.edges.length === 1 ? '' : 's'} proposed
+            </li>
+          </ul>
           {diff && !diff.identical && (
             <ul className="analysis-diff">
               {diff.addedRooms.length > 0 && <li>+ rooms: {diff.addedRooms.join(', ')}</li>}
@@ -305,7 +426,6 @@ export function PropertyAnalysisPanel({
                 void window.f2f.projects.review.clearDraft(project.id)
                 setPendingResult(null)
                 setDiff(null)
-                setStatus(analysis && analysis.rooms.length > 0 ? 'accepted' : 'not-analyzed')
               }}
             >
               Discard Draft
@@ -320,7 +440,6 @@ export function PropertyAnalysisPanel({
                     window.f2f.projects.review.promoteDraft(project.id).then(() => {
                       setPendingResult(null)
                       setDiff(null)
-                      setStatus('accepted')
                       onAnalysisChange()
                     })
                   )
@@ -419,6 +538,72 @@ export function PropertyAnalysisPanel({
       )}
     </div>
   )
+}
+
+/**
+ * THE IN-FLIGHT STATE.
+ *
+ * ── WHY IT REPLACES THE CARD ─────────────────────────────────────────
+ *
+ * The old panel left the accepted analysis on screen while a request was
+ * out, with nothing but a disabled button to suggest anything was
+ * happening. Someone who pressed Analyze and saw the same summary they saw
+ * a moment earlier would reasonably conclude the click did nothing — and
+ * press it again.
+ *
+ * So while a request is in flight this is the whole card: what is running,
+ * on how many images, for how long. The accepted analysis is still active
+ * and that is stated in words rather than by leaving it lying there.
+ */
+function AnalyzingCard({
+  presentation,
+  imageCount,
+  startedAt,
+  hasAccepted
+}: {
+  presentation: AnalyzerPresentation | null
+  imageCount: number
+  startedAt: number | null
+  hasAccepted: boolean
+}): React.JSX.Element {
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    if (!startedAt) return
+    const tick = (): void => setElapsed(Math.floor((Date.now() - startedAt) / 1000))
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [startedAt])
+
+  return (
+    <div className="analysis-summary is-analyzing">
+      <span className="analysis-summary-head">
+        <span className="analysis-spinner" aria-hidden />
+        Analyzing property…
+      </span>
+      <span className="analysis-summary-sub">{presentation?.label}</span>
+      <ul className="analysis-counts">
+        <li>
+          <strong>{imageCount}</strong> images
+        </li>
+        <li>Sending all images in one request</li>
+        <li>
+          Elapsed <strong>{elapsed}s</strong>
+        </li>
+      </ul>
+      {hasAccepted && (
+        <span className="analysis-summary-meta">
+          Current accepted analysis remains active until a new draft is accepted.
+        </span>
+      )}
+    </div>
+  )
+}
+
+/** Clock time only — the date is never the useful part here. */
+function formatClock(ms: number): string {
+  const d = new Date(ms)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 /** Warnings to resolve. Clicking one takes you to the thing it is about. */

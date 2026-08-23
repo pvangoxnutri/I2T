@@ -175,5 +175,89 @@ export async function runUiProbe(win: BrowserWindow): Promise<void> {
   console.log('\n── WALKING THE SEQUENCE ───────────────────────────────────')
   console.log(`  distinct sources over 4 steps: ${new Set(walk).size} of ${walk.length}`)
 
+  // ── THE ANALYSIS PANEL ───────────────────────────────────────────────
+  const analysis = await js<Record<string, unknown>>(`
+    (() => {
+      const tab = Array.from(document.querySelectorAll('.left-tab'))
+        .find((t) => t.textContent.trim() === 'Analysis')
+      if (tab) tab.click()
+      return true
+    })()
+  `)
+  void analysis
+  await wait(1200)
+
+  const panel = await js<Record<string, unknown>>(`
+    (() => {
+      const q = (s) => document.querySelector(s)
+      const t = (s) => (q(s) ? q(s).textContent.trim() : null)
+      return {
+        head: t('.analysis-summary-head'),
+        sub: t('.analysis-summary-sub'),
+        analyzerLabel: t('.analyzer-status-label'),
+        analyzerScope: t('.analyzer-status-scope'),
+        analyzerNote: t('.analyzer-status-note'),
+        analyzerModeClass: q('.analyzer-status') ? q('.analyzer-status').className : null,
+        provenance: t('.analysis-provenance'),
+        helper: t('.analysis-summary-helper'),
+        primaryButton: q('.analysis-summary-actions button')
+          ? q('.analysis-summary-actions button').textContent.trim()
+          : null,
+        primaryDisabled: q('.analysis-summary-actions button')
+          ? q('.analysis-summary-actions button').disabled
+          : null,
+        buttons: Array.from(document.querySelectorAll('.analysis-summary-actions button'))
+          .map((b) => b.textContent.trim())
+      }
+    })()
+  `)
+  console.log('\n── ANALYSIS PANEL ─────────────────────────────────────────')
+  for (const [k, v] of Object.entries(panel)) {
+    console.log(`  ${k.padEnd(20)}: ${JSON.stringify(v)}`)
+  }
+
+  // ── SWITCH TO GEMINI AND SEE WHAT THE PANEL SAYS ─────────────────────
+  //
+  // Selecting an analyzer changes no stored state; it is local panel
+  // state. Nothing is sent.
+  await js(`
+    (() => {
+      const adv = Array.from(document.querySelectorAll('.analysis-summary-actions button'))
+        .find((b) => b.textContent.includes('Advanced'))
+      if (adv) adv.click()
+      return true
+    })()
+  `)
+  await wait(900)
+  const switched = await js<string | null>(`
+    (() => {
+      const sel = document.querySelector('.analysis-advanced select')
+      if (!sel) return null
+      const opt = Array.from(sel.options).find((o) => /gemini/i.test(o.textContent))
+      if (!opt) return 'no gemini option'
+      sel.value = opt.value
+      sel.dispatchEvent(new Event('change', { bubbles: true }))
+      return opt.textContent
+    })()
+  `)
+  await wait(1400)
+  const gemini = await js<Record<string, unknown>>(`
+    (() => {
+      const q = (s) => document.querySelector(s)
+      const t = (s) => (q(s) ? q(s).textContent.trim() : null)
+      return {
+        analyzerLabel: t('.analyzer-status-label'),
+        analyzerNote: t('.analyzer-status-note'),
+        modeClass: q('.analyzer-status') ? q('.analyzer-status').className : null,
+        buttons: Array.from(document.querySelectorAll('.analysis-summary-actions button'))
+          .map((b) => b.textContent.trim() + (b.disabled ? ' [disabled]' : ''))
+      }
+    })()
+  `)
+  console.log(`\n── AFTER SELECTING ${JSON.stringify(switched)} ──────────────`)
+  for (const [k, v] of Object.entries(gemini)) {
+    console.log(`  ${k.padEnd(20)}: ${JSON.stringify(v)}`)
+  }
+
   console.log('\n── probe complete ─────────────────────────────────')
 }

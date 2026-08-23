@@ -26,6 +26,7 @@ import type { RebuildPlanSummary, TransitionPromptPlan } from '../shared/promptP
 import type { GenerationCostEntry, ProjectSpendSummary } from '../shared/costLedger'
 import type { CompareAssemblyResult } from '../shared/seamBlend'
 import type { ImageFacts, ImageOverride, OverrideField } from '../shared/imageFacts'
+import type { AnalyzerStatus } from '../shared/analysisWorkflow'
 
 export interface ReviewFactsPayload {
   facts: Array<ReviewableFact & { verdict: ReviewVerdict }>
@@ -209,6 +210,13 @@ const api = {
         ipcRenderer.invoke('analysis:useAnalysisPrompt', projectId, pairKey),
       /** Available analyzers. None of them calls a paid service. */
       analyzers: (): Promise<AnalyzerMetadata[]> => ipcRenderer.invoke('analysis:analyzers'),
+      /**
+       * What the configured analyzer IS — provider, model, mode, and
+       * whether a key exists. Never the key. One call, so the panel cannot
+       * disagree with itself about whether a run would be live.
+       */
+      status: (projectId: string, analyzerId: string): Promise<AnalyzerStatus | null> =>
+        ipcRenderer.invoke('analysis:status', projectId, analyzerId),
       /**
        * Run one. The result is returned for review, never auto-saved —
        * an analyzer must not silently replace hand-entered rooms.

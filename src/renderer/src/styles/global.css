@@ -4213,6 +4213,115 @@ textarea {
   margin: 0;
 }
 
+/* A recovery that costs NOTHING must not wear a warning colour — that is
+   what pushes people towards paying instead of resuming. */
+.inspector-cost-note.is-free { color: var(--text-mute); }
+
+/* ── Analysis workflow states ─────────────────────────────────────────
+   The panel renders a state. Progress is never inferred from a label. */
+
+.analysis-summary.is-analyzing { border-color: var(--border-strong); }
+.analysis-summary.is-failed { border-color: var(--err); }
+
+.analysis-summary-head { display: flex; align-items: center; gap: 8px; }
+
+.analysis-spinner {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: analysis-spin 0.8s linear infinite;
+}
+
+@keyframes analysis-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Motion is decoration here — the words carry the meaning, so anyone who
+   has asked for less of it loses nothing. */
+@media (prefers-reduced-motion: reduce) {
+  .analysis-spinner { animation: none; border-top-color: var(--border-strong); }
+}
+
+.analysis-summary-helper {
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--text-mute);
+}
+
+/* ── WHAT THE ANALYZER ACTUALLY IS ────────────────────────────────────
+   A mock result must never be able to pass for a live one, so the modes
+   are visually distinct and the live one is the only one that is not
+   qualified by a caveat. */
+
+.analyzer-status {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--border-strong);
+  background: var(--bg-card);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.analyzer-status-label { font-size: 11.5px; color: var(--text); }
+
+.analyzer-status-scope {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.analyzer-status-note { font-size: 10.5px; line-height: 1.45; color: var(--text-mute); }
+
+.analyzer-status.is-live { border-left-color: var(--ok); }
+.analyzer-status.is-dry-run { border-left-color: var(--info); }
+.analyzer-status.is-mock,
+.analyzer-status.is-manual { border-left-color: var(--text-mute); }
+.analyzer-status.is-unconfigured { border-left-color: var(--warn); }
+.analyzer-status.is-unconfigured .analyzer-status-label { color: var(--warn); }
+
+/* ── Provenance ───────────────────────────────────────────────────────
+   The answer to "was this actually analyzed by Gemini?", on the card. */
+
+.analysis-provenance {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  align-self: flex-start;
+}
+
+.analysis-provenance.is-real { border-color: var(--ok); color: var(--ok); }
+/* Anything that is NOT a real model run says so in its colour as well as
+   its words — the two failure modes of this label are opposite, and only
+   one of them is dangerous. */
+.analysis-provenance.is-not-real,
+.analysis-provenance.is-mock,
+.analysis-provenance.is-dry-run { border-color: var(--warn); color: var(--warn); }
+
+.analysis-provenance-detail { color: var(--text-mute); font-size: 10px; }
+
+/* ── Transition recovery in the preview ───────────────────────────────*/
+
+.preview-endpoints-status.is-failed { color: var(--err); }
+
+.preview-recovery-detail {
+  max-width: 200px;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--text-mute);
+  text-align: center;
+}
+
 /* ── Timeline blocks ──────────────────────────────────────────────────
    Images larger than transitions: the photograph must be recognisable
    at a glance, the transition only has to be identifiable. */

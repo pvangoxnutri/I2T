@@ -54,6 +54,7 @@ import {
   setOverrideField
 } from './db/overrideRepo'
 import { applyImageOverrides, imageFacts, type OverrideField } from '../shared/imageFacts'
+import type { AnalyzerMode } from '../shared/analysisWorkflow'
 import {
   clearDraftReviews,
   listReviews,
@@ -223,9 +224,47 @@ export function registerIpc(): void {
     applyImageOverrides(readAnalysis(projectId), listOverrides(projectId))
   )
 
-  ipcMain.handle('analysis:save', (_e, analysis: PropertyAnalysis): PropertyAnalysis =>
-    saveAnalysis(analysis)
-  )
+  ipcMain.handle('analysis:save', (_e, analysis: PropertyAnalysis): PropertyAnalysis => {
+    // Acceptance is a human act with a time, and the panel reports it. It
+    // is stamped here rather than in the renderer so the clock is the same
+    // one that stamped `analyzedAt`.
+    const accepted =
+      analysis.state === 'accepted' && analysis.provenance && !analysis.provenance.acceptedAt
+        ? {
+            ...analysis,
+            provenance: { ...analysis.provenance, acceptedAt: Date.now() }
+          }
+        : analysis
+    return saveAnalysis(accepted)
+  })
+
+  /**
+   * Everything the analysis panel needs to describe the CONFIGURED
+   * analyzer without assembling it from three separate calls — which is
+   * how the renderer previously ended up able to disagree with itself
+   * about whether a run would be live, mocked, or impossible.
+   *
+   * Carries whether a key EXISTS. Never the key.
+   */
+  ipcMain.handle('analysis:status', (_e, projectId: string, analyzerId: string) => {
+    const settings = storedSettings()
+    const runtime = analyzerRuntimeFrom(settings)
+    const analyzer = analyzerById(analyzerId, runtime)
+    const project = listProjects().find((p) => p.id === projectId)
+    if (!analyzer) return null
+    const meta = analyzer.metadata()
+    return {
+      analyzerId,
+      displayName: meta.displayName,
+      provider: meta.provider,
+      model: meta.model,
+      mode: runtime.mode,
+      incursCost: meta.capabilities.incursCost,
+      hasApiKey: Boolean(sanitizeApiKey(runtime.apiKey)),
+      allowLive: runtime.allowLive,
+      imageCount: project?.images.length ?? 0
+    }
+  })
 
   /**
    * The prompt a transition WOULD get from the current analysis, without
@@ -348,7 +387,43 @@ export function registerIpc(): void {
         }
       }
 
-      return result
+      if (!result.ok) return result
+
+      // ── PROVENANCE IS STAMPED HERE ───────────────────────────────────
+      //
+      // At the only point that knows all of it: which analyzer ran, which
+      // model, and — the part that matters — whether this was a real
+      // request or a local placeholder. Stamped onto the draft so it
+      // travels with the document through review and acceptance, and
+      // survives a restart. Without it "was this actually analyzed by
+      // Gemini?" is answerable only from logs.
+      const mode: AnalyzerMode = !meta.capabilities.incursCost
+        ? analyzerId === 'mock'
+          ? 'mock'
+          : 'manual'
+        : runtime.mode === 'live'
+          ? 'live'
+          : 'dry-run'
+
+      return {
+        ok: true as const,
+        notes: result.notes,
+        analysis: {
+          ...result.analysis,
+          analyzerId,
+          provenance: {
+            analyzerId,
+            displayName: meta.displayName,
+            provider: meta.provider,
+            model: meta.model,
+            mode,
+            imageCount: project.images.length,
+            analyzedAt: Date.now(),
+            // Only a human accept sets this — see `analysis:save`.
+            acceptedAt: null
+          }
+        }
+      }
     }
   )
 

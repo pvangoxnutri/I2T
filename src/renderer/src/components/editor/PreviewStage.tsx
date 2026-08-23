@@ -4,6 +4,7 @@ import type { Project } from '../../types'
 import { SEAM_SECONDS, type SeamBlend } from '../../../../shared/seamBlend'
 import type { EditorSelection, PreviewMode } from '../../../../shared/editorSelection'
 import { resolvePreviewSource, statusWordFor } from '../../../../shared/previewSource'
+import type { TransitionRecovery } from '../../../../shared/transitionRecovery'
 
 export type { PreviewMode }
 
@@ -47,7 +48,8 @@ export function PreviewStage({
   selection,
   mode,
   onShowFullVideo,
-  onGenerate,
+  onRecover,
+  recovery,
   generating = false
 }: {
   project: Project
@@ -55,12 +57,14 @@ export function PreviewStage({
   mode: PreviewMode
   onShowFullVideo: () => void
   /**
-   * Opens the existing paid-request confirmation for the selected
-   * transition. Routed through the editor page rather than called here so
-   * the preview never reaches the generation path itself — the safety
-   * gate, the provider lock and the cost dialog are all unchanged.
+   * Performs the recovery the preview is offering. Routed through the
+   * editor page rather than called here so the preview never reaches the
+   * generation path itself — the safety gate, the provider lock and the
+   * cost dialog are all unchanged.
    */
-  onGenerate?: () => void
+  onRecover?: () => void
+  /** What to offer for the selected transition, decided in `shared`. */
+  recovery?: TransitionRecovery | null
   generating?: boolean
 }): React.JSX.Element {
   const { settings, updateSettings } = useAppState()
@@ -228,16 +232,35 @@ export function PreviewStage({
               <span className="preview-endpoints-arrow" aria-hidden>
                 →
               </span>
-              <span className="preview-endpoints-status">{statusWordFor(source.status)}</span>
-              {onGenerate && source.canGenerate && (
+              <span
+                className={`preview-endpoints-status${source.status === 'failed' ? ' is-failed' : ''}`}
+              >
+                {source.status === 'failed'
+                  ? `Transition ${source.index + 1} → ${source.index + 2} failed`
+                  : statusWordFor(source.status)}
+              </span>
+
+              {/* ── RECOVERY, WHERE THE FAILURE IS ─────────────────────────
+                  Resume, Retry download and Regenerate are three different
+                  things costing wildly different amounts, so they get three
+                  different words — and the right one is offered here rather
+                  than behind an inspector tab. */}
+              {recovery && recovery.kind !== 'generate' && recovery.kind !== 'preview' && (
+                <span className="preview-recovery-detail">{recovery.detail}</span>
+              )}
+              {onRecover && recovery && recovery.kind !== 'preview' && recovery.kind !== 'waiting' && (
                 <button
                   type="button"
-                  className="btn btn-primary btn-tiny"
-                  onClick={onGenerate}
+                  className={`btn btn-tiny ${recovery.costsMoney ? 'btn-primary' : 'btn-ghost'}`}
+                  onClick={onRecover}
                   disabled={generating}
-                  title="Opens the paid-request confirmation before anything is sent"
+                  title={
+                    recovery.costsMoney
+                      ? 'Opens the paid-request confirmation before anything is sent'
+                      : 'Costs nothing — the provider work is already paid for'
+                  }
                 >
-                  {generating ? 'Opening…' : `Generate ${source.index + 1} → ${source.index + 2}`}
+                  {generating ? 'Working…' : recovery.label}
                 </button>
               )}
             </div>

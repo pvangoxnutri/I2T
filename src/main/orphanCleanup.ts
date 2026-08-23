@@ -42,6 +42,19 @@ const NOT_LIVE = 'project_id NOT IN (SELECT id FROM projects)'
 
 const CLEANABLE = `${NOT_LIVE} AND ${SMOKE_ID}`
 
+/**
+ * Image rows belonging to a live project that is NOT smoke-owned.
+ *
+ * The number that must not move. Everything else this sweep touches is
+ * expected to change; if this changes, it reached the operator's data and
+ * the whole thing is rolled back as a failure.
+ */
+const NON_SMOKE_IMAGE_COUNT = `
+  SELECT COUNT(*) FROM project_images
+  WHERE project_id IN (
+    SELECT id FROM projects WHERE NOT (id LIKE 'smoke-%' OR id LIKE 'smoke_%')
+  )`
+
 const TABLES = [
   'project_images',
   'transitions',
@@ -96,6 +109,15 @@ export function cleanSmokeOrphans(dryRun: boolean): void {
     )
   }
 
+  // Live smoke projects left behind by a suite run that failed part-way.
+  // Counted separately because they are NOT orphans — their rows are
+  // perfectly consistent, they simply should not exist any more.
+  const abandoned = scalar(
+    `SELECT COUNT(*) FROM projects WHERE ${SMOKE_ID.replace(/project_id/g, 'id')}`
+  )
+  line()
+  line(`abandoned smoke projects (live rows, from failed runs): ${abandoned}`)
+
   // What is deliberately being LEFT — named, so the operator can see it is
   // a decision rather than something the sweep happened to miss.
   line()
@@ -124,10 +146,24 @@ export function cleanSmokeOrphans(dryRun: boolean): void {
     return
   }
 
+  // Measured BEFORE the sweep, so the verification afterwards compares
+  // against reality rather than against what the sweep believes it did.
+  const beforeProjects = scalar('SELECT COUNT(*) FROM projects')
+  const beforeNonSmokeImages = scalar(NON_SMOKE_IMAGE_COUNT)
+
   // ── THE SWEEP ────────────────────────────────────────────────────────
   const db = getDb()
   db.run('BEGIN')
   try {
+    // Abandoned smoke PROJECTS first. A suite run that fails part-way
+    // leaves its fixtures behind as live project rows — not orphans, so
+    // the orphan predicate correctly ignores them, and they would sit
+    // there inflating the next run's baseline forever.
+    //
+    // Deleting the project row is enough now that cascading deletes
+    // actually fire; before that fix this would have made the problem
+    // worse by converting live rows into orphaned ones.
+    db.run(`DELETE FROM projects WHERE ${SMOKE_ID.replace(/project_id/g, 'id')}`)
     for (const table of TABLES) {
       db.run(`DELETE FROM ${table} WHERE ${CLEANABLE}`)
     }
@@ -152,14 +188,28 @@ export function cleanSmokeOrphans(dryRun: boolean): void {
   for (let i = 0; i < before.length; i++) {
     const b = before[i]
     const a = after[i]
-    const expected = b.total - b.cleanable
     line(`  ${b.table.padEnd(24)}${String(b.total).padStart(6)} → ${String(a.total).padStart(6)}  (removed ${b.total - a.total})`)
-    if (a.total !== expected) {
-      problems.push(`${b.table}: expected ${expected} rows to remain, found ${a.total}`)
-    }
+    // ── THE ONE INVARIANT THAT MATTERS ─────────────────────────────────
+    //
+    // Row totals are no longer predictable, because deleting an abandoned
+    // smoke project cascades to an unknown number of children. So the
+    // check is not "how many went" but "did anything that was NOT ours
+    // go": the retained non-smoke orphan count must be untouched, and no
+    // live non-smoke project may lose a single row.
     if (a.retained !== b.retained) {
       problems.push(`${b.table}: retained (non-smoke) orphans changed ${b.retained} → ${a.retained}`)
     }
+  }
+
+  const survivingProjects = scalar('SELECT COUNT(*) FROM projects')
+  line(`  ${'projects'.padEnd(24)}${String(beforeProjects).padStart(6)} → ${String(survivingProjects).padStart(6)}  (removed ${beforeProjects - survivingProjects})`)
+  if (beforeProjects - survivingProjects !== abandoned) {
+    problems.push(
+      `projects: expected to remove exactly ${abandoned} abandoned smoke projects, removed ${beforeProjects - survivingProjects}`
+    )
+  }
+  if (beforeNonSmokeImages !== scalar(NON_SMOKE_IMAGE_COUNT)) {
+    problems.push('rows belonging to a non-smoke project were removed')
   }
 
   if (problems.length > 0) {

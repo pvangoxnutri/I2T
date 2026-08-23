@@ -20,6 +20,12 @@ import { ImageInspector } from '../editor/ImageInspector'
 import { ExportDrawer } from '../editor/ExportDrawer'
 import { LiveGenerateDialog } from '../editor/LiveGenerateDialog'
 import type { LiveConfirmationPayload } from '../../../../preload/index'
+import {
+  latestJobForPair,
+  transitionRecovery,
+  type TransitionRecovery
+} from '../../../../shared/transitionRecovery'
+import { pairIndexOf } from '../../../../shared/previewSource'
 
 /**
  * The I2T editor — a desktop video-editing workspace.
@@ -60,7 +66,7 @@ export function ProjectEditorPage({
   projectId: string
   onBack: () => void
 }): React.JSX.Element {
-  const { projects, moveImage, refreshProjects } = useAppState()
+  const { projects, queue, moveImage, refreshProjects } = useAppState()
   const [selection, setSelection] = useState<EditorSelection>(selectFullVideo())
   const [exportOpen, setExportOpen] = useState(false)
   const [analysis, setAnalysis] = useState<PropertyAnalysis | null>(null)
@@ -135,16 +141,31 @@ export function ProjectEditorPage({
   }, [onKeyDown])
 
   /**
-   * GENERATE, FROM THE PREVIEW.
+   * RECOVERY, FROM THE PREVIEW.
    *
-   * Deliberately the SAME path the inspector's Generation tab uses: build
-   * the paid confirmation in main, show it, and submit only on confirm.
-   * The preview is given a callback rather than the provider API, so no
-   * safety gate, provider lock or cost dialog is bypassed by putting the
-   * button somewhere more findable.
+   * ── THREE ACTIONS, THREE COSTS ───────────────────────────────────────
+   *
+   * Resume and Retry download continue work the provider has ALREADY been
+   * paid for, so they go straight through — there is nothing to confirm,
+   * and making someone confirm a free action teaches them to click through
+   * confirmations. Regenerate submits a NEW paid task, so it takes exactly
+   * the same confirmation path the inspector uses. No safety gate,
+   * provider lock or cost dialog is bypassed by making the button easier
+   * to find.
    */
-  const openGenerate = useCallback(
-    (pairKey: string): void => {
+  const recover = useCallback(
+    (pairKey: string, action: TransitionRecovery): void => {
+      if (action.kind === 'resume' && action.jobId) {
+        void window.f2f.queue.resumePolling(action.jobId).then(() => refreshProjects())
+        return
+      }
+      if (action.kind === 'retry-download' && action.jobId) {
+        // The remote task already succeeded — this re-runs the transfer
+        // and can never resubmit, by construction of the queue's own
+        // idempotency state machine.
+        void window.f2f.queue.resumePolling(action.jobId).then(() => refreshProjects())
+        return
+      }
       setGenerateOpening(true)
       void window.f2f.generation
         .liveConfirmation(projectId, pairKey)
@@ -153,7 +174,7 @@ export function ProjectEditorPage({
         })
         .finally(() => setGenerateOpening(false))
     },
-    [projectId]
+    [projectId, refreshProjects]
   )
 
   if (!project) {
@@ -168,6 +189,18 @@ export function ProjectEditorPage({
   }
 
   const inspector = inspectorModeFor(selection)
+
+  // What to offer for the selected transition. Decided in `shared` from
+  // the REMOTE task state, so a free recovery is never mislabelled as a
+  // paid one or the other way round.
+  const recovery =
+    selection.kind === 'transition'
+      ? transitionRecovery(
+          project.transitions[selection.pairKey],
+          latestJobForPair(queue, project.id, selection.pairKey),
+          `${pairIndexOf(project, selection.pairKey) + 1} → ${pairIndexOf(project, selection.pairKey) + 2}`
+        )
+      : null
 
   return (
     <div className="editor">
@@ -186,8 +219,11 @@ export function ProjectEditorPage({
           selection={selection}
           mode={previewModeFor(selection)}
           onShowFullVideo={() => setSelection(selectFullVideo())}
-          onGenerate={
-            selection.kind === 'transition' ? () => openGenerate(selection.pairKey) : undefined
+          recovery={recovery}
+          onRecover={
+            selection.kind === 'transition' && recovery
+              ? () => recover(selection.pairKey, recovery)
+              : undefined
           }
           generating={generateOpening}
         />

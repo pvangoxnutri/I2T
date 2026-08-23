@@ -39,6 +39,8 @@ export type AnalysisConfidence = 'confirmed' | 'probable' | 'unknown'
 // `available` flag, none of which belong to the domain model. Re-exported
 // so existing imports keep working.
 export type { AnalyzerCapabilities, AnalyzerMetadata } from './analyzerTypes'
+import type { AnalysisProvenance } from './analysisWorkflow'
+export type { AnalysisProvenance }
 
 /** Where the analysis came from. Manual is a real, supported answer. */
 export type AnalysisSource = 'manual' | 'mock' | 'provider'
@@ -136,6 +138,17 @@ export interface PropertyAnalysis {
   state?: AnalysisState
   /** Which analyzer produced this, when one did. */
   analyzerId?: string
+  /**
+   * WHERE THIS CAME FROM — provider, model, and whether it was a real
+   * request or a mock.
+   *
+   * Stored WITH the document rather than beside it, so it cannot drift
+   * from the analysis it describes and cannot be lost by a settings
+   * change. It exists to answer one question without reading logs: was
+   * this actually analyzed by a vision model, or is it a placeholder that
+   * looks like one? Absent on documents written before it existed.
+   */
+  provenance?: AnalysisProvenance
   rooms: RoomRecord[]
   images: ImageAnalysis[]
   edges: RoomEdge[]
@@ -179,6 +192,11 @@ export function parseAnalysis(projectId: string, json: string | null): PropertyA
       // treated as accepted rather than demoted to a draft under someone.
       state: raw.state ?? (rooms.length > 0 ? 'accepted' : 'not-analyzed'),
       analyzerId: raw.analyzerId,
+      // Absent on documents written before provenance existed. Left
+      // undefined rather than invented: claiming an unknown analysis was
+      // "manual" would be a guess presented as a fact, and the whole point
+      // of this field is that it can be trusted.
+      provenance: raw.provenance,
       rooms,
       images: Array.isArray(raw.images) ? raw.images : [],
       edges: Array.isArray(raw.edges) ? raw.edges : [],

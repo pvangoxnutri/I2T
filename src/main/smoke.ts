@@ -3,7 +3,12 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { app } from 'electron'
 import assert from 'node:assert'
-import { transitionKey, type Project, type QueueJob } from '../shared/types'
+import {
+  transitionKey,
+  type Project,
+  type QueueJob,
+  type TransitionSettings
+} from '../shared/types'
 import { formatPrice, priceSnapshot, sanitizePricePerImage } from '../shared/pricing'
 import { deriveProjectStatus, projectReadiness } from '../shared/projectStatus'
 import { estimateAiCost, mockRate } from '../shared/providerCost'
@@ -126,6 +131,22 @@ import {
   transitionSettingsFor,
   type PreviewSource
 } from '../shared/previewSource'
+import {
+  analysisWorkflowState,
+  analyzerPresentation,
+  isRealAnalysis,
+  provenanceDetail,
+  provenanceLabel,
+  type AnalysisProvenance
+} from '../shared/analysisWorkflow'
+import {
+  categorizeProviderError,
+  isConfigurationError,
+  latestJobForPair,
+  providerErrorMessage,
+  sanitizeReason,
+  transitionRecovery
+} from '../shared/transitionRecovery'
 import {
   ANALYSIS_TOKEN_TTL_MS,
   consumeAnalysisToken,
@@ -315,6 +336,8 @@ export async function runSmokeTest(): Promise<void> {
     await testPropertyAnalyzer(workDir, createdProjects)
     testProjectDeletionCascade(workDir)
     testEditorSelection()
+    testAnalysisWorkflow()
+    testTransitionRecovery()
     testPreviewSource(workDir, createdProjects)
     testSequenceReorder()
     testAnalysisSummary()
@@ -1634,6 +1657,354 @@ function testEditorSelection(): void {
   )
 
   log('editor selection: one selection drives preview + inspector, typing never moves a photo')
+}
+
+/**
+ * THE PROPERTY-ANALYSIS WORKFLOW.
+ *
+ * ── WHAT THIS PINS ───────────────────────────────────────────────────
+ *
+ * The panel used to infer everything from a button label, which usually
+ * read "Re-analyze". It could not tell the operator whether anything was
+ * running, whether it had finished, or — the dangerous one — whether the
+ * accepted analysis had ever been near a vision model. A mock run and a
+ * live Gemini run produced visually identical results.
+ *
+ * The state and the analyzer's identity are now values, so both are
+ * assertable without a DOM.
+ */
+function testAnalysisWorkflow(): void {
+  const base = {
+    hasAcceptedAnalysis: false,
+    hasDraft: false,
+    isRunning: false,
+    isConfirming: false,
+    lastError: null as string | null,
+    analyzerReady: true
+  }
+
+  // ── 1. The states, and their precedence ──────────────────────────────
+  assert.strictEqual(analysisWorkflowState(base), 'ready-to-analyze')
+  assert.strictEqual(
+    analysisWorkflowState({ ...base, analyzerReady: false }),
+    'not-analyzed',
+    'with no runnable analyzer the panel does not pretend one is ready'
+  )
+  assert.strictEqual(analysisWorkflowState({ ...base, isConfirming: true }), 'confirming')
+  assert.strictEqual(analysisWorkflowState({ ...base, isRunning: true }), 'analyzing')
+  assert.strictEqual(analysisWorkflowState({ ...base, hasDraft: true }), 'draft-ready')
+  assert.strictEqual(analysisWorkflowState({ ...base, hasAcceptedAnalysis: true }), 'accepted')
+  assert.strictEqual(analysisWorkflowState({ ...base, lastError: 'boom' }), 'failed')
+
+  // In-flight beats everything: while a request is out that is the only
+  // thing worth showing, and leaving the old summary up is what made
+  // people press Analyze twice.
+  assert.strictEqual(
+    analysisWorkflowState({ ...base, isRunning: true, hasAcceptedAnalysis: true, hasDraft: true }),
+    'analyzing',
+    'a run in flight outranks both a draft and an accepted analysis'
+  )
+  // A draft outranks an accepted analysis — it is a decision someone owes.
+  assert.strictEqual(
+    analysisWorkflowState({ ...base, hasDraft: true, hasAcceptedAnalysis: true }),
+    'draft-ready'
+  )
+  // An error outranks "accepted", or a failure would look like an idle panel.
+  assert.strictEqual(
+    analysisWorkflowState({ ...base, lastError: 'boom', hasAcceptedAnalysis: true }),
+    'failed'
+  )
+
+  // ── 2. WHAT THE ANALYZER IS — no silent fallback, ever ───────────────
+  const gemini = {
+    analyzerId: 'gemini',
+    displayName: 'Gemini 2.5 Flash',
+    provider: 'google',
+    model: 'gemini-2.5-flash',
+    mode: 'live' as const,
+    incursCost: true,
+    hasApiKey: true,
+    allowLive: true,
+    imageCount: 30
+  }
+
+  const live = analyzerPresentation(gemini)
+  assert.strictEqual(live.mode, 'live')
+  assert.strictEqual(live.label, 'gemini-2.5-flash · Live')
+  assert.ok(live.canRun)
+  assert.ok(live.requiresConfirmation, 'a live paid run always stops for confirmation')
+  assert.match(live.note, /30 project images/, 'and says all images are sent')
+
+  const dry = analyzerPresentation({ ...gemini, mode: 'dry-run' })
+  assert.strictEqual(dry.mode, 'dry-run')
+  assert.match(dry.label, /Dry Run/, 'Dry Run is named in the label, not buried in a tooltip')
+  assert.match(dry.note, /No request will be sent/i)
+  assert.ok(dry.canRun, 'and it can still run — it is a useful, free configuration test')
+  assert.ok(
+    !dry.requiresConfirmation,
+    'but it needs no paid confirmation, because it sends nothing'
+  )
+  assert.notStrictEqual(dry.label, live.label, 'a dry run can never read as a live one')
+
+  // ── 3. MISSING KEY DOES NOT SILENTLY BECOME A MOCK ───────────────────
+  // Either fallback would hand back something that looks like an analysis
+  // and is not one — and it would go on to plan camera movement through
+  // rooms nobody looked at.
+  const noKey = analyzerPresentation({ ...gemini, hasApiKey: false })
+  assert.strictEqual(noKey.mode, 'unconfigured')
+  assert.ok(!noKey.canRun, 'the primary action does not pretend analysis can run')
+  assert.strictEqual(noKey.action, 'configure', 'it becomes Configure, not a quiet mock run')
+  assert.strictEqual(noKey.blocker, 'Gemini 2.5 Flash is not configured')
+
+  // ── 4. A closed safety lock is stated, not worked around ─────────────
+  const locked = analyzerPresentation({ ...gemini, allowLive: false })
+  assert.ok(!locked.canRun, 'a locked provider cannot run')
+  assert.strictEqual(locked.action, 'configure')
+  assert.match(locked.note, /safety lock/i, 'and says exactly what to turn on')
+  assert.notStrictEqual(
+    locked.mode,
+    'dry-run',
+    'it does NOT silently downgrade to Dry Run — the operator asked for a real analysis'
+  )
+
+  // ── 5. Local analyzers are free, useful, and never dressed as AI ─────
+  const mock = analyzerPresentation({
+    ...gemini,
+    analyzerId: 'mock',
+    displayName: 'Mock analyzer',
+    provider: 'local',
+    model: null,
+    incursCost: false
+  })
+  assert.strictEqual(mock.mode, 'mock')
+  assert.match(mock.label, /no AI request/i, 'the label itself says no AI request')
+  assert.match(mock.note, /not a vision-model analysis/i)
+  assert.ok(mock.canRun && !mock.requiresConfirmation)
+
+  // ── 6. PROVENANCE — was this actually analyzed by Gemini? ────────────
+  const at = (h: number, m: number): number => new Date(2026, 0, 1, h, m).getTime()
+  const clock = (ms: number): string => {
+    const d = new Date(ms)
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  }
+
+  const realRun: AnalysisProvenance = {
+    analyzerId: 'gemini',
+    displayName: 'Gemini 2.5 Flash',
+    provider: 'google',
+    model: 'gemini-2.5-flash',
+    mode: 'live',
+    imageCount: 30,
+    analyzedAt: at(13, 42),
+    acceptedAt: at(13, 45)
+  }
+  assert.ok(isRealAnalysis(realRun), 'a live run is a real analysis')
+  assert.strictEqual(provenanceLabel(realRun), 'gemini-2.5-flash · Live')
+  assert.strictEqual(
+    provenanceDetail(realRun, clock),
+    '30 images · analyzed 13:42 · accepted 13:45'
+  )
+
+  // Everything else is NOT, and says so.
+  assert.ok(!isRealAnalysis({ ...realRun, mode: 'dry-run' }))
+  assert.match(provenanceLabel({ ...realRun, mode: 'dry-run' }), /no request was sent/i)
+  assert.ok(!isRealAnalysis({ ...realRun, mode: 'mock' }))
+  assert.match(provenanceLabel({ ...realRun, mode: 'mock' }), /mock, no AI request/i)
+  assert.ok(!isRealAnalysis(null), 'and an analysis with no provenance is never claimed as real')
+  assert.strictEqual(provenanceLabel(null), 'Manual — entered by hand')
+
+  log('analysis workflow: one state, analyzer identity explicit, no silent fallback')
+}
+
+/**
+ * TRANSITION RECOVERY — three actions, three costs.
+ *
+ * ── THE RULE THIS PROTECTS ───────────────────────────────────────────
+ *
+ * Resume continues a paid task that is already running. Retry download
+ * fetches a result the provider has already produced and been paid for.
+ * Regenerate submits a NEW paid task. Labelling all three "Retry" is how
+ * someone pays twice for a clip already sitting on the provider's server.
+ *
+ * The decision comes from the REMOTE task state via the idempotency
+ * function both processes already share — not from a second opinion.
+ */
+function testTransitionRecovery(): void {
+  const clipped: TransitionSettings = {
+    prompt: '',
+    durationSec: 5,
+    status: 'completed',
+    clip: { storedName: 'c.mp4', originalName: 'c.mp4', source: 'fal', src: 'f2f://clip/x/c.mp4' },
+    promptProvenance: null
+  }
+  const bare: TransitionSettings = {
+    prompt: '',
+    durationSec: 5,
+    status: 'not-generated',
+    clip: null,
+    promptProvenance: null
+  }
+
+  const job = (provider: Partial<QueueJob['provider']> | null, note?: string): QueueJob =>
+    ({
+      id: 'job-1',
+      projectId: 'p',
+      projectName: 'p',
+      kind: 'ai-generation',
+      status: 'failed',
+      progressPct: 0,
+      transitionCount: 1,
+      createdAt: 1,
+      queueOrder: 0,
+      scheduledFor: null,
+      startedAt: null,
+      completedAt: null,
+      metadata: { pairKeys: ['a->b'] },
+      note,
+      provider: provider
+        ? ({
+            provider: 'fal',
+            model: null,
+            dryRun: false,
+            providerTaskId: null,
+            providerStatus: null,
+            submittedAt: null,
+            lastPolledAt: null,
+            providerMeta: null,
+            estimatedCost: null,
+            actualCost: null,
+            estimatedCredits: null,
+            actualCredits: null,
+            retryCount: 0,
+            ...provider
+          } as QueueJob['provider'])
+        : undefined
+    }) as QueueJob
+
+  // ── 1. Nothing generated ─────────────────────────────────────────────
+  const fresh = transitionRecovery(bare, null, '1 → 2')
+  assert.strictEqual(fresh.kind, 'generate')
+  assert.strictEqual(fresh.label, 'Generate 1 → 2')
+  assert.ok(fresh.costsMoney, 'a first generation is a paid request and says so')
+
+  // ── 2. A LOGICAL transition with NO settings row at all ──────────────
+  // A pair exists the moment two photographs are adjacent; the row is
+  // written lazily. Recovery must work from `undefined`.
+  const noRow = transitionRecovery(undefined, null, '1 → 2')
+  assert.strictEqual(noRow.kind, 'generate', 'a transition with no DB row is still generatable')
+  assert.strictEqual(noRow.label, 'Generate 1 → 2')
+
+  // ── 3. In flight ─────────────────────────────────────────────────────
+  assert.strictEqual(transitionRecovery({ ...bare, status: 'queued' }, null, 'x').kind, 'waiting')
+  assert.strictEqual(transitionRecovery({ ...bare, status: 'queued' }, null, 'x').label, 'Queued')
+  assert.strictEqual(
+    transitionRecovery({ ...bare, status: 'generating' }, null, 'x').label,
+    'Generating…'
+  )
+  assert.ok(
+    !transitionRecovery({ ...bare, status: 'generating' }, null, 'x').costsMoney,
+    'watching something run costs nothing'
+  )
+
+  // ── 4. RESUME — a paid task is still running remotely ────────────────
+  const running = transitionRecovery(
+    { ...bare, status: 'failed' },
+    job({ providerTaskId: 'task-abc', providerStatus: 'processing' }),
+    'x'
+  )
+  assert.strictEqual(running.kind, 'resume')
+  assert.strictEqual(running.label, 'Resume')
+  assert.strictEqual(
+    running.costsMoney,
+    false,
+    'RESUMING A PAID TASK COSTS NOTHING — mislabelling this is how someone pays twice'
+  )
+  assert.strictEqual(running.jobId, 'job-1', 'and it names the job to resume')
+  assert.strictEqual(
+    running.secondary,
+    null,
+    'Regenerate is not even offered alongside — the task is still running'
+  )
+
+  // ── 5. RETRY DOWNLOAD — the remote task SUCCEEDED ────────────────────
+  const downloadable = transitionRecovery(
+    { ...bare, status: 'failed' },
+    job({ providerTaskId: 'task-abc', providerStatus: 'succeeded' }),
+    'x'
+  )
+  assert.strictEqual(downloadable.kind, 'retry-download')
+  assert.strictEqual(downloadable.label, 'Retry download')
+  assert.strictEqual(
+    downloadable.costsMoney,
+    false,
+    'the video already exists and is already paid for — only the transfer failed'
+  )
+  assert.match(downloadable.detail, /already paid for/i, 'and the detail says so plainly')
+
+  // ── 6. REGENERATE — only when there is nothing to recover ────────────
+  const dead = transitionRecovery(
+    { ...bare, status: 'failed' },
+    job({ providerTaskId: 'task-abc', providerStatus: 'failed' }, 'Video generation rejected'),
+    'x'
+  )
+  assert.strictEqual(dead.kind, 'regenerate')
+  assert.strictEqual(dead.label, 'Regenerate — costs again')
+  assert.ok(dead.costsMoney, 'and it is honest that this is a new charge')
+  assert.match(dead.detail, /rejected/i, 'carrying the sanitized reason')
+
+  // A failure with NO remote task at all is also a regenerate — there is
+  // nothing remote to resume or download.
+  const neverSubmitted = transitionRecovery({ ...bare, status: 'failed' }, job(null), 'x')
+  assert.strictEqual(neverSubmitted.kind, 'regenerate')
+
+  // ── 7. A finished clip ───────────────────────────────────────────────
+  const done = transitionRecovery(clipped, null, 'x')
+  assert.strictEqual(done.kind, 'preview')
+  assert.strictEqual(done.label, 'Preview')
+  assert.ok(!done.costsMoney)
+  assert.strictEqual(
+    done.secondary?.label,
+    'Regenerate — costs again',
+    'Regenerate stays available but secondary, and never reads as a harmless retry'
+  )
+  assert.ok(done.secondary?.costsMoney)
+
+  // ── 8. The newest job wins ───────────────────────────────────────────
+  // A Regenerate creates a newer job; an older failed attempt must not
+  // keep offering Resume for a task nobody is waiting on.
+  const older = { ...job({ providerTaskId: 'old', providerStatus: 'processing' }), id: 'old', createdAt: 1 }
+  const newer = { ...job({ providerTaskId: 'new', providerStatus: 'succeeded' }), id: 'new', createdAt: 9 }
+  const picked = latestJobForPair([older, newer], 'p', 'a->b')
+  assert.strictEqual(picked?.id, 'new', 'the most recent job for the pair is the one that counts')
+  assert.strictEqual(
+    latestJobForPair([older, newer], 'other-project', 'a->b'),
+    null,
+    "and another project's job is never borrowed"
+  )
+
+  // ── 9. Provider errors become something actionable ───────────────────
+  assert.strictEqual(categorizeProviderError('HTTP 401 Unauthorized'), 'auth')
+  assert.match(providerErrorMessage('HTTP 401 Unauthorized'), /check the API key/i)
+  assert.ok(isConfigurationError('invalid api key'), 'an auth failure is fixable in Settings')
+  assert.strictEqual(categorizeProviderError('account locked'), 'account')
+  assert.strictEqual(categorizeProviderError('404 not found'), 'endpoint')
+  assert.strictEqual(categorizeProviderError('ETIMEDOUT'), 'network')
+  assert.ok(!isConfigurationError('ETIMEDOUT'), 'a network blip is not a settings problem')
+  assert.strictEqual(categorizeProviderError(null), 'unknown')
+  assert.match(providerErrorMessage(null), /did not complete/i, 'and unknown says only what it knows')
+
+  // ── 10. NOTHING SENSITIVE REACHES A SCREEN ───────────────────────────
+  const dirty = 'Failed with key AIzaSyD-EXAMPLE-KEY-000000000 at C:\\Users\\someone\\clip.mp4'
+  const clean = sanitizeReason(dirty)!
+  assert.ok(!clean.includes('AIzaSyD-EXAMPLE-KEY-000000000'), 'an API key never reaches a screen')
+  assert.ok(!/[A-Za-z]:\\/.test(clean), 'nor a filesystem path')
+  assert.ok(clean.includes('[redacted]') && clean.includes('[path]'), 'both are visibly removed')
+  assert.ok(
+    (sanitizeReason('x'.repeat(9000)) ?? '').length <= 300,
+    'and a runaway provider payload is truncated rather than pasted into the UI'
+  )
+
+  log('transition recovery: resume/retry-download are free, only regenerate charges again')
 }
 
 /**
