@@ -5,6 +5,7 @@ import { app } from 'electron'
 import assert from 'node:assert'
 import {
   transitionKey,
+  type AppSettings,
   type Project,
   type QueueJob,
   type TransitionSettings
@@ -132,6 +133,11 @@ import {
   summarySubline
 } from '../shared/analysisSummary'
 import { editorReadiness } from '../shared/editorReadiness'
+import {
+  logicalTransitionCount,
+  logicalTransitions,
+  strandedTransitionKeys
+} from '../shared/logicalTransitions'
 import {
   resolvePreviewSource,
   statusWordFor,
@@ -344,6 +350,7 @@ export async function runSmokeTest(): Promise<void> {
     testProjectDeletionCascade(workDir)
     testEditorSelection()
     testAnalysisWorkflow()
+    testLogicalTransitions(workDir, createdProjects)
     await testGeminiModelConfig(workDir, createdProjects)
     testTransitionRecovery()
     testPreviewSource(workDir, createdProjects)
@@ -801,13 +808,37 @@ function testPromptProvenance(workDir: string, created: string[]): void {
   saveProject(edited)
 
   const secondPlan = planPromptRebuild(project.id)
-  assert.strictEqual(secondPlan.rebuildable.length, 2, 'the edited transition is no longer rebuildable')
-  assert.strictEqual(secondPlan.preserved.length, 1, 'and is reported as preserved')
+  assert.strictEqual(secondPlan.preserved.length, 1, 'the edited transition is reported preserved')
   assert.strictEqual(secondPlan.preserved[0].pairKey, pairs[1], 'the right one is protected')
+  assert.ok(
+    !secondPlan.rebuildable.some((r) => r.pairKey === pairs[1]),
+    'and it is never offered as rebuildable'
+  )
+  // The other two already carry exactly the prompt the analysis produces,
+  // so they are UNCHANGED rather than work. "Would not change" and "does
+  // not exist" are different facts, and the summary now tells them apart
+  // instead of one of them silently vanishing.
+  assert.strictEqual(secondPlan.rebuildable.length, 0, 'nothing would actually change')
+  assert.strictEqual(secondPlan.unchanged.length, 2, 'the other two are already up to date')
+  assert.strictEqual(
+    secondPlan.rebuildable.length + secondPlan.preserved.length + secondPlan.unchanged.length,
+    secondPlan.logicalTransitionCount,
+    'and every logical transition is accounted for exactly once'
+  )
 
+  const beforeSecond = listProjects().find((p) => p.id === project.id)!.updatedAt
   const secondRun = rebuildPromptsFromAnalysis(project.id)
-  assert.strictEqual(secondRun.rebuiltCount, 2, 'only analysis-managed prompts were rebuilt')
+  assert.strictEqual(
+    secondRun.rebuiltCount,
+    0,
+    'a rebuild that would change nothing writes nothing — otherwise the preview lies about its work'
+  )
   assert.strictEqual(secondRun.preservedCount, 1, 'the hand-written prompt was skipped')
+  assert.strictEqual(
+    listProjects().find((p) => p.id === project.id)!.updatedAt,
+    beforeSecond,
+    'and the project is not marked changed, so a built preview does not go stale for nothing'
+  )
   assert.strictEqual(
     listProjects().find((p) => p.id === project.id)!.transitions[pairs[1]].prompt,
     OPERATOR,
@@ -855,11 +886,26 @@ function testPromptProvenance(workDir: string, created: string[]): void {
     false,
     'and the transition is analysis-managed again'
   )
+  // Adopting the analysis prompt for ONE transition writes exactly what a
+  // bulk rebuild would write for that pair — both plan the whole sequence,
+  // so neither produces wording the other would immediately "fix".
+  const afterOverride = planPromptRebuild(project.id)
   assert.strictEqual(
-    planPromptRebuild(project.id).rebuildable.length,
-    3,
-    'so all three are rebuildable once more'
+    afterOverride.preserved.length,
+    0,
+    'nothing is protected any more — the transition is analysis-managed again'
   )
+  assert.strictEqual(
+    afterOverride.rebuildable.length,
+    0,
+    'and a rebuild would change nothing, because the two paths agree on the prompt'
+  )
+  assert.strictEqual(
+    afterOverride.unchanged.length,
+    3,
+    'all three are up to date'
+  )
+  assert.strictEqual(afterOverride.logicalTransitionCount, 3, 'four images, three transitions')
 
   log('prompt provenance: manual edits protected across restart, rebuild skips them, override warns')
 }
@@ -1825,6 +1871,246 @@ function testAnalysisWorkflow(): void {
 }
 
 /**
+ * LOGICAL TRANSITIONS — N images means N − 1 transitions, always.
+ *
+ * ── THE BUG THIS PINS ────────────────────────────────────────────────
+ *
+ * `project.transitions` is written LAZILY: a row appears the first time
+ * something about a transition is edited or generated. Both rebuild
+ * functions walked the adjacent pairs correctly and then did
+ * `if (!transition) continue`, so a pair with no stored row was skipped
+ * entirely.
+ *
+ * On a thirty-image project with three stored rows, "Rebuild transition
+ * prompts" offered two of twenty-nine. The other twenty-seven did not
+ * appear as unchanged, or as preserved — they were simply absent, and
+ * nothing in the dialog suggested they existed at all.
+ *
+ * Absence of a row means UNCONFIGURED. It never means non-existent.
+ */
+function testLogicalTransitions(workDir: string, created: string[]): void {
+  const project = makeProject('Smoke logical transitions')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'logical.png')
+  writeFileSync(p, png)
+
+  // The real shape of the reported bug: thirty ordered photographs.
+  project.images = importImages(
+    project.id,
+    Array.from({ length: 30 }, (_, i) => ({ sourcePath: p, name: `${i + 1}.png` }))
+  )
+  saveProject(project)
+
+  // ── 1 & 2. THIRTY IMAGES, ZERO ROWS, TWENTY-NINE TRANSITIONS ─────────
+  assert.deepStrictEqual(project.transitions, {}, 'no transition row exists yet')
+  const fresh = logicalTransitions(project, 5)
+  assert.strictEqual(
+    fresh.length,
+    29,
+    'thirty images are twenty-nine transitions, with nothing stored about any of them'
+  )
+  assert.strictEqual(logicalTransitionCount(project), 29)
+  assert.strictEqual(fresh[0].label, 'Image 1 → Image 2')
+  assert.strictEqual(fresh[28].label, 'Image 29 → Image 30', 'right through to the final pair')
+  assert.ok(
+    fresh.every((t) => t.persisted === undefined),
+    'every one is unconfigured'
+  )
+  assert.ok(
+    fresh.every((t) => t.settings.durationSec === 5 && t.settings.clip === null),
+    'and every one still has usable default settings'
+  )
+  // Positions are contiguous and pair keys unique — an off-by-one here
+  // would silently drop or duplicate a transition.
+  assert.deepStrictEqual(
+    fresh.map((t) => t.position),
+    Array.from({ length: 29 }, (_, i) => i)
+  )
+  assert.strictEqual(new Set(fresh.map((t) => t.pairKey)).size, 29, 'no duplicate pair keys')
+
+  // ── 3. ONLY TWO STORED ROWS — STILL TWENTY-NINE ──────────────────────
+  const ids = project.images.map((i) => i.id)
+  project.transitions[transitionKey(ids[0], ids[1])] = {
+    prompt: 'hand written',
+    durationSec: 5,
+    status: 'not-generated',
+    clip: null,
+    promptProvenance: {
+      basePrompt: DEFAULT_TRANSITION_PROMPT,
+      motionInstruction: null,
+      effectivePrompt: 'hand written',
+      basis: 'unknown',
+      rationale: '',
+      manuallyEdited: true,
+      plannedAt: 1,
+      analysisUpdatedAt: null
+    }
+  }
+  project.transitions[transitionKey(ids[1], ids[2])] = {
+    prompt: 'analysis managed',
+    durationSec: 10,
+    status: 'not-generated',
+    clip: null,
+    promptProvenance: null
+  }
+  saveProject(project)
+
+  const partial = logicalTransitions(project, 5)
+  assert.strictEqual(
+    partial.length,
+    29,
+    'TWO stored rows out of twenty-nine pairs still yields twenty-nine — this is the exact ' +
+      'assertion that would have caught the dialog offering two of them'
+  )
+  assert.strictEqual(partial.filter((t) => t.persisted).length, 2, 'two are configured')
+  assert.strictEqual(partial.filter((t) => !t.persisted).length, 27, 'twenty-seven are not')
+  assert.strictEqual(partial[1].settings.durationSec, 10, 'a stored row supplies its own duration')
+  assert.strictEqual(partial[5].settings.durationSec, 5, 'an unconfigured one gets the default')
+
+  // ── 4 & 5. THE REBUILD PLAN SEES ALL TWENTY-NINE ─────────────────────
+  saveAnalysis({
+    ...emptyAnalysis(project.id),
+    state: 'accepted',
+    source: 'provider',
+    rooms: [{ id: 'r', label: 'Open Plan', imageIds: ids, landmarks: [] }],
+    images: ids.map((id) => ({
+      imageId: id,
+      roomId: 'r',
+      orientation: 'unknown' as const,
+      landmarks: [],
+      openings: []
+    })),
+    edges: []
+  })
+
+  const plan = planPromptRebuild(project.id)
+  assert.strictEqual(
+    plan.logicalTransitionCount,
+    29,
+    'the dialog reports twenty-nine logical transitions'
+  )
+  const accounted = plan.rebuildable.length + plan.preserved.length + plan.unchanged.length
+  assert.strictEqual(
+    accounted,
+    29,
+    'and EVERY one appears in exactly one list — rebuildable, preserved or unchanged. ' +
+      'Nothing may vanish for want of a database row.'
+  )
+  // ── 6. The manual prompt is preserved, not rebuilt ───────────────────
+  assert.strictEqual(plan.preserved.length, 1, 'the hand-written prompt is preserved')
+  assert.strictEqual(plan.preserved[0].label, 'Image 1 → Image 2')
+  assert.ok(
+    !plan.rebuildable.some((r) => r.label === 'Image 1 → Image 2'),
+    'and never appears as rebuildable'
+  )
+  assert.strictEqual(plan.rebuildable.length, 28, 'the other twenty-eight would be written')
+  assert.ok(plan.hasAnalysis)
+
+  // ── 7. A ROW IS CREATED ONLY WHEN THERE IS SOMETHING TO STORE ────────
+  const before = Object.keys(listProjects().find((x) => x.id === project.id)!.transitions).length
+  assert.strictEqual(before, 2, 'listing twenty-nine transitions created no rows')
+
+  const result = rebuildPromptsFromAnalysis(project.id)
+  assert.strictEqual(result.rebuiltCount, 28, 'twenty-eight prompts were written')
+  assert.strictEqual(result.preservedCount, 1, 'and the manual one was left alone')
+
+  const after = listProjects().find((x) => x.id === project.id)!
+  assert.strictEqual(
+    Object.keys(after.transitions).length,
+    29,
+    'now every transition has a row, because every one has an analysis-managed prompt to store'
+  )
+  assert.strictEqual(
+    after.transitions[transitionKey(ids[0], ids[1])].prompt,
+    'hand written',
+    'THE MANUAL PROMPT SURVIVED — this is the rule that must never break'
+  )
+  assert.strictEqual(
+    after.transitions[transitionKey(ids[0], ids[1])].promptProvenance?.manuallyEdited,
+    true
+  )
+  // A pair that had no row at all now has one, carrying provenance.
+  const created28 = after.transitions[transitionKey(ids[27], ids[28])]
+  assert.ok(created28, 'a previously unconfigured pair now has a row')
+  assert.strictEqual(created28.promptProvenance?.manuallyEdited, false)
+  assert.ok(
+    created28.prompt.includes(DEFAULT_TRANSITION_PROMPT),
+    'and its prompt still leads with the unchanged safety contract'
+  )
+  // The CONFIGURED default, read the same way the service reads it — a
+  // row created by a rebuild must get the same duration as one created
+  // any other way, and hard-coding a number here would only assert that
+  // the test and the service share a guess.
+  const configuredDefault =
+    (JSON.parse(getSettingsJson() ?? '{}') as Partial<AppSettings>).exportDefaults
+      ?.defaultTransitionDurationSec ?? 5
+  assert.strictEqual(
+    created28.durationSec,
+    configuredDefault,
+    'with the configured default duration, not a hard-coded one'
+  )
+  assert.strictEqual(created28.clip, null, 'and no clip invented')
+
+  // Re-running reports them as unchanged rather than as work.
+  const second = planPromptRebuild(project.id)
+  assert.strictEqual(second.unchanged.length, 28, 'a second pass finds nothing to change')
+  assert.strictEqual(second.rebuildable.length, 0)
+  assert.strictEqual(
+    second.rebuildable.length + second.preserved.length + second.unchanged.length,
+    29,
+    'and still accounts for all twenty-nine'
+  )
+
+  // ── 8. A REORDER RECOMPUTES THE PAIRS ────────────────────────────────
+  const moved = { ...after, images: moveInSequence(after.images, 29, 0) }
+  const afterMove = logicalTransitions(moved, 5)
+  assert.strictEqual(afterMove.length, 29, 'the count is unchanged by a reorder')
+  assert.strictEqual(
+    afterMove[0].pairKey,
+    transitionKey(ids[29], ids[0]),
+    'and the new adjacency appears'
+  )
+  assert.ok(
+    !afterMove.some((t) => t.pairKey === transitionKey(ids[28], ids[29])),
+    'while the pair the move broke is gone from the list'
+  )
+  // The stored row for the broken pair is NOT deleted — a prompt someone
+  // wrote is worth keeping if the order comes back — but it must never be
+  // counted as a transition, which is the mirror image of the bug above.
+  const stranded = strandedTransitionKeys(moved)
+  assert.ok(
+    stranded.includes(transitionKey(ids[28], ids[29])),
+    'the row survives as stranded rather than being counted or destroyed'
+  )
+
+  // ── 9. CONTINUITY REACHES THE FINAL PAIR ─────────────────────────────
+  const plans = planSequence(readAnalysis(project.id), ids)
+  assert.strictEqual(plans.length, 29, 'the planner receives all twenty-nine, in order')
+  assert.strictEqual(plans[0].fromImageId, ids[0])
+  assert.strictEqual(plans[28].toImageId, ids[29], 'right through to image 30')
+  // Every plan after the first sees what the one before handed it — the
+  // chain is unbroken across all twenty-nine, not only the stored ones.
+  for (let i = 1; i < plans.length; i++) {
+    assert.strictEqual(
+      plans[i].continuity.incomingRotation,
+      plans[i - 1].continuity.outgoingRotation,
+      `plan ${i + 1} inherits the rotation plan ${i} handed over`
+    )
+  }
+  assert.notStrictEqual(
+    plans[28].continuity.incomingRotation,
+    'none',
+    'and the final pair genuinely received continuity rather than starting fresh'
+  )
+
+  log('logical transitions: 30 images = 29 transitions, none lost for want of a row')
+}
+
+/**
  * THE GEMINI MODEL ID, AND WHAT HAPPENS WHEN ONE IS RETIRED.
  *
  * ── WHAT PROMPTED THIS ───────────────────────────────────────────────
@@ -2695,14 +2981,20 @@ function testImageOverrides(workDir: string, created: string[]): void {
 
   // ── 10b. THE OVERRIDE SURVIVES RE-ANALYSIS ───────────────────────────
   // A fresh draft with completely different room ids and labels, accepted.
+  // ONE id, computed once. Calling `Date.now()` separately for the room
+  // and for each image made this test flaky: whenever the millisecond
+  // ticked between the two expressions the ids diverged, `roomOfImage`
+  // found nothing, and the run failed for a reason that had nothing to do
+  // with overrides. An intermittent test is worse than a failing one.
+  const regenRoomId = `regen-${Date.now()}`
   const draft: PropertyAnalysis = {
     ...emptyAnalysis(project.id),
     state: 'accepted',
     source: 'provider',
-    rooms: [{ id: `regen-${Date.now()}`, label: 'Open Plan', imageIds: [i1, i2, i3], landmarks: [] }],
+    rooms: [{ id: regenRoomId, label: 'Open Plan', imageIds: [i1, i2, i3], landmarks: [] }],
     images: [i1, i2, i3].map((id) => ({
       imageId: id,
-      roomId: `regen-${Date.now()}`,
+      roomId: regenRoomId,
       orientation: 'unknown' as const,
       landmarks: [],
       openings: []
@@ -3524,16 +3816,17 @@ function testGroundTruthReview(workDir: string, created: string[]): void {
   // ── 11. Keys are SEMANTIC, so a re-analysis keeps genuine matches ────
   // An analyzer mints fresh room UUIDs every run. Keying on those would
   // orphan every verdict and make an unchanged property look brand new.
+  // ONE suffix, computed once. Two separate `Date.now()` calls would
+  // diverge whenever the millisecond ticked between them — the same flake
+  // that made testImageOverrides fail intermittently.
+  const regenSuffix = `-regenerated-${Date.now()}`
   const reanalyzed: PropertyAnalysis = {
     ...accepted,
-    rooms: accepted.rooms.map((r) => ({ ...r, id: `${r.id}-regenerated-${Date.now()}` })),
-    images: accepted.images.map((x) => ({
-      ...x,
-      roomId: x.roomId ? `${x.roomId}-regenerated-${Date.now()}` : null
-    })),
+    rooms: accepted.rooms.map((r) => ({ ...r, id: `${r.id}${regenSuffix}` })),
+    images: [],
     edges: []
   }
-  // Rebuild the ids consistently so the analysis is internally coherent.
+  // Ids rebuilt through the map so the analysis is internally coherent.
   const remap = new Map(accepted.rooms.map((r, idx) => [r.id, reanalyzed.rooms[idx].id]))
   reanalyzed.images = accepted.images.map((x) => ({
     ...x,

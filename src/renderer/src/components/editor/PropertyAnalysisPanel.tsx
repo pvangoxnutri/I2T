@@ -8,6 +8,7 @@ import {
 import type { RebuildPlanSummary } from '../../../../shared/promptPlanner'
 import type { AnalysisDiff } from '../../../../shared/analysisDiff'
 import {
+  analysisCoverage,
   summarizeAnalysis,
   summaryHeadline,
   summarySubline,
@@ -91,6 +92,9 @@ export function PropertyAnalysisPanel({
   const [confirm, setConfirm] = useState<AnalysisConfirmationPayload | null>(null)
   const [advanced, setAdvanced] = useState(false)
   const [showIssues, setShowIssues] = useState(false)
+  // Reset every time the dialog opens: a deliberate act must be repeated,
+  // not remembered from a previous rebuild.
+  const [mockRebuildOk, setMockRebuildOk] = useState(false)
 
   useEffect(() => {
     void window.f2f.projects.analysis.analyzers().then(setAnalyzers)
@@ -121,6 +125,14 @@ export function PropertyAnalysisPanel({
   )
 
   const warnings = summary.issues.filter((i) => i.severity === 'warning')
+
+  // How much of the project the accepted analysis actually covers, and how
+  // many transitions the sequence has. Both derived, never assumed.
+  const coverage = analysisCoverage(
+    analysis,
+    project.images.map((i) => i.id)
+  )
+  const logicalCount = Math.max(0, project.images.length - 1)
 
   // ── WHAT THE CONFIGURED ANALYZER ACTUALLY IS ──────────────────────────
   //
@@ -266,10 +278,28 @@ export function PropertyAnalysisPanel({
             </span>
           )}
 
+          {/* ── A MOCK IS NOT A MAP ─────────────────────────────────────
+              "1 space identified" from the development mock is a
+              placeholder structure, and describing it as a whole-property
+              understanding is the kind of quiet overclaim that ends with
+              camera movement planned through rooms nobody looked at. */}
+          {summary.phase === 'analyzed' && analysis?.provenance?.mode === 'mock' && (
+            <p className="analysis-mock-warning">
+              Development placeholder — not a real spatial analysis.
+            </p>
+          )}
+
           {summary.phase !== 'not-analyzed' && (
             <ul className="analysis-counts">
+              {/* ── COVERAGE, STATED ────────────────────────────────────
+                  "30 images" alone says how many the project has, not how
+                  many the analysis actually covered. Silence there is a
+                  claim of completeness nobody checked. */}
+              <li className={coverage.complete ? undefined : 'is-warn'}>
+                Images included: <strong>{coverage.covered}</strong> / {coverage.total}
+              </li>
               <li>
-                <strong>{summary.imageCount}</strong> images
+                Logical transitions: <strong>{logicalCount}</strong>
               </li>
               <li>
                 <strong>{summary.spaceCount}</strong> space{summary.spaceCount === 1 ? '' : 's'}{' '}
@@ -286,6 +316,14 @@ export function PropertyAnalysisPanel({
                 </li>
               )}
             </ul>
+          )}
+
+          {summary.phase === 'analyzed' && !coverage.complete && (
+            <p className="analysis-mock-warning">
+              {coverage.total - coverage.covered} image
+              {coverage.total - coverage.covered === 1 ? '' : 's'} were not placed by the analyzer.
+              Transitions touching them fall back to the base cinematic prompt.
+            </p>
           )}
 
           {/* ── WHAT ANALYZE WILL ACTUALLY DO ────────────────────────────
@@ -475,7 +513,10 @@ export function PropertyAnalysisPanel({
           analyzerId={analyzerId}
           onAnalyzerChange={setAnalyzerId}
           onRebuild={() =>
-            void window.f2f.projects.analysis.planRebuild(project.id).then(setRebuild)
+            void window.f2f.projects.analysis.planRebuild(project.id).then((plan) => {
+              setMockRebuildOk(false)
+              setRebuild(plan)
+            })
           }
           onAnalysisChange={onAnalysisChange}
         />
@@ -499,16 +540,52 @@ export function PropertyAnalysisPanel({
         <div className="dialog-backdrop" onClick={() => setRebuild(null)}>
           <div className="dialog-card" onClick={(e) => e.stopPropagation()}>
             <h3 className="dialog-title">Rebuild transition prompts</h3>
+
+            {/* ── EVERY LOGICAL TRANSITION IS ACCOUNTED FOR ──────────────
+                The three lists below add up to the total. A pair with no
+                stored row used to vanish from this dialog entirely — not
+                listed as unchanged, not as preserved, simply absent — so
+                a thirty-image project offered two of twenty-nine. */}
+            <p className="rebuild-total">
+              <strong>{rebuild.logicalTransitionCount}</strong> logical transition
+              {rebuild.logicalTransitionCount === 1 ? '' : 's'} · derived from{' '}
+              {project.images.length} ordered images
+            </p>
+
+            {rebuild.analysisIsMock && (
+              /* A placeholder structure is not a spatial map. Rebuilding
+                 every prompt from one replaces real wording with wording
+                 derived from nothing. */
+              <p className="rebuild-mock-warning">
+                The accepted analysis is a <strong>development placeholder</strong>, not a real
+                spatial analysis. Rebuilding from it will overwrite analysis-managed prompts with
+                wording derived from a mock.
+              </p>
+            )}
+
             <ul className="rebuild-summary">
               <li>
-                <strong>{rebuild.rebuildable.length}</strong> transition
-                {rebuild.rebuildable.length === 1 ? '' : 's'} will be rebuilt
+                <strong>{rebuild.rebuildable.length}</strong> prompt
+                {rebuild.rebuildable.length === 1 ? '' : 's'} will be{' '}
+                {rebuild.rebuildable.length === rebuild.logicalTransitionCount
+                  ? 'rebuilt'
+                  : 'updated'}
+              </li>
+              <li>
+                <strong>{rebuild.unchanged.length}</strong> prompt
+                {rebuild.unchanged.length === 1 ? '' : 's'} unchanged
               </li>
               <li>
                 <strong>{rebuild.preserved.length}</strong> manually edited prompt
-                {rebuild.preserved.length === 1 ? '' : 's'} will be preserved
+                {rebuild.preserved.length === 1 ? '' : 's'} preserved
               </li>
             </ul>
+
+            <p className="rebuild-note">
+              Prompts only. No video is generated, no existing clip is removed, and nothing is
+              charged.
+            </p>
+
             {rebuild.rebuildable.length > 0 && (
               <ul className="rebuild-list">
                 {rebuild.rebuildable.map((r) => (
@@ -520,6 +597,17 @@ export function PropertyAnalysisPanel({
                 ))}
               </ul>
             )}
+            {rebuild.analysisIsMock && (
+              <label className="rebuild-mock-ack">
+                <input
+                  type="checkbox"
+                  checked={mockRebuildOk}
+                  onChange={(e) => setMockRebuildOk(e.target.checked)}
+                />
+                <span>I understand this rebuilds prompts from a development placeholder</span>
+              </label>
+            )}
+
             <div className="dialog-actions">
               <button
                 type="button"
@@ -530,8 +618,12 @@ export function PropertyAnalysisPanel({
               </button>
               <button
                 type="button"
-                className="btn btn-primary btn-tiny"
-                disabled={rebuild.rebuildable.length === 0}
+                className={`btn btn-tiny ${rebuild.analysisIsMock ? 'btn-ghost btn-regenerate' : 'btn-primary'}`}
+                // Rebuilding from a mock needs a deliberate second act, so
+                // it cannot happen by reflex on a placeholder analysis.
+                disabled={
+                  rebuild.rebuildable.length === 0 || (rebuild.analysisIsMock && !mockRebuildOk)
+                }
                 onClick={() =>
                   void window.f2f.projects.analysis
                     .rebuildPrompts(project.id)

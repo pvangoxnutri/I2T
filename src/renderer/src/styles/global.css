@@ -4314,6 +4314,58 @@ textarea {
    gemini-3.6-flash · Live" are two different things about the same
    project, and reading one as the other is how a placeholder gets
    trusted as a real analysis. */
+/* ── Rebuild dialog ───────────────────────────────────────────────────
+   Every logical transition is accounted for, and a mock analysis cannot
+   rebuild prompts by reflex. */
+
+.rebuild-total {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.rebuild-total strong { color: var(--text); font-variant-numeric: tabular-nums; }
+
+.rebuild-mock-warning {
+  margin: 0 0 10px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--warn);
+  background: var(--bg-inset);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--warn);
+}
+
+.rebuild-note {
+  margin: 6px 0 0;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-mute);
+}
+
+.rebuild-mock-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.rebuild-mock-ack input { margin-top: 2px; flex: none; }
+
+.analysis-mock-warning {
+  margin: 4px 0 0;
+  padding: 6px 9px;
+  border-left: 2px solid var(--warn);
+  background: var(--bg-card);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--warn);
+}
+
 .analysis-provenance-kind,
 .analyzer-status-kind {
   display: block;

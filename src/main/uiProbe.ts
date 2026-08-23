@@ -259,5 +259,52 @@ export async function runUiProbe(win: BrowserWindow): Promise<void> {
     console.log(`  ${k.padEnd(20)}: ${JSON.stringify(v)}`)
   }
 
+  // ── THE REBUILD DIALOG ───────────────────────────────────────────────
+  //
+  // Opens the dialog and READS it. Cancel is clicked afterwards; nothing
+  // is rebuilt and nothing is written.
+  await js(`
+    (() => {
+      const b = Array.from(document.querySelectorAll('.analysis-advanced button'))
+        .find((x) => /Rebuild transition prompts/i.test(x.textContent))
+      if (b) b.click()
+      return !!b
+    })()
+  `)
+  await wait(1200)
+  const dialog = await js<Record<string, unknown>>(`
+    (() => {
+      const q = (s) => document.querySelector(s)
+      const t = (s) => (q(s) ? q(s).textContent.trim() : null)
+      return {
+        title: t('.dialog-title'),
+        total: t('.rebuild-total'),
+        mockWarning: t('.rebuild-mock-warning'),
+        summary: Array.from(document.querySelectorAll('.rebuild-summary li')).map((l) =>
+          l.textContent.trim()
+        ),
+        listed: document.querySelectorAll('.rebuild-list li').length,
+        ack: t('.rebuild-mock-ack'),
+        confirmLabel: (() => {
+          const b = Array.from(document.querySelectorAll('.dialog-actions button')).pop()
+          return b ? b.textContent.trim() + (b.disabled ? ' [disabled]' : '') : null
+        })()
+      }
+    })()
+  `)
+  console.log('\n── REBUILD DIALOG ─────────────────────────────────────────')
+  for (const [k, v] of Object.entries(dialog)) {
+    console.log(`  ${k.padEnd(14)}: ${JSON.stringify(v)}`)
+  }
+  // Close it without rebuilding.
+  await js(`
+    (() => {
+      const b = Array.from(document.querySelectorAll('.dialog-actions button'))
+        .find((x) => x.textContent.trim() === 'Cancel')
+      if (b) b.click()
+      return true
+    })()
+  `)
+
   console.log('\n── probe complete ─────────────────────────────────')
 }

@@ -226,10 +226,32 @@ export function canRebuildPrompt(provenance: PromptProvenance | null | undefined
  * manually edited will be preserved") BEFORE anything is written.
  */
 export interface RebuildPlanSummary {
-  /** Transitions whose prompt would be rebuilt. */
+  /** Transitions whose prompt would CHANGE. */
   rebuildable: Array<{ pairKey: string; label: string; basis: string; preview: string }>
   /** Manually edited transitions that will be left alone. */
   preserved: Array<{ pairKey: string; label: string }>
+  /**
+   * Analysis-managed transitions whose prompt is ALREADY what the analysis
+   * would produce.
+   *
+   * Reported separately because "nothing would change here" and "this pair
+   * does not exist" are completely different facts, and the old summary
+   * could not tell them apart — a pair with no stored row simply vanished
+   * from the dialog. Every logical transition now appears in exactly one
+   * of these three lists.
+   */
+  unchanged: Array<{ pairKey: string; label: string }>
+  /** Images − 1. The number every list above must add up to. */
+  logicalTransitionCount: number
   /** Whether an analysis exists at all. */
   hasAnalysis: boolean
+  /**
+   * True when the accepted analysis came from the development mock.
+   *
+   * A mock produces a placeholder structure, not a spatial map. Rebuilding
+   * every prompt from one would quietly replace real wording with wording
+   * derived from nothing, so the dialog warns and the action requires a
+   * deliberate confirmation.
+   */
+  analysisIsMock: boolean
 }

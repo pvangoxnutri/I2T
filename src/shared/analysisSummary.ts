@@ -184,6 +184,43 @@ export function summarizeAnalysis(
 }
 
 /**
+ * HOW MUCH OF THE PROJECT THE ANALYSIS ACTUALLY COVERS.
+ *
+ * ── WHY THIS IS SEPARATE FROM THE IMAGE COUNT ────────────────────────
+ *
+ * "30 images" says how many the PROJECT has. It says nothing about how
+ * many the analyzer placed, and an analyzer can return a structure that
+ * omits photographs — a truncated response, or a model that could not
+ * place a dark hallway. Reporting only the project total turns that
+ * silence into a claim of whole-property completeness nobody checked.
+ */
+export interface AnalysisCoverage {
+  total: number
+  /** Images the accepted analysis actually assigns to a room. */
+  covered: number
+  missingImageIds: string[]
+  complete: boolean
+}
+
+export function analysisCoverage(
+  analysis: PropertyAnalysis | null,
+  imageIds: string[]
+): AnalysisCoverage {
+  if (!analysis || analysis.rooms.length === 0) {
+    return { total: imageIds.length, covered: 0, missingImageIds: [...imageIds], complete: false }
+  }
+  const missing = imageIds.filter(
+    (id) => !analysis.images.find((i) => i.imageId === id)?.roomId
+  )
+  return {
+    total: imageIds.length,
+    covered: imageIds.length - missing.length,
+    missingImageIds: missing,
+    complete: missing.length === 0
+  }
+}
+
+/**
  * The one-line headline for the summary card.
  *
  * "Property analyzed" whether or not there are warnings, on purpose. The
