@@ -1,4 +1,5 @@
 import { geminiGenerateUrl } from './geminiConfig'
+import { describeGeminiFailure, type GeminiErrorCategory } from './geminiErrors'
 import { sanitizeApiKey } from '../../../providers/keyHygiene'
 
 /**
@@ -38,7 +39,19 @@ export interface GeminiUsage {
 
 export type GeminiCallResult =
   | { ok: true; text: string; usage: GeminiUsage }
-  | { ok: false; stage: GeminiStage; status: number | null; message: string; retryable: boolean }
+  | {
+      ok: false
+      stage: GeminiStage
+      status: number | null
+      /** One line for the main card. Never raw provider JSON. */
+      message: string
+      /** The provider's own text, for Details/Advanced. */
+      detail: string | null
+      category: GeminiErrorCategory
+      /** Only when the provider NAMED one. Never inferred from a pattern. */
+      recommendedModel: string | null
+      retryable: boolean
+    }
 
 /** A part of the multimodal request. Images are inline base64. */
 export type GeminiPart = { text: string } | { inlineData: { mimeType: string; data: string } }
@@ -89,15 +102,21 @@ export class GeminiClient {
       })
 
       if (!response.ok) {
-        const detail = await safeText(response)
+        const raw = await safeText(response)
+        // The summary is short and actionable; the provider's own text is
+        // kept SEPARATE for Details rather than pasted into the card. A
+        // raw JSON blob tells someone with a broken analysis nothing about
+        // what to do next.
+        const failure = describeGeminiFailure(response.status, raw, this.model)
         return {
           ok: false,
           stage: 'generate',
           status: response.status,
-          // The key is never echoed, and the provider's body is truncated
-          // so a verbose error cannot become a wall of noise in the UI.
-          message: describeStatus(response.status, detail),
-          retryable: response.status === 429 || response.status >= 500
+          message: failure.summary,
+          detail: failure.detail,
+          category: failure.category,
+          recommendedModel: failure.recommendedModel,
+          retryable: failure.retryable
         }
       }
 
@@ -117,6 +136,9 @@ export class GeminiClient {
           stage: 'generate',
           status: response.status,
           message: 'Gemini returned no content. The analysis was not created.',
+          detail: null,
+          category: 'unknown',
+          recommendedModel: null,
           retryable: true
         }
       }
@@ -136,9 +158,10 @@ export class GeminiClient {
         ok: false,
         stage: 'generate',
         status: null,
-        message: aborted
-          ? 'The Gemini request timed out. Nothing was stored.'
-          : `Could not reach Gemini: ${err instanceof Error ? err.message : String(err)}`,
+        message: aborted ? 'The Gemini request timed out. Nothing was stored.' : 'Could not reach Gemini',
+        detail: err instanceof Error ? err.message.slice(0, 400) : String(err).slice(0, 400),
+        category: 'network',
+        recommendedModel: null,
         retryable: true
       }
     } finally {
@@ -149,22 +172,10 @@ export class GeminiClient {
 
 async function safeText(response: Response): Promise<string> {
   try {
-    return (await response.text()).slice(0, 400)
+    // Enough to carry Google's full error envelope, which is where the
+    // recommended replacement model lives.
+    return (await response.text()).slice(0, 1200)
   } catch {
     return ''
   }
-}
-
-/** Actionable wording per status — the operator should know what to fix. */
-function describeStatus(status: number, detail: string): string {
-  const tail = detail ? ` Provider said: ${detail}` : ''
-  if (status === 400) return `Gemini rejected the request (400). This is a bug in the request we built, not your key.${tail}`
-  if (status === 401 || status === 403) {
-    return `Gemini refused the API key (${status}). Check the key in Settings and that the Generative Language API is enabled for it.${tail}`
-  }
-  if (status === 404) return `Model not found (404). The configured model id may be wrong or unavailable to this key.${tail}`
-  if (status === 413) return `The request was too large (413). Fewer images, or smaller ones, are needed.${tail}`
-  if (status === 429) return `Rate limited by Gemini (429). Nothing was analysed; try again shortly.${tail}`
-  if (status >= 500) return `Gemini had a server error (${status}). Nothing was analysed.${tail}`
-  return `Gemini request failed (${status}).${tail}`
 }

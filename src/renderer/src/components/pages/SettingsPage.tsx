@@ -655,12 +655,24 @@ export function SettingsPage(): React.JSX.Element {
             <>
               <Field
                 label="Gemini model"
-                hint="Isolated in configuration so a stronger model is a settings change, never a code change. Flash is the cost-efficient tier; Pro is for comparison."
+                hint="Isolated in configuration so changing model is a settings change, never a code change."
               >
                 <SelectInput
                   value={analyzerCfg.model}
                   onChange={(e) => patchAnalyzer({ model: e.target.value })}
                 >
+                  {/* ── A RETIRED STORED MODEL STAYS VISIBLE ──────────────
+                      A settings row written before a model was retired
+                      still holds the old id. Dropping it from the list
+                      would make the select silently display the first
+                      option while the stored value stayed wrong — the
+                      operator would read a model id that was not the one
+                      about to be used. So it is shown, and labelled. */}
+                  {!geminiModels.some((m) => m.id === analyzerCfg.model) && (
+                    <option value={analyzerCfg.model}>
+                      {analyzerCfg.model} — unavailable, choose a current model
+                    </option>
+                  )}
                   {geminiModels.map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.label} — {m.note}
@@ -668,6 +680,12 @@ export function SettingsPage(): React.JSX.Element {
                   ))}
                 </SelectInput>
               </Field>
+              {!geminiModels.some((m) => m.id === analyzerCfg.model) && (
+                <p className="field-hint provider-warning">
+                  The configured model <strong>{analyzerCfg.model}</strong> has been retired by the
+                  provider and will return a 404. Pick a current one above before analysing.
+                </p>
+              )}
 
               <Field
                 label="Gemini API key"

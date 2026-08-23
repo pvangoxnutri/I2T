@@ -4310,6 +4310,20 @@ textarea {
 
 .analysis-provenance-detail { color: var(--text-mute); font-size: 10px; }
 
+/* WHICH fact this is. "Accepted analysis: Mock" and "Analyzer:
+   gemini-3.6-flash · Live" are two different things about the same
+   project, and reading one as the other is how a placeholder gets
+   trusted as a real analysis. */
+.analysis-provenance-kind,
+.analyzer-status-kind {
+  display: block;
+  font-size: 8.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--text-mute);
+  margin-bottom: 1px;
+}
+
 /* ── Transition recovery in the preview ───────────────────────────────*/
 
 .preview-endpoints-status.is-failed { color: var(--err); }

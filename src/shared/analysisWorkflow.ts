@@ -85,6 +85,17 @@ export interface AnalyzerStatus {
   /** The per-provider safety lock. */
   allowLive: boolean
   imageCount: number
+  /**
+   * The provider has retired this model id.
+   *
+   * Checked BEFORE a request rather than discovered as a 404 afterwards.
+   * A project configured before a model was retired still holds the old id
+   * in its settings, and sending to it costs an attempt and returns a raw
+   * JSON blob — so the panel refuses first and says what to change.
+   */
+  modelRetired?: boolean
+  /** The replacement, when the provider has named a verified one. */
+  recommendedModel?: string | null
 }
 
 export interface AnalyzerPresentation {
@@ -129,6 +140,24 @@ export function analyzerPresentation(status: AnalyzerStatus): AnalyzerPresentati
       canRun: true,
       blocker: null,
       action: 'analyze',
+      requiresConfirmation: false
+    }
+  }
+
+  if (status.modelRetired) {
+    // Ahead of the key and lock checks on purpose: a retired model fails
+    // no matter how well everything else is configured, and telling
+    // someone to check their key when the model is the problem sends them
+    // to the wrong screen.
+    return {
+      label: `${model} — unavailable`,
+      mode: 'unconfigured',
+      note: status.recommendedModel
+        ? `The provider has retired this model and recommends ${status.recommendedModel}. Change it in Advanced before analysing.`
+        : 'The provider has retired this model. Choose a current one in Advanced before analysing.',
+      canRun: false,
+      blocker: 'Configured Gemini model is unavailable',
+      action: 'configure',
       requiresConfirmation: false
     }
   }

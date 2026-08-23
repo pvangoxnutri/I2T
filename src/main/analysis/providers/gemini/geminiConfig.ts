@@ -9,32 +9,70 @@
 /**
  * THE MODEL.
  *
- * `gemini-2.5-flash` is the default: current, multimodal, supports many
- * images in one request and native structured JSON output, and is the
- * cost-efficient tier — which matters because a property set is 10–30
- * images and this will run repeatedly during evaluation.
+ * `gemini-3.6-flash` is the default: multimodal, many images in one
+ * request, native structured JSON output, and the cost-efficient tier —
+ * which matters because a property set is 10–30 images and this runs
+ * repeatedly during evaluation.
  *
- * `gemini-2.5-pro` is offered as the stronger comparison tier. Spatial
- * reasoning across a photo set is exactly the kind of task where the pro
- * model may earn its cost, and the whole reason the model id lives here
- * is so that comparison is a settings change rather than a code change.
+ * ── WHY 2.5 IS GONE ──────────────────────────────────────────────────
+ *
+ * `gemini-2.5-flash` returned HTTP 404 against a real key:
+ *
+ *   "This model is no longer available to new users.
+ *    Please update your code to use models/gemini-3.6-flash"
+ *
+ * That is the provider naming its own replacement, which is far better
+ * evidence than anything this file could assert on its own. So the id
+ * changed, and the retired ones are listed in RETIRED_GEMINI_MODELS
+ * rather than deleted — a project configured before this change still
+ * holds `gemini-2.5-flash` in its settings, and it must be TOLD that,
+ * not silently switched.
+ *
+ * ── NO PRO TIER IS LISTED ────────────────────────────────────────────
+ *
+ * `gemini-2.5-pro` is the same retired generation, and there is no
+ * verified id for its replacement. Inventing `gemini-3.6-pro` because it
+ * follows the pattern would be a guess dressed as configuration, and this
+ * file's whole discipline is that unverified vendor values are marked
+ * unverified rather than shipped as fact. A comparison tier returns when
+ * an operator can point at a documented id.
  *
  * Gemini 2.0 Flash is deliberately absent — deprecated.
  */
 export const GEMINI_MODELS = [
   {
-    id: 'gemini-2.5-flash',
-    label: 'Gemini 2.5 Flash',
-    note: 'Cost-efficient. Recommended for evaluation runs.'
-  },
-  {
-    id: 'gemini-2.5-pro',
-    label: 'Gemini 2.5 Pro',
-    note: 'Stronger reasoning, higher cost. For comparison against Flash.'
+    id: 'gemini-3.6-flash',
+    label: 'Gemini 3.6 Flash',
+    note: 'Cost-efficient, multimodal, structured output. Recommended.'
   }
 ] as const
 
-export const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash'
+export const GEMINI_DEFAULT_MODEL = 'gemini-3.6-flash'
+
+/**
+ * Model ids the provider has retired.
+ *
+ * Checked BEFORE a request rather than discovered as a 404 afterwards: a
+ * stored setting pointing at one of these produces a clear "configured
+ * model is unavailable" state instead of a failed paid attempt and a raw
+ * JSON blob. The replacement is recorded where the provider named one.
+ */
+export const RETIRED_GEMINI_MODELS: Record<string, string | null> = {
+  'gemini-2.5-flash': 'gemini-3.6-flash',
+  // Same generation, same retirement. No replacement id is claimed here
+  // because none has been verified — see the note above.
+  'gemini-2.5-pro': null,
+  'gemini-2.0-flash': 'gemini-3.6-flash'
+}
+
+export function isRetiredModel(model: string): boolean {
+  return Object.prototype.hasOwnProperty.call(RETIRED_GEMINI_MODELS, model)
+}
+
+/** The provider's named replacement, when there is a verified one. */
+export function replacementForModel(model: string): string | null {
+  return RETIRED_GEMINI_MODELS[model] ?? null
+}
 
 /** Base URL, locked. Never rebuilt from a model id at call time. */
 export const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
@@ -68,8 +106,12 @@ export interface GeminiRate {
 }
 
 export const GEMINI_DEFAULT_RATES: GeminiRate[] = [
-  { model: 'gemini-2.5-flash', inputPerMillion: 0.3, outputPerMillion: 2.5, verified: false },
-  { model: 'gemini-2.5-pro', inputPerMillion: 1.25, outputPerMillion: 10, verified: false }
+  // Carried over from the previous flash tier as a starting point ONLY.
+  // The model changed and this rate has not been checked against the
+  // vendor's pricing page for it, so `verified: false` is doing real work
+  // here: every figure derived from it is shown as "unavailable — rate not
+  // verified" rather than as a number anyone could reconcile.
+  { model: 'gemini-3.6-flash', inputPerMillion: 0.3, outputPerMillion: 2.5, verified: false }
 ]
 
 export function rateFor(model: string): GeminiRate | null {

@@ -43,7 +43,9 @@ import {
 import {
   GEMINI_DEFAULT_MODEL,
   GEMINI_MODELS,
-  rateFor
+  isRetiredModel,
+  rateFor,
+  replacementForModel
 } from './analysis/providers/gemini/geminiConfig'
 import { sanitizeApiKey } from './providers/keyHygiene'
 import { consumeAnalysisToken, issueAnalysisToken } from './analysis/confirmationTokens'
@@ -262,7 +264,12 @@ export function registerIpc(): void {
       incursCost: meta.capabilities.incursCost,
       hasApiKey: Boolean(sanitizeApiKey(runtime.apiKey)),
       allowLive: runtime.allowLive,
-      imageCount: project?.images.length ?? 0
+      imageCount: project?.images.length ?? 0,
+      // A settings row written before a model was retired still points at
+      // the old id. Caught here so the panel refuses BEFORE a paid attempt
+      // rather than after a 404.
+      modelRetired: meta.model ? isRetiredModel(meta.model) : false,
+      recommendedModel: meta.model ? replacementForModel(meta.model) : null
     }
   })
 

@@ -250,9 +250,15 @@ export function PropertyAnalysisPanel({
               Answerable here, from the document's own provenance, without
               opening logs or settings. */}
           {summary.phase === 'analyzed' && (
+            /* ── TWO DIFFERENT FACTS, NEVER ONE ────────────────────────
+               What is ACCEPTED (and may be a mock from last week) is not
+               what WOULD run if you pressed the button. Both are shown,
+               each prefixed with which one it is, because confusing them
+               is how a placeholder gets trusted as a real analysis. */
             <span
               className={`analysis-provenance${isRealAnalysis(analysis?.provenance) ? ' is-real' : ' is-not-real'}`}
             >
+              <span className="analysis-provenance-kind">Accepted analysis</span>
               {provenanceLabel(analysis?.provenance)}
               <span className="analysis-provenance-detail">
                 {provenanceDetail(analysis?.provenance, formatClock)}
@@ -286,7 +292,10 @@ export function PropertyAnalysisPanel({
               Stated before the button, not discovered after it. */}
           {presentation && (
             <div className={`analyzer-status is-${presentation.mode}`}>
-              <span className="analyzer-status-label">{presentation.label}</span>
+              <span className="analyzer-status-label">
+                <span className="analyzer-status-kind">Analyzer</span>
+                {presentation.label}
+              </span>
               <span className="analyzer-status-scope">
                 Whole-property analysis · {project.images.length} image
                 {project.images.length === 1 ? '' : 's'}

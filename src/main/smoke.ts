@@ -59,8 +59,15 @@ import { GeminiPropertyAnalyzer } from './analysis/providers/gemini/GeminiProper
 import {
   GEMINI_DEFAULT_MODEL,
   GEMINI_MAX_IMAGES,
-  rateFor
+  GEMINI_MODELS,
+  isRetiredModel,
+  rateFor,
+  replacementForModel
 } from './analysis/providers/gemini/geminiConfig'
+import {
+  describeGeminiFailure,
+  extractRecommendedModel
+} from './analysis/providers/gemini/geminiErrors'
 import type { FetchLike, GeminiRequestBody } from './analysis/providers/gemini/GeminiClient'
 import { diffAnalyses } from '../shared/analysisDiff'
 import {
@@ -337,6 +344,7 @@ export async function runSmokeTest(): Promise<void> {
     testProjectDeletionCascade(workDir)
     testEditorSelection()
     testAnalysisWorkflow()
+    await testGeminiModelConfig(workDir, createdProjects)
     testTransitionRecovery()
     testPreviewSource(workDir, createdProjects)
     testSequenceReorder()
@@ -1814,6 +1822,255 @@ function testAnalysisWorkflow(): void {
   assert.strictEqual(provenanceLabel(null), 'Manual — entered by hand')
 
   log('analysis workflow: one state, analyzer identity explicit, no silent fallback')
+}
+
+/**
+ * THE GEMINI MODEL ID, AND WHAT HAPPENS WHEN ONE IS RETIRED.
+ *
+ * ── WHAT PROMPTED THIS ───────────────────────────────────────────────
+ *
+ * `gemini-2.5-flash` returned a real 404 against a real key:
+ *
+ *   "This model is no longer available to new users.
+ *    Please update your code to use models/gemini-3.6-flash"
+ *
+ * Two separate failures were worth fixing. The id was stale — but more
+ * importantly, everything the operator needed was inside a JSON blob that
+ * would have been pasted into an error card verbatim.
+ *
+ * ZERO REAL REQUESTS: the transport is mocked and its call count asserted.
+ */
+async function testGeminiModelConfig(workDir: string, created: string[]): Promise<void> {
+  // ── 1. Only current model ids are offered ────────────────────────────
+  assert.strictEqual(GEMINI_DEFAULT_MODEL, 'gemini-3.6-flash', 'the default is the current model')
+  assert.ok(
+    GEMINI_MODELS.some((m) => m.id === GEMINI_DEFAULT_MODEL),
+    'and the default is one of the selectable options'
+  )
+  for (const m of GEMINI_MODELS) {
+    assert.ok(
+      !isRetiredModel(m.id),
+      `${m.id} is offered in Settings, so it must not be a retired id`
+    )
+  }
+  assert.ok(
+    !GEMINI_MODELS.some((m) => m.id.startsWith('gemini-2.')),
+    'no 2.x model is selectable — the whole generation is unavailable to new keys'
+  )
+  assert.ok(rateFor(GEMINI_DEFAULT_MODEL), 'the default model has a rate entry')
+  assert.strictEqual(
+    rateFor(GEMINI_DEFAULT_MODEL)!.verified,
+    false,
+    'carried over from the previous tier and NOT checked against pricing for this model, ' +
+      'so every figure derived from it still reads as unavailable rather than reconcilable'
+  )
+
+  // ── 2. Retired ids are known, and their replacement is not guessed ───
+  assert.ok(isRetiredModel('gemini-2.5-flash'))
+  assert.strictEqual(
+    replacementForModel('gemini-2.5-flash'),
+    'gemini-3.6-flash',
+    'the provider named this replacement, so it is recorded'
+  )
+  assert.ok(isRetiredModel('gemini-2.5-pro'), 'the pro tier is the same retired generation')
+  assert.strictEqual(
+    replacementForModel('gemini-2.5-pro'),
+    null,
+    'and NO replacement is invented for it — following the naming pattern would be a guess ' +
+      'dressed as configuration'
+  )
+  assert.ok(!isRetiredModel('gemini-3.6-flash'), 'the current model is not retired')
+
+  // ── 3. THE REAL 404, PARSED ──────────────────────────────────────────
+  const realBody = JSON.stringify({
+    error: {
+      code: 404,
+      message:
+        'models/gemini-2.5-flash is not found for API version v1beta, or is not supported for generateContent. This model is no longer available to new users. Please update your code to use models/gemini-3.6-flash. Call ListModels to see the list of available models.',
+      status: 'NOT_FOUND'
+    }
+  })
+
+  const failure = describeGeminiFailure(404, realBody, 'gemini-2.5-flash')
+  assert.strictEqual(failure.category, 'model-unavailable')
+  assert.match(failure.summary, /Configured Gemini model is unavailable/)
+  assert.match(failure.summary, /gemini-3\.6-flash/, 'and names the recommended replacement')
+  assert.strictEqual(failure.recommendedModel, 'gemini-3.6-flash')
+  assert.strictEqual(
+    failure.retryable,
+    false,
+    'retrying the same id would fail identically — this needs a configuration change'
+  )
+
+  // THE SUMMARY IS NOT THE BLOB. The provider's text lives separately.
+  assert.ok(!failure.summary.includes('{'), 'no raw JSON reaches the main error card')
+  assert.ok(!failure.summary.includes('ListModels'), 'nor the provider’s full prose')
+  assert.ok(failure.summary.length < 120, 'the card gets one line, not a wall')
+  assert.ok(failure.detail && failure.detail.includes('ListModels'), 'the detail keeps it all')
+  assert.ok(!failure.detail!.includes('{'), 'unwrapped from the error envelope for Details')
+
+  // ── 4. THE EXTRACTION IS STRICT ──────────────────────────────────────
+  //
+  // The retired id appears FIRST in that same sentence. A loose pattern
+  // would confidently recommend the model that just failed.
+  assert.strictEqual(
+    extractRecommendedModel(realBody),
+    'gemini-3.6-flash',
+    'the recommendation comes from "use models/…", not from the first id in the message'
+  )
+  assert.notStrictEqual(extractRecommendedModel(realBody), 'gemini-2.5-flash')
+  assert.strictEqual(
+    extractRecommendedModel('models/gemini-2.5-flash is not found for API version v1beta'),
+    null,
+    'a 404 with no recommendation yields none rather than a guess'
+  )
+  assert.strictEqual(extractRecommendedModel(null), null)
+  assert.strictEqual(
+    describeGeminiFailure(404, 'models/x is not found for API version v1beta', 'x')
+      .recommendedModel,
+    null,
+    'and the failure carries none'
+  )
+  // Never recommend what is already configured — that reads as a no-op.
+  assert.strictEqual(
+    describeGeminiFailure(404, realBody, 'gemini-3.6-flash').recommendedModel,
+    null,
+    'a recommendation identical to the configured model is not offered'
+  )
+
+  // ── 5. Other statuses still map to something actionable ──────────────
+  assert.strictEqual(describeGeminiFailure(403, '{"error":{"message":"bad key"}}', 'm').category, 'auth')
+  assert.strictEqual(describeGeminiFailure(429, '', 'm').category, 'rate-limited')
+  assert.ok(describeGeminiFailure(429, '', 'm').retryable, 'a rate limit is worth retrying')
+  assert.strictEqual(describeGeminiFailure(503, '', 'm').category, 'server')
+  assert.strictEqual(describeGeminiFailure(null, '', 'm').category, 'network')
+  assert.strictEqual(describeGeminiFailure(413, '', 'm').category, 'too-large')
+
+  // ── 6. A KEY NEVER REACHES A SCREEN ──────────────────────────────────
+  const leaky = JSON.stringify({
+    error: { message: 'Request had key AIzaSyD-EXAMPLE-000000000000 and key=AIzaSecond' }
+  })
+  const cleaned = describeGeminiFailure(400, leaky, 'm')
+  assert.ok(!cleaned.detail!.includes('AIzaSyD-EXAMPLE-000000000000'), 'the key is redacted')
+  assert.ok(!cleaned.detail!.includes('AIzaSecond'), 'including one in a query-string form')
+
+  // ── 7. THE PRE-FLIGHT BLOCK ──────────────────────────────────────────
+  //
+  // A settings row written before the retirement still points at the old
+  // id. Caught BEFORE a paid attempt rather than after a 404.
+  const retired = analyzerPresentation({
+    analyzerId: 'gemini',
+    displayName: 'Gemini vision',
+    provider: 'google',
+    model: 'gemini-2.5-flash',
+    mode: 'live',
+    incursCost: true,
+    hasApiKey: true,
+    allowLive: true,
+    imageCount: 30,
+    modelRetired: true,
+    recommendedModel: 'gemini-3.6-flash'
+  })
+  assert.ok(!retired.canRun, 'a retired model cannot be run')
+  assert.strictEqual(retired.blocker, 'Configured Gemini model is unavailable')
+  assert.strictEqual(retired.action, 'configure')
+  assert.match(retired.note, /gemini-3\.6-flash/, 'and the note names what to change it to')
+  assert.ok(
+    !retired.requiresConfirmation,
+    'no paid confirmation is offered for a request that cannot succeed'
+  )
+
+  // ── 8. THE CLIENT SURFACES IT, WITH NO REAL REQUEST ──────────────────
+  const project = makeProject('Smoke gemini model')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'model.png')
+  writeFileSync(p, png)
+  project.images = importImages(project.id, [
+    { sourcePath: p, name: 'a.png' },
+    { sourcePath: p, name: 'b.png' }
+  ])
+  saveProject(project)
+
+  let calls = 0
+  let sentUrl = ''
+  const fetchImpl: FetchLike = async (url) => {
+    calls++
+    sentUrl = url
+    return new Response(realBody, { status: 404, headers: { 'Content-Type': 'application/json' } })
+  }
+  const analyzer = new GeminiPropertyAnalyzer({
+    apiKey: 'AIza-SMOKE-MODEL',
+    model: GEMINI_DEFAULT_MODEL,
+    live: true,
+    allowLive: true,
+    fetchImpl
+  })
+  const request: AnalyzerRequest = {
+    projectId: project.id,
+    projectName: project.name,
+    images: project.images.map((image, idx) => ({
+      imageId: image.id,
+      sequence: idx + 1,
+      fileName: image.fileName,
+      ref: image.src
+    })),
+    existing: null,
+    notes: '',
+    capabilities: ALL_CAPABILITIES
+  }
+
+  const res = await analyzer.analyzeProperty(request)
+  assert.ok(!res.ok, 'a 404 produces no analysis')
+  assert.strictEqual(calls, 1, 'exactly one mocked call — no real request was made')
+  assert.match(
+    sentUrl,
+    /models\/gemini-3\.6-flash:generateContent/,
+    'and it was addressed to the NEW model id'
+  )
+  assert.match(
+    res.ok ? '' : res.reason,
+    /Configured Gemini model is unavailable/,
+    'the reason the panel shows is the actionable summary'
+  )
+  assert.ok(
+    !(res.ok ? '' : res.reason).includes('ListModels'),
+    'not the provider’s full prose'
+  )
+
+  // ── 9. A FAILED REQUEST CHANGES NOTHING ──────────────────────────────
+  saveAnalysis({
+    ...emptyAnalysis(project.id),
+    state: 'accepted',
+    source: 'mock',
+    rooms: [{ id: 'kept', label: 'Operator Room', imageIds: [], landmarks: [] }],
+    provenance: {
+      analyzerId: 'mock',
+      displayName: 'Mock (development)',
+      provider: 'local',
+      model: null,
+      mode: 'mock',
+      imageCount: 2,
+      analyzedAt: 1,
+      acceptedAt: 2
+    }
+  })
+  const before = readAnalysis(project.id)
+  await analyzer.analyzeProperty(request)
+  const after = readAnalysis(project.id)
+  assert.strictEqual(after.rooms[0].label, 'Operator Room', 'the accepted analysis is untouched')
+  assert.strictEqual(after.provenance?.mode, 'mock', 'and still says honestly that it is a mock')
+  assert.strictEqual(before.updatedAt, after.updatedAt, 'nothing was written at all')
+  assert.ok(
+    !isRealAnalysis(after.provenance),
+    'a mock is never reported as a real analysis, whatever the analyzer is configured as'
+  )
+  assert.strictEqual(listCostEntries(project.id).length, 0, 'and a failed request records no spend')
+
+  log('gemini model: current id only, retirement caught pre-flight, 404 summarised not dumped')
 }
 
 /**
