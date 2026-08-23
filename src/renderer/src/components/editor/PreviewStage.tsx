@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAppState } from '../../state/AppState'
-import { transitionKey, type Project } from '../../types'
+import type { Project } from '../../types'
 import { SEAM_SECONDS, type SeamBlend } from '../../../../shared/seamBlend'
 import type { EditorSelection, PreviewMode } from '../../../../shared/editorSelection'
+import { resolvePreviewSource, statusWordFor } from '../../../../shared/previewSource'
 
 export type { PreviewMode }
 
@@ -45,12 +46,22 @@ export function PreviewStage({
   project,
   selection,
   mode,
-  onShowFullVideo
+  onShowFullVideo,
+  onGenerate,
+  generating = false
 }: {
   project: Project
   selection: EditorSelection
   mode: PreviewMode
   onShowFullVideo: () => void
+  /**
+   * Opens the existing paid-request confirmation for the selected
+   * transition. Routed through the editor page rather than called here so
+   * the preview never reaches the generation path itself — the safety
+   * gate, the provider lock and the cost dialog are all unchanged.
+   */
+  onGenerate?: () => void
+  generating?: boolean
 }): React.JSX.Element {
   const { settings, updateSettings } = useAppState()
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -59,18 +70,8 @@ export function PreviewStage({
   const [duration, setDuration] = useState(0)
   const [building, setBuilding] = useState(false)
   const [note, setNote] = useState<string | null>(null)
-  const [endpoints, setEndpoints] = useState(false)
 
   const selectedPairKey = selection.kind === 'transition' ? selection.pairKey : null
-  const pairIndex = project.images.findIndex(
-    (img, i) =>
-      i < project.images.length - 1 &&
-      transitionKey(img.id, project.images[i + 1].id) === selectedPairKey
-  )
-  const transition = selectedPairKey ? project.transitions[selectedPairKey] : undefined
-  const selectedImage =
-    selection.kind === 'image' ? project.images.find((i) => i.id === selection.imageId) : undefined
-  const imageIndex = selectedImage ? project.images.indexOf(selectedImage) : -1
 
   /**
    * The editor's working preview: a managed file, so it can be played
@@ -93,17 +94,19 @@ export function PreviewStage({
   // silently would be worse than saying so.
   const previewStale = preview.builtAt !== null && project.updatedAt > preview.builtAt
 
-  const src = ((): string | null => {
-    if (mode === 'full') return preview.url
-    if (mode === 'transition') return transition?.clip?.src ?? null
-    return null
-  })()
+  // ONE decision, made in `shared` where it can be asserted. The component
+  // renders the answer rather than working it out inline — which is where
+  // both of the reported bugs were able to hide.
+  const source = resolvePreviewSource(
+    project,
+    selection,
+    preview.url,
+    settings.exportDefaults.defaultTransitionDurationSec
+  )
 
-  const stillSrc = mode === 'image' ? (selectedImage?.src ?? null) : null
-
-  // A transition with no clip: the two endpoints are the useful thing to
-  // look at, so they are offered right here rather than as a mode.
-  const showEndpoints = mode === 'transition' && !src && pairIndex >= 0
+  const src =
+    source.kind === 'clip' ? source.src : source.kind === 'full' ? source.src : null
+  const stillSrc = source.kind === 'image' ? source.src : null
 
   // Reset transport state whenever the source changes.
   useEffect(() => {
@@ -111,8 +114,6 @@ export function PreviewStage({
     setTime(0)
     setDuration(0)
   }, [src, stillSrc])
-
-  useEffect(() => setEndpoints(false), [selectedPairKey])
 
   const toggle = (): void => {
     const v = videoRef.current
@@ -147,10 +148,10 @@ export function PreviewStage({
   const seam = (settings.exportDefaults.seamBlend ?? 'subtle') as SeamBlend
 
   const heading =
-    mode === 'image' && selectedImage
-      ? `IMAGE ${String(imageIndex + 1).padStart(2, '0')} · ${selectedImage.fileName}`
-      : mode === 'transition' && pairIndex >= 0
-        ? `TRANSITION ${pairIndex + 1} → ${pairIndex + 2}`
+    source.kind === 'image'
+      ? `IMAGE ${String(source.index + 1).padStart(2, '0')} · ${source.fileName}`
+      : source.kind === 'clip' || source.kind === 'transition-endpoints'
+        ? `TRANSITION ${source.index + 1} → ${source.index + 2}`
         : 'FULL VIDEO'
 
   return (
@@ -210,15 +211,39 @@ export function PreviewStage({
           /* `contain`, in CSS — a property photo stretched to the frame is
              a misrepresentation of the room it shows. */
           <img className="preview-still" src={stillSrc} alt="" />
-        ) : showEndpoints && endpoints ? (
+        ) : source.kind === 'transition-endpoints' ? (
+          /* ── A TRANSITION WITH NO CLIP IS NOT AN EMPTY SCREEN ────────
+             It is two photographs and a question about how to get from
+             one to the other. Showing the endpoints, the status and the
+             action in one place is the difference between "nothing
+             happened" and "here is what this is, and here is how to make
+             it". The old version showed a bare line of text and hid
+             Generate two tabs away. */
           <div className="preview-endpoints">
             <figure>
-              <img src={project.images[pairIndex].src} alt="" />
-              <figcaption>Start · Image {pairIndex + 1}</figcaption>
+              <img src={source.startSrc} alt="" />
+              <figcaption>Start · Image {source.index + 1}</figcaption>
             </figure>
+            <div className="preview-endpoints-mid">
+              <span className="preview-endpoints-arrow" aria-hidden>
+                →
+              </span>
+              <span className="preview-endpoints-status">{statusWordFor(source.status)}</span>
+              {onGenerate && source.canGenerate && (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-tiny"
+                  onClick={onGenerate}
+                  disabled={generating}
+                  title="Opens the paid-request confirmation before anything is sent"
+                >
+                  {generating ? 'Opening…' : `Generate ${source.index + 1} → ${source.index + 2}`}
+                </button>
+              )}
+            </div>
             <figure>
-              <img src={project.images[pairIndex + 1].src} alt="" />
-              <figcaption>End · Image {pairIndex + 2}</figcaption>
+              <img src={source.endSrc} alt="" />
+              <figcaption>End · Image {source.index + 2}</figcaption>
             </figure>
           </div>
         ) : (
@@ -231,21 +256,13 @@ export function PreviewStage({
                   generates AI video.
                 </span>
               </>
-            ) : mode === 'transition' ? (
+            ) : source.kind === 'unavailable' ? (
+              /* Reached only when the selection names nothing in the
+                 current order — a stale pair key after a reorder. A pair
+                 that exists always renders the endpoint view above. */
               <>
-                <span className="preview-empty-title">Not generated</span>
-                <span className="preview-empty-body">
-                  No clip for this transition yet. Generate it from the inspector below.
-                </span>
-                {showEndpoints && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-tiny"
-                    onClick={() => setEndpoints(true)}
-                  >
-                    Compare start / end frames
-                  </button>
-                )}
+                <span className="preview-empty-title">Selection unavailable</span>
+                <span className="preview-empty-body">{source.reason}</span>
               </>
             ) : (
               <>

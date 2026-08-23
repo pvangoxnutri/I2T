@@ -18,6 +18,8 @@ import { TimelineStrip } from '../editor/TimelineStrip'
 import { TransitionInspector } from '../editor/TransitionInspector'
 import { ImageInspector } from '../editor/ImageInspector'
 import { ExportDrawer } from '../editor/ExportDrawer'
+import { LiveGenerateDialog } from '../editor/LiveGenerateDialog'
+import type { LiveConfirmationPayload } from '../../../../preload/index'
 
 /**
  * The I2T editor — a desktop video-editing workspace.
@@ -58,13 +60,16 @@ export function ProjectEditorPage({
   projectId: string
   onBack: () => void
 }): React.JSX.Element {
-  const { projects, moveImage } = useAppState()
+  const { projects, moveImage, refreshProjects } = useAppState()
   const [selection, setSelection] = useState<EditorSelection>(selectFullVideo())
   const [exportOpen, setExportOpen] = useState(false)
   const [analysis, setAnalysis] = useState<PropertyAnalysis | null>(null)
   // Bumped whenever a manual override changes, so the effective analysis
   // — and therefore every plan derived from it — is re-read.
   const [factsNonce, setFactsNonce] = useState(0)
+  const [liveConfirm, setLiveConfirm] = useState<LiveConfirmationPayload | null>(null)
+  const [generateOpening, setGenerateOpening] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
 
   const project = projects.find((p) => p.id === projectId)
 
@@ -129,6 +134,28 @@ export function ProjectEditorPage({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onKeyDown])
 
+  /**
+   * GENERATE, FROM THE PREVIEW.
+   *
+   * Deliberately the SAME path the inspector's Generation tab uses: build
+   * the paid confirmation in main, show it, and submit only on confirm.
+   * The preview is given a callback rather than the provider API, so no
+   * safety gate, provider lock or cost dialog is bypassed by putting the
+   * button somewhere more findable.
+   */
+  const openGenerate = useCallback(
+    (pairKey: string): void => {
+      setGenerateOpening(true)
+      void window.f2f.generation
+        .liveConfirmation(projectId, pairKey)
+        .then((data) => {
+          if (data) setLiveConfirm(data)
+        })
+        .finally(() => setGenerateOpening(false))
+    },
+    [projectId]
+  )
+
   if (!project) {
     return (
       <div className="page">
@@ -159,6 +186,10 @@ export function ProjectEditorPage({
           selection={selection}
           mode={previewModeFor(selection)}
           onShowFullVideo={() => setSelection(selectFullVideo())}
+          onGenerate={
+            selection.kind === 'transition' ? () => openGenerate(selection.pairKey) : undefined
+          }
+          generating={generateOpening}
         />
       </div>
 
@@ -192,6 +223,27 @@ export function ProjectEditorPage({
       )}
 
       <ExportDrawer project={project} open={exportOpen} onClose={() => setExportOpen(false)} />
+
+      {/* The unchanged paid-request confirmation. Reached from the preview
+          and from the inspector's Generation tab; both build it in main
+          and neither can submit without passing through it. */}
+      {liveConfirm && selection.kind === 'transition' && (
+        <LiveGenerateDialog
+          data={liveConfirm}
+          busy={submitting}
+          onCancel={() => setLiveConfirm(null)}
+          onConfirm={() => {
+            setSubmitting(true)
+            void window.f2f.generation
+              .generateLive(project.id, [selection.pairKey])
+              .then(() => {
+                setSubmitting(false)
+                setLiveConfirm(null)
+                refreshProjects()
+              })
+          }}
+        />
+      )}
     </div>
   )
 }

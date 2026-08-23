@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useAppState } from '../../state/AppState'
-import { transitionKey, type Project } from '../../types'
+import { defaultTransitionSettings, transitionKey, type Project } from '../../types'
 import { LiveGenerateDialog } from './LiveGenerateDialog'
 import type { LiveConfirmationPayload } from '../../../../preload/index'
 import { markManuallyEdited } from '../../../../shared/promptPlanner'
@@ -45,7 +45,34 @@ export function TransitionInspector({
   )
   const start = index >= 0 ? project.images[index] : null
   const end = index >= 0 ? project.images[index + 1] : null
-  const transition = pairKey ? project.transitions[pairKey] : undefined
+
+  /**
+   * A TRANSITION EXISTS AS SOON AS TWO PHOTOS ARE ADJACENT.
+   *
+   * ── THE BUG THIS FIXES ───────────────────────────────────────────────
+   *
+   * `project.transitions` is keyed by image pair and written LAZILY — a
+   * row appears the first time something about that transition is edited.
+   * A freshly imported project has thirty photographs, twenty-nine
+   * transitions and zero rows.
+   *
+   * This inspector used to bail out when the row was missing, showing
+   * "Select a transition in the timeline to configure it." — the exact
+   * message it showed when nothing was selected at all. So clicking a
+   * transition selected it, switched the preview and highlighted the
+   * block, and the inspector still said "select a transition". It read as
+   * the click having done nothing, and there was no way to reach Generate
+   * because the panel holding it never rendered.
+   *
+   * The absence of a settings row means "not configured yet", not "does
+   * not exist". Defaults are supplied so the transition can be inspected
+   * and generated, and the row is written when something is actually
+   * changed — which keeps the lazy-write behaviour the rest of the app
+   * relies on.
+   */
+  const stored = pairKey ? project.transitions[pairKey] : undefined
+  const transition =
+    stored ?? defaultTransitionSettings(settings.exportDefaults.defaultTransitionDurationSec)
 
   useEffect(() => {
     if (!pairKey) return
@@ -61,7 +88,9 @@ export function TransitionInspector({
     void window.f2f.clips.info(project.id, stored).then(setClipInfo)
   }, [project.id, transition?.clip?.storedName])
 
-  if (!pairKey || !transition || !start || !end) {
+  // Only a genuinely unresolvable pair falls back — an id that names no
+  // adjacent pair in the current order, which a reorder can produce.
+  if (!pairKey || !start || !end) {
     return (
       <section className="inspector inspector-empty">
         <p>Select a transition in the timeline to configure it.</p>
@@ -307,8 +336,19 @@ export function TransitionInspector({
               }
             />
             <div className="inspector-actions">
-              <button type="button" className="btn btn-primary btn-tiny" onClick={openGenerate}>
-                {transition.clip ? 'Regenerate' : 'Generate'} with {providerName}
+              {/* ── REGENERATE IS NOT A RETRY ─────────────────────────────
+                  A second generation costs exactly what the first one did.
+                  Styled and worded apart from Generate so it can never be
+                  mistaken for an undo or a refresh, and the cost is stated
+                  next to it rather than only inside the dialog. */}
+              <button
+                type="button"
+                className={`btn btn-tiny ${transition.clip ? 'btn-ghost btn-regenerate' : 'btn-primary'}`}
+                onClick={openGenerate}
+              >
+                {transition.clip
+                  ? `Regenerate — costs again`
+                  : `Generate ${index + 1} → ${index + 2} with ${providerName}`}
               </button>
               <button
                 type="button"
@@ -323,6 +363,12 @@ export function TransitionInspector({
                 Add to Queue
               </button>
             </div>
+            {transition.clip && (
+              <p className="inspector-cost-note">
+                A clip already exists. Regenerating submits a new paid request and does not replace
+                the spend already recorded for this transition.
+              </p>
+            )}
             {attempts.length > 0 && (
               <ul className="inspector-attempts">
                 {attempts.map((a) => (

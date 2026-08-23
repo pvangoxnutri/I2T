@@ -13,6 +13,7 @@ import './services/generationService'
 import { runSmokeTest } from './smoke'
 import { runDbDiagnostics } from './dbDiagnostics'
 import { cleanSmokeOrphans } from './orphanCleanup'
+import { runUiProbe } from './uiProbe'
 
 /**
  * FrameToFrame — Electron main process.
@@ -188,6 +189,17 @@ app.whenReady().then(async () => {
   initQueue()
 
   createWindow()
+
+  // TEMPORARY: drives the real renderer and reports DOM state after each
+  // interaction. `electron . --f2f-uicheck`.
+  if (process.argv.includes('--f2f-uicheck')) {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win) {
+      void runUiProbe(win)
+        .catch((err) => console.error('[uicheck] FAILED:', err))
+        .finally(() => app.exit(0))
+    }
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

@@ -2622,10 +2622,30 @@ textarea {
 
 .editor {
   display: grid;
+  /* ── THE COLUMN MUST BE DECLARED ────────────────────────────────────
+     A grid with only `grid-template-rows` still gets an implicit column,
+     and an implicit column is sized `auto` — which means MAX-CONTENT.
+     The timeline row is 30 image blocks wide (~6200px), so the whole
+     editor grew to 6200px and everything in it stretched with it: the
+     preview frame became 6242×441, and a photograph rendered centred
+     inside that box sat about 3000px off the right of a 1500px window.
+     The image was loading correctly the entire time; it was simply not
+     where anyone could see it.
+
+     `minmax(0, 1fr)` lets the column shrink below its content, which is
+     what makes the timeline's own `overflow-x: auto` take effect. */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: var(--toolbar-h) minmax(0, 1fr) var(--timeline-h) var(--inspector-h);
   height: 100vh;
   min-width: 0;
+  overflow: hidden;
   background: var(--bg);
+}
+
+/* Every row is its own containing block for overflow. Without this the
+   same max-content sizing reappears one level down. */
+.editor > * {
+  min-width: 0;
 }
 
 /* ── Brand mark ─────────────────────────────────────────────────────── */
@@ -2766,6 +2786,7 @@ textarea {
   display: grid;
   grid-template-columns: var(--left-panel-w) minmax(0, 1fr);
   min-height: 0;
+  min-width: 0;
   border-bottom: 1px solid var(--border);
 }
 
@@ -3008,6 +3029,7 @@ textarea {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   border-bottom: 1px solid var(--border);
   background: var(--bg-raised);
 }
@@ -3032,6 +3054,9 @@ textarea {
 .timeline-track {
   flex: 1;
   min-height: 0;
+  /* Lets the track scroll instead of dictating the editor's width — the
+     other half of the fix in `.editor`. */
+  min-width: 0;
   display: flex;
   align-items: stretch;
   gap: 0;
@@ -4125,9 +4150,68 @@ textarea {
   padding: 12px;
 }
 
-.preview-endpoints figure { margin: 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.preview-endpoints img { max-width: 100%; max-height: 40vh; object-fit: contain; border: 1px solid var(--border); }
+.preview-endpoints figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  max-width: 42%;
+}
+
+.preview-endpoints img {
+  max-width: 100%;
+  min-height: 0;
+  max-height: calc(100% - 20px);
+  object-fit: contain;
+  border: 1px solid var(--border);
+}
+
 .preview-endpoints figcaption { font-size: 10px; color: var(--text-mute); text-align: center; }
+
+/* The middle column carries the whole answer to "what is this and how do
+   I make it": the relation, the status, and the action. */
+.preview-endpoints-mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.preview-endpoints-arrow { font-size: 20px; color: var(--text-dim); line-height: 1; }
+
+.preview-endpoints-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-mute);
+  white-space: nowrap;
+}
+
+/* ── Regenerate is not a retry ─────────────────────────────────────────
+   Generating again costs the same money as generating the first time.
+   It stays a separate, differently-weighted control so it can never be
+   mistaken for an undo or a refresh. */
+.btn-regenerate {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.btn-regenerate:hover:not(:disabled) {
+  border-color: var(--warn);
+  background: rgba(194, 172, 126, 0.1);
+}
+
+.inspector-cost-note {
+  flex-basis: 100%;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--warn);
+  margin: 0;
+}
 
 /* ── Timeline blocks ──────────────────────────────────────────────────
    Images larger than transitions: the photograph must be recognisable

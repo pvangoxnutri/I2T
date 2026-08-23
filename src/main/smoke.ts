@@ -121,6 +121,12 @@ import {
 } from '../shared/analysisSummary'
 import { editorReadiness } from '../shared/editorReadiness'
 import {
+  resolvePreviewSource,
+  statusWordFor,
+  transitionSettingsFor,
+  type PreviewSource
+} from '../shared/previewSource'
+import {
   ANALYSIS_TOKEN_TTL_MS,
   consumeAnalysisToken,
   issueAnalysisToken,
@@ -309,6 +315,7 @@ export async function runSmokeTest(): Promise<void> {
     await testPropertyAnalyzer(workDir, createdProjects)
     testProjectDeletionCascade(workDir)
     testEditorSelection()
+    testPreviewSource(workDir, createdProjects)
     testSequenceReorder()
     testAnalysisSummary()
     testProjectReadiness(workDir, createdProjects)
@@ -1627,6 +1634,220 @@ function testEditorSelection(): void {
   )
 
   log('editor selection: one selection drives preview + inspector, typing never moves a photo')
+}
+
+/**
+ * WHAT THE MAIN PREVIEW SHOWS.
+ *
+ * ── THE TWO BUGS THIS PINS ───────────────────────────────────────────
+ *
+ * 1. Clicking a transition appeared to do nothing. The pair was selected
+ *    and the block highlighted, but `project.transitions[pairKey]` is
+ *    written LAZILY — a freshly imported project has thirty photographs,
+ *    twenty-nine transitions and zero rows. Both the preview and the
+ *    inspector treated that absence as "no transition selected", so the
+ *    inspector showed the identical "select a transition" message it
+ *    showed before the click, and Generate was unreachable.
+ *
+ * 2. A selected image did not appear in the preview. The image element
+ *    was in fact correct and loaded — a layout fault let the timeline's
+ *    max-content width size the whole editor grid, so the preview frame
+ *    became 6242px wide inside a 1500px window and the photograph was
+ *    centred about 3000px off-screen. Nothing asserted the resolution
+ *    step, so a rendering fault and a resolution fault looked the same.
+ *
+ * The decision is now a value in `shared`, so it can be asserted without
+ * a DOM. The layout half is verified in the real renderer instead — see
+ * the note at the end of this test.
+ */
+function testPreviewSource(workDir: string, created: string[]): void {
+  const project = makeProject('Smoke preview source')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'prev.png')
+  writeFileSync(p, png)
+  project.images = importImages(project.id, [
+    { sourcePath: p, name: 'a.png' },
+    { sourcePath: p, name: 'b.png' },
+    { sourcePath: p, name: 'c.png' }
+  ])
+  saveProject(project)
+  const [i1, i2, i3] = project.images.map((x) => x.id)
+  const pair12 = transitionKey(i1, i2)
+  const pair23 = transitionKey(i2, i3)
+
+  // NOTE: `project.transitions` is deliberately left EMPTY here — that is
+  // the exact state a freshly imported project is in, and the state the
+  // bug lived in.
+  assert.deepStrictEqual(project.transitions, {}, 'a new project has no transition rows at all')
+
+  const resolve = (selection: EditorSelection, assembled: string | null = null): PreviewSource =>
+    resolvePreviewSource(project, selection, assembled, 5)
+
+  // ── 1. A selected image resolves to THAT image's managed source ──────
+  const img = resolve(selectImage(i2))
+  assert.strictEqual(img.kind, 'image', 'an image selection resolves to an image')
+  if (img.kind === 'image') {
+    assert.strictEqual(img.imageId, i2)
+    assert.strictEqual(img.index, 1, 'and knows its position for the heading')
+    assert.strictEqual(img.src, project.images[1].src, 'with the correct managed src')
+    assert.match(img.src, /^f2f:\/\/image\//, 'served over the managed protocol, never a real path')
+    assert.ok(!/[A-Za-z]:\\|\/Users\//.test(img.src), 'and carrying no filesystem path')
+  }
+  // Every image resolves to its OWN source — an off-by-one here would
+  // show the wrong room and nobody would necessarily notice.
+  for (let i = 0; i < project.images.length; i++) {
+    const r = resolve(selectImage(project.images[i].id))
+    assert.strictEqual(r.kind === 'image' && r.src, project.images[i].src, `image ${i + 1} maps to itself`)
+  }
+
+  // ── 2. A TRANSITION WITH NO ROW IS STILL A TRANSITION ────────────────
+  const bare = resolve(selectTransition(pair12))
+  assert.strictEqual(
+    bare.kind,
+    'transition-endpoints',
+    'a transition with no settings row resolves to its endpoints, NOT to nothing — ' +
+      'this is the assertion that would have caught the click doing nothing'
+  )
+  if (bare.kind === 'transition-endpoints') {
+    assert.strictEqual(bare.index, 0)
+    assert.strictEqual(bare.startSrc, project.images[0].src, 'start frame is the left photo')
+    assert.strictEqual(bare.endSrc, project.images[1].src, 'end frame is the right one')
+    assert.strictEqual(bare.status, 'not-generated', 'and it reports honestly as ungenerated')
+    assert.ok(bare.canGenerate, 'with Generate available right there in the preview')
+  }
+  assert.strictEqual(statusWordFor('not-generated'), 'Not generated', 'status is a WORD, not a tint')
+
+  // The settings fallback is defaults, not undefined.
+  const settings = transitionSettingsFor(project, pair12, 5)
+  assert.strictEqual(settings.durationSec, 5, 'the default duration is supplied')
+  assert.strictEqual(settings.clip, null)
+  assert.strictEqual(settings.status, 'not-generated')
+
+  // ── 3. A transition WITH a clip resolves to the clip ─────────────────
+  project.transitions[pair12] = {
+    prompt: '',
+    durationSec: 5,
+    status: 'completed',
+    clip: {
+      storedName: 'clip.mp4',
+      originalName: 'clip.mp4',
+      source: 'fal',
+      src: 'f2f://clip/x/clip.mp4'
+    },
+    promptProvenance: null
+  }
+  const withClip = resolve(selectTransition(pair12))
+  assert.strictEqual(withClip.kind, 'clip', 'an existing clip is played rather than shown as endpoints')
+  assert.strictEqual(withClip.kind === 'clip' && withClip.src, 'f2f://clip/x/clip.mp4')
+
+  // ── 4. Generation already in flight does not offer Generate again ────
+  project.transitions[pair23] = {
+    prompt: '',
+    durationSec: 5,
+    status: 'generating',
+    clip: null,
+    promptProvenance: null
+  }
+  const inFlight = resolve(selectTransition(pair23))
+  assert.strictEqual(inFlight.kind, 'transition-endpoints')
+  assert.ok(
+    inFlight.kind === 'transition-endpoints' && !inFlight.canGenerate,
+    'a transition already generating hides Generate — a second click would be a second paid request'
+  )
+  assert.strictEqual(statusWordFor('generating'), 'Generating…', 'and says what it is doing')
+
+  // ── 5. Full Video is independent of any item selection ───────────────
+  assert.deepStrictEqual(
+    resolve(selectFullVideo(), 'f2f://export/x/preview.mp4'),
+    { kind: 'full', src: 'f2f://export/x/preview.mp4' },
+    'Full Video shows the assembled file'
+  )
+  assert.deepStrictEqual(
+    resolve(selectFullVideo(), null),
+    { kind: 'full', src: null },
+    'and reports honestly when none has been built rather than borrowing a clip'
+  )
+
+  // ── 6. SELECTIONS ARE MUTUALLY EXCLUSIVE, all the way to the screen ──
+  // Not merely in the selection value — in what the preview resolves to.
+  // Exactly one of these may be an image, and exactly one a transition.
+  const kinds = [
+    resolve(selectImage(i1)).kind,
+    resolve(selectTransition(pair12)).kind,
+    resolve(selectFullVideo()).kind
+  ]
+  assert.deepStrictEqual(kinds, ['image', 'clip', 'full'], 'each selection resolves to its own kind')
+  assert.strictEqual(
+    resolve(selectImage(i1)).kind === 'image' && resolve(selectImage(i1)).kind !== 'clip',
+    true,
+    'an image selection can never resolve to a clip'
+  )
+
+  // ── 7. AFTER A REORDER ───────────────────────────────────────────────
+  // Move image 3 to the front: c,a,b. Pair a→b survives; b→c does not.
+  const reordered: typeof project = {
+    ...project,
+    images: moveInSequence(project.images, 2, 0)
+  }
+  const afterMove = resolvePreviewSource(reordered, selectImage(i2), null, 5)
+  assert.strictEqual(afterMove.kind, 'image', 'a moved photograph still resolves')
+  assert.strictEqual(
+    afterMove.kind === 'image' && afterMove.index,
+    2,
+    'at its NEW position — the preview follows the photo, not the slot'
+  )
+  assert.strictEqual(
+    afterMove.kind === 'image' && afterMove.src,
+    project.images[1].src,
+    'and still shows the same photograph'
+  )
+
+  const stalePair = resolvePreviewSource(reordered, selectTransition(pair23), null, 5)
+  assert.strictEqual(
+    stalePair.kind,
+    'unavailable',
+    'a pair the reorder broke is reported as unavailable, not rendered as a blank frame'
+  )
+  assert.match(
+    stalePair.kind === 'unavailable' ? stalePair.reason : '',
+    /no longer adjacent/i,
+    'and says why, in words'
+  )
+  const survivingPair = resolvePreviewSource(reordered, selectTransition(pair12), null, 5)
+  assert.strictEqual(
+    survivingPair.kind,
+    'clip',
+    'while a pair whose neighbours did not change keeps its clip'
+  )
+
+  // ── 8. A removed photograph ──────────────────────────────────────────
+  const withoutI2: typeof project = {
+    ...project,
+    images: project.images.filter((x) => x.id !== i2)
+  }
+  assert.strictEqual(
+    resolvePreviewSource(withoutI2, selectImage(i2), null, 5).kind,
+    'unavailable',
+    'a deleted photograph is reported, never rendered as an empty box'
+  )
+
+  // ── THE LAYOUT HALF ──────────────────────────────────────────────────
+  //
+  // Bug 2 was NOT a resolution failure — every assertion above already
+  // passed while the screen was blank. The image element was correct and
+  // loaded; the editor grid's implicit column was sized max-content by the
+  // timeline, so the preview frame was 6242px wide inside a 1500px window.
+  //
+  // That cannot be asserted here, and pretending otherwise would be worse
+  // than admitting it: it is verified in the real renderer via
+  // `electron . --f2f-uicheck`, which measures the rendered boxes.
+  // Before the fix: frame 6244px. After: 956px.
+
+  log('preview source: lazy transitions resolve, images map to themselves, reorder re-resolves')
 }
 
 /**
