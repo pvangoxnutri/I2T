@@ -7,6 +7,8 @@ import { markManuallyEdited } from '../../../../shared/promptPlanner'
 import { relateImages, type PropertyAnalysis } from '../../../../shared/propertyAnalysis'
 import { attemptsForPair, formatSpend, type GenerationCostEntry } from '../../../../shared/costLedger'
 import { latestJobForPair, transitionRecovery } from '../../../../shared/transitionRecovery'
+import { NEUTRAL_MOTION, planSequence } from '../../../../shared/transitionPlan'
+import { orientationLabel } from '../../../../shared/transitionEvidence'
 
 type Tab = 'motion' | 'prompt' | 'generation' | 'clip'
 
@@ -108,6 +110,13 @@ export function TransitionInspector({
   )
 
   const hasAnalysis = analysis !== null && analysis.rooms.length > 0
+  // The plan for THIS pair, from the whole-sequence planner so continuity
+  // is the same value the prompt was built with.
+  const plan =
+    planSequence(
+      analysis,
+      project.images.map((i) => i.id)
+    )[index] ?? null
   const relation = analysis ? relateImages(analysis, start.id, end.id) : { kind: 'unknown' as const }
   const attempts = attemptsForPair(entries, pairKey)
   const provider = settings.providers.find(
@@ -232,11 +241,87 @@ export function TransitionInspector({
               </div>
             )}
 
+            {/* ── WHY THIS MOTION AND NOT ANOTHER ────────────────────────
+                Every transition used to read `slow forward dolly, slight
+                clockwise rotation` because the wording came first and the
+                direction was invented. Showing the evidence a plan was
+                built from is what makes a generic plan visibly generic. */}
+            {plan && (
+              <div className="inspector-evidence">
+                <span className="inspector-planned-label">Evidence</span>
+                {plan.hasEvidence ? (
+                  <dl className="evidence-list">
+                    {plan.sharedLandmarks.length > 0 && (
+                      <div>
+                        <dt>Shared landmarks</dt>
+                        <dd>{plan.sharedLandmarks.join(', ')}</dd>
+                      </div>
+                    )}
+                    {plan.leavingLandmarks.length > 0 && (
+                      <div>
+                        <dt>Leaves frame</dt>
+                        <dd>{plan.leavingLandmarks.join(', ')}</dd>
+                      </div>
+                    )}
+                    {plan.enteringLandmarks.length > 0 && (
+                      <div>
+                        <dt>Enters frame</dt>
+                        <dd>{plan.enteringLandmarks.join(', ')}</dd>
+                      </div>
+                    )}
+                    <div>
+                      <dt>Start orientation</dt>
+                      <dd>{orientationLabel(plan.startOrientation)}</dd>
+                    </div>
+                    <div>
+                      <dt>End orientation</dt>
+                      <dd>{orientationLabel(plan.endOrientation)}</dd>
+                    </div>
+                    <div>
+                      <dt>Rotation</dt>
+                      <dd className={plan.rotationDirection === 'unknown' ? 'is-unknown' : undefined}>
+                        {plan.rotationDirection === 'unknown'
+                          ? 'Not determinable from the recorded orientations'
+                          : plan.rotationDirection === 'none'
+                            ? 'No turn'
+                            : plan.rotationDirection}
+                      </dd>
+                    </div>
+                    {plan.visiblePassage && (
+                      <div>
+                        <dt>Passage</dt>
+                        <dd>{plan.visiblePassage}</dd>
+                      </div>
+                    )}
+                    <div>
+                      <dt>Derived from</dt>
+                      <dd>
+                        {plan.evidenceImageIds
+                          .map((id) => {
+                            const i = project.images.findIndex((x) => x.id === id)
+                            return i >= 0 ? `IMAGE_${String(i + 1).padStart(3, '0')}` : null
+                          })
+                          .filter(Boolean)
+                          .join(', ') || 'none'}
+                      </dd>
+                    </div>
+                  </dl>
+                ) : (
+                  <p className="inspector-hint">
+                    Insufficient spatial evidence for a directional camera path. Safe cinematic
+                    motion will be used — no rotation or travel direction is invented.
+                  </p>
+                )}
+              </div>
+            )}
+
             <div className="inspector-planned">
               <span className="inspector-planned-label">Planned motion</span>
               <p>
                 {transition.promptProvenance?.motionInstruction ??
-                  'No analysis-derived motion instruction — the base safety prompt is used unchanged.'}
+                  (plan && !plan.hasEvidence
+                    ? NEUTRAL_MOTION
+                    : 'No analysis-derived motion instruction — the base safety prompt is used unchanged.')}
               </p>
             </div>
           </div>

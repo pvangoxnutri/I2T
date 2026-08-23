@@ -4356,6 +4356,56 @@ textarea {
 
 .rebuild-mock-ack input { margin-top: 2px; flex: none; }
 
+/* ── Spatial planning quality ─────────────────────────────────────────
+   A diagnostic, never a correction. It reports what the planner had to
+   work with so a structurally valid but useless analysis stops being
+   reported as success. */
+
+.planning-quality {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+}
+
+.planning-quality.is-insufficient { border-color: var(--warn); }
+
+.planning-quality-title {
+  display: block;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--text-mute);
+  margin-bottom: 4px;
+}
+
+.planning-quality ul { list-style: none; margin: 0; padding: 0; }
+.planning-quality li { font-size: 10.5px; color: var(--text-dim); line-height: 1.5; }
+.planning-quality li.is-warn { color: var(--warn); }
+
+.planning-quality-verdict {
+  margin: 6px 0 0;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--warn);
+}
+
+/* ── Transition evidence ──────────────────────────────────────────────
+   Why THIS motion and not another. */
+
+.inspector-evidence { flex-basis: 100%; max-width: 420px; }
+
+.evidence-list { margin: 2px 0 0; display: flex; flex-direction: column; gap: 1px; }
+.evidence-list > div { display: flex; gap: 8px; font-size: 10.5px; }
+.evidence-list dt { flex: none; width: 118px; color: var(--text-mute); }
+.evidence-list dd { margin: 0; color: var(--text-dim); min-width: 0; }
+
+/* Uncertainty is shown as uncertainty, not as a quieter fact. */
+.evidence-list dd.is-unknown { color: var(--text-mute); font-style: italic; }
+
+.analysis-summary.is-mock { border-color: var(--warn); }
+
 .analysis-mock-warning {
   margin: 4px 0 0;
   padding: 6px 9px;

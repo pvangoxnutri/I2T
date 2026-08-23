@@ -147,9 +147,14 @@ export class MockPropertyAnalyzer implements PropertyAnalyzer {
       provider: 'local',
       model: null,
       description:
-        'Deterministic fixture analyzer for exercising the review workflow. Calls nothing, costs nothing.',
+        'Deterministic fixture analyzer for exercising the review workflow. Calls nothing, costs nothing, and understands nothing about the property.',
       capabilities: { ...LOCAL_CAPABILITIES, roomDetection: true },
-      available: true
+      available: true,
+      // Kept OUT of the normal analyzer list. It produced an accepted
+      // "analysis" of thirty photographs in one unnamed room, which the
+      // planner then turned into twenty-nine identical camera moves —
+      // useful for exercising the workflow, dangerous as production input.
+      developerOnly: true
     }
   }
 

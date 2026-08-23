@@ -107,6 +107,20 @@ export interface AnalyzerMetadata {
    * be reached by accident.
    */
   available: boolean
+  /**
+   * A DEVELOPMENT TOOL, not a property analyzer.
+   *
+   * The mock produces a deterministic placeholder structure for exercising
+   * the review workflow. It is genuinely useful for that and genuinely
+   * useless as spatial understanding — thirty photographs in one unnamed
+   * room with no landmarks, which then planned twenty-nine identical
+   * camera moves.
+   *
+   * Listing it beside real analyzers made it possible to accept one by
+   * accident and then treat the result as though the property had been
+   * analysed. It is kept, and moved behind Developer / Testing.
+   */
+  developerOnly?: boolean
 }
 
 export interface AnalyzerCostEstimate {

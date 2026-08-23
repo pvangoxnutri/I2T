@@ -31,6 +31,8 @@ import {
   type AnalyzerStatus
 } from '../../../../shared/analysisWorkflow'
 import { sanitizeReason } from '../../../../shared/transitionRecovery'
+import { motionDiversity, planningQuality } from '../../../../shared/planningQuality'
+import type { TransitionPlan } from '../../../../shared/transitionPlan'
 import type { AnalysisConfirmationPayload } from '../../../../preload/index'
 import { AnalyzeConfirmDialog } from './AnalyzeConfirmDialog'
 import { GroundTruthReview } from './GroundTruthReview'
@@ -86,7 +88,9 @@ export function PropertyAnalysisPanel({
   const [error, setError] = useState<string | null>(null)
   const [pendingResult, setPendingResult] = useState<PropertyAnalysis | null>(null)
   const [diff, setDiff] = useState<AnalysisDiff | null>(null)
-  const [analyzerId, setAnalyzerId] = useState('mock')
+  // Defaults to the first NON-developer analyzer. It used to default to
+  // the mock, which is how a placeholder became the obvious thing to run.
+  const [analyzerId, setAnalyzerId] = useState('manual')
   const [rebuild, setRebuild] = useState<RebuildPlanSummary | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<AnalysisConfirmationPayload | null>(null)
@@ -133,6 +137,24 @@ export function PropertyAnalysisPanel({
     project.images.map((i) => i.id)
   )
   const logicalCount = Math.max(0, project.images.length - 1)
+  const acceptedIsMock = summary.phase === 'analyzed' && analysis?.provenance?.mode === 'mock'
+
+  // The planner's own output, measured. Read here rather than recomputed
+  // so the numbers describe the plans the app will actually use.
+  const [plans, setPlans] = useState<TransitionPlan[]>([])
+  useEffect(() => {
+    void window.f2f.projects.analysis.transitionPlans(project.id).then(setPlans)
+  }, [project.id, analysis?.updatedAt])
+
+  const quality =
+    plans.length > 0
+      ? planningQuality(
+          analysis,
+          project.images.map((i) => i.id),
+          plans
+        )
+      : null
+  const diversity = plans.length > 0 ? motionDiversity(plans) : null
 
   // ── WHAT THE CONFIGURED ANALYZER ACTUALLY IS ──────────────────────────
   //
@@ -254,9 +276,18 @@ export function PropertyAnalysisPanel({
           )}
         </div>
       ) : (
-        <div className={`analysis-summary is-${summary.phase}`}>
-          <span className="analysis-summary-head">{summaryHeadline(summary)}</span>
-          <span className="analysis-summary-sub">{summarySubline(summary)}</span>
+        <div className={`analysis-summary is-${summary.phase}${acceptedIsMock ? ' is-mock' : ''}`}>
+          {/* ── A MOCK IS NOT "PROPERTY ANALYZED" ─────────────────────────
+              Reporting success wording over a placeholder is what let an
+              accepted mock be treated as spatial understanding. */}
+          <span className="analysis-summary-head">
+            {acceptedIsMock ? 'Mock analysis active' : summaryHeadline(summary)}
+          </span>
+          <span className="analysis-summary-sub">
+            {acceptedIsMock
+              ? 'Development placeholder — no vision model analyzed this property.'
+              : summarySubline(summary)}
+          </span>
 
           {/* ── WAS THIS ACTUALLY ANALYZED BY GEMINI? ────────────────────
               Answerable here, from the document's own provenance, without
@@ -283,10 +314,57 @@ export function PropertyAnalysisPanel({
               placeholder structure, and describing it as a whole-property
               understanding is the kind of quiet overclaim that ends with
               camera movement planned through rooms nobody looked at. */}
-          {summary.phase === 'analyzed' && analysis?.provenance?.mode === 'mock' && (
+          {acceptedIsMock && (
             <p className="analysis-mock-warning">
-              Development placeholder — not a real spatial analysis.
+              This analysis contains placeholder spatial data and should not be used for production
+              camera planning.
             </p>
+          )}
+
+          {/* ── WHAT THE PLANNER ACTUALLY HAD TO WORK WITH ───────────────
+              An analysis can be structurally valid and completely useless.
+              These numbers are how that becomes visible instead of being
+              reported as success. */}
+          {summary.phase === 'analyzed' && quality && (
+            <div className={`planning-quality${quality.insufficient ? ' is-insufficient' : ''}`}>
+              <span className="planning-quality-title">Spatial planning quality</span>
+              <ul>
+                <li>
+                  {quality.imagesCovered} / {quality.imagesTotal} images covered
+                </li>
+                <li>
+                  {quality.spaces} space{quality.spaces === 1 ? '' : 's'}
+                  {quality.namedSpaces < quality.spaces &&
+                    ` · ${quality.spaces - quality.namedSpaces} unnamed`}
+                </li>
+                <li>
+                  {quality.confirmedConnections} confirmed connection
+                  {quality.confirmedConnections === 1 ? '' : 's'}
+                </li>
+                <li>
+                  {quality.transitionsWithEvidence} / {quality.transitionsTotal} transitions have
+                  pair-specific evidence
+                </li>
+                {quality.transitionsUsingFallback > 0 && (
+                  <li className="is-warn">
+                    {quality.transitionsUsingFallback} / {quality.transitionsTotal} use safe fallback
+                  </li>
+                )}
+              </ul>
+              {quality.insufficient && (
+                <p className="planning-quality-verdict">
+                  Insufficient spatial analysis for production motion planning —{' '}
+                  {quality.reasons.join('; ')}.
+                </p>
+              )}
+              {diversity?.lowDiversity && (
+                <p className="planning-quality-verdict">
+                  Low motion-plan diversity: {diversity.mostCommon?.count} of {diversity.total}{' '}
+                  transitions plan the same movement. This means the analysis lacks pair-specific
+                  evidence, not that the plans need varying.
+                </p>
+              )}
+            </div>
           )}
 
           {summary.phase !== 'not-analyzed' && (
@@ -604,7 +682,10 @@ export function PropertyAnalysisPanel({
                   checked={mockRebuildOk}
                   onChange={(e) => setMockRebuildOk(e.target.checked)}
                 />
-                <span>I understand this rebuilds prompts from a development placeholder</span>
+                <span>
+                  Use mock analysis anyway — I understand these prompts will be derived from
+                  placeholder spatial data
+                </span>
               </label>
             )}
 
@@ -804,15 +885,33 @@ function AdvancedAnalysis({
     <div className="analysis-advanced">
       <span className="analysis-section-title">Fine tune</span>
 
+      {/* ── DEVELOPER TOOLS ARE GROUPED APART ───────────────────────────
+          The mock sat in this list beside real analyzers, so accepting a
+          placeholder as the property's analysis was one click away. It is
+          still reachable — it is genuinely useful for exercising the
+          review workflow — but it can no longer be picked by mistake. */}
       <label className="analysis-inline">
         <span>Analyzer</span>
         <select value={analyzerId} onChange={(e) => onAnalyzerChange(e.target.value)}>
-          {analyzers.map((a) => (
-            <option key={a.id} value={a.id} disabled={!a.available}>
-              {a.displayName}
-              {a.available ? '' : ' — not implemented'}
-            </option>
-          ))}
+          {analyzers
+            .filter((a) => !a.developerOnly)
+            .map((a) => (
+              <option key={a.id} value={a.id} disabled={!a.available}>
+                {a.displayName}
+                {a.available ? '' : ' — not implemented'}
+              </option>
+            ))}
+          {analyzers.some((a) => a.developerOnly) && (
+            <optgroup label="Developer / Testing — not for production">
+              {analyzers
+                .filter((a) => a.developerOnly)
+                .map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.displayName} — placeholder data
+                  </option>
+                ))}
+            </optgroup>
+          )}
         </select>
       </label>
       <p className="analysis-hint">

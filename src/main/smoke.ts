@@ -72,6 +72,7 @@ import {
 import type { FetchLike, GeminiRequestBody } from './analysis/providers/gemini/GeminiClient'
 import { diffAnalyses } from '../shared/analysisDiff'
 import {
+  NEUTRAL_MOTION,
   planSequence,
   renderMotionInstruction,
   renderPrompt
@@ -138,6 +139,9 @@ import {
   logicalTransitions,
   strandedTransitionKeys
 } from '../shared/logicalTransitions'
+import { motionDiversity, planningQuality } from '../shared/planningQuality'
+import { deriveRotation } from '../shared/transitionEvidence'
+import type { RoomRecord } from '../shared/propertyAnalysis'
 import {
   resolvePreviewSource,
   statusWordFor,
@@ -350,6 +354,7 @@ export async function runSmokeTest(): Promise<void> {
     testProjectDeletionCascade(workDir)
     testEditorSelection()
     testAnalysisWorkflow()
+    testEvidenceDrivenPlanning()
     testLogicalTransitions(workDir, createdProjects)
     await testGeminiModelConfig(workDir, createdProjects)
     testTransitionRecovery()
@@ -1871,6 +1876,325 @@ function testAnalysisWorkflow(): void {
 }
 
 /**
+ * EVIDENCE-DRIVEN MOTION PLANNING.
+ *
+ * ── WHAT WENT WRONG ──────────────────────────────────────────────────
+ *
+ * An accepted mock analysis put thirty photographs into one unnamed room
+ * with no landmarks and no orientations. Every pair resolved to
+ * `same-room`, and the planner's same-room branch was a fixed template:
+ *
+ *   cameraAction: ['slow forward dolly', `slight ${rotation} rotation`]
+ *
+ * where `rotation` came from a helper that returned `clockwise` when it
+ * had nothing to go on — and then propagated that invented direction down
+ * the whole chain. Twenty-nine byte-identical prompts, each confidently
+ * naming a turn nobody had observed.
+ *
+ * That is fabricated spatial information, which is the exact failure this
+ * subsystem exists to prevent. Evidence is now gathered as facts first and
+ * the wording rendered from it; where a fact is missing the field says
+ * `unknown` rather than carrying a plausible default.
+ */
+function testEvidenceDrivenPlanning(): void {
+  const ids = ['i1', 'i2', 'i3', 'i4', 'i5']
+  const room = (id: string, label: string, imageIds: string[]): RoomRecord => ({
+    id,
+    label,
+    imageIds,
+    landmarks: []
+  })
+
+  // ── 3 & 4. NO EVIDENCE MUST NOT BECOME A DIRECTION ───────────────────
+  //
+  // Exactly the mock's shape: one unnamed room, no landmarks, no
+  // orientations. This is the regression that matters most.
+  const barren: PropertyAnalysis = {
+    ...emptyAnalysis('p'),
+    state: 'accepted',
+    source: 'mock',
+    rooms: [room('r', 'Unsorted', ids)],
+    images: ids.map((id) => ({
+      imageId: id,
+      roomId: 'r',
+      orientation: 'unknown' as const,
+      landmarks: [],
+      openings: []
+    })),
+    edges: []
+  }
+
+  const barrenPlans = planSequence(barren, ids)
+  assert.strictEqual(barrenPlans.length, 4, 'five images still plan four transitions')
+  for (const [i, plan] of barrenPlans.entries()) {
+    assert.strictEqual(plan.relationType, 'SAME_ROOM', `plan ${i + 1} is same-room`)
+    assert.strictEqual(
+      plan.rotationDirection,
+      'unknown',
+      'NO CLOCKWISE IS INVENTED — with no recorded orientation the direction is unknown'
+    )
+    assert.strictEqual(
+      plan.translationDirection,
+      'unknown',
+      'and no forward dolly either — nothing establishes a direction of travel'
+    )
+    assert.ok(!plan.hasEvidence, 'the plan reports honestly that it had nothing pair-specific')
+    assert.strictEqual(plan.motionInstruction, null, 'so no motion sentence is manufactured')
+    assert.strictEqual(plan.continuity.outgoingRotation, 'unknown', 'and nothing propagates')
+  }
+
+  const barrenPrompt = renderMotionInstruction(barrenPlans[0], { fromRoom: 'Unsorted' })!
+  assert.ok(barrenPrompt.includes(NEUTRAL_MOTION), 'the neutral instruction is used verbatim')
+  assert.ok(
+    !/clockwise|counter-clockwise/i.test(barrenPrompt),
+    'THE WORD CLOCKWISE APPEARS NOWHERE — this is the assertion that pins the bug'
+  )
+  assert.ok(!/forward dolly/i.test(barrenPrompt), 'and neither does forward dolly')
+  assert.ok(
+    barrenPrompt.includes('do not pass through any doorway'.replace('do', 'do')) ||
+      /do not pass through any doorway/i.test(barrenPrompt),
+    'while the same-room restriction is still stated'
+  )
+
+  // ── 9. THE DIAGNOSTIC FIRES ──────────────────────────────────────────
+  const barrenDiversity = motionDiversity(barrenPlans)
+  assert.strictEqual(barrenDiversity.distinct, 1, 'all four plan the same movement')
+  assert.strictEqual(barrenDiversity.dominantShare, 1)
+  assert.ok(
+    barrenDiversity.lowDiversity,
+    'and the diagnostic says so rather than the plans being quietly varied'
+  )
+  assert.strictEqual(
+    barrenDiversity.mostCommon?.instruction,
+    '<neutral fallback>',
+    'naming the fallback as the shared bucket — twenty-nine identical fallbacks IS the finding'
+  )
+
+  // ── 10. THE QUALITY GATE AGREES ──────────────────────────────────────
+  const barrenQuality = planningQuality(barren, ids, barrenPlans)
+  assert.strictEqual(barrenQuality.imagesCovered, 5, 'every image is placed somewhere')
+  assert.strictEqual(barrenQuality.spaces, 1)
+  assert.strictEqual(barrenQuality.namedSpaces, 0, '"Unsorted" is a placement, not a room')
+  assert.strictEqual(barrenQuality.transitionsWithEvidence, 0)
+  assert.strictEqual(barrenQuality.transitionsUsingFallback, 4)
+  assert.ok(
+    barrenQuality.insufficient,
+    'INSUFFICIENT for production motion planning — structurally valid and completely useless'
+  )
+  assert.ok(barrenQuality.reasons.length >= 2, 'and it names why')
+
+  // ── 5 & 7. PAIR-SPECIFIC EVIDENCE PRODUCES DIFFERENT PLANS ───────────
+  //
+  // Same room throughout, but each pair shares and loses different things.
+  // A hardcoded template could not tell these apart; evidence can.
+  const rich: PropertyAnalysis = {
+    ...emptyAnalysis('p'),
+    state: 'accepted',
+    source: 'provider',
+    rooms: [room('living', 'Living Room', ids)],
+    images: [
+      { imageId: 'i1', roomId: 'living', orientation: 'north', landmarks: ['kitchen island', 'balcony doors'], openings: [] },
+      { imageId: 'i2', roomId: 'living', orientation: 'east', landmarks: ['kitchen island', 'grey sofa'], openings: [] },
+      { imageId: 'i3', roomId: 'living', orientation: 'east', landmarks: ['grey sofa', 'fireplace'], openings: [] },
+      { imageId: 'i4', roomId: 'living', orientation: 'north', landmarks: ['fireplace'], openings: [] },
+      { imageId: 'i5', roomId: 'living', orientation: 'unknown', landmarks: [], openings: [] }
+    ],
+    edges: []
+  }
+
+  const richPlans = planSequence(rich, ids)
+
+  // 1→2: island shared, balcony doors leave, sofa enters, north→east.
+  const p12 = richPlans[0]
+  assert.deepStrictEqual(p12.sharedLandmarks, ['kitchen island'])
+  assert.deepStrictEqual(p12.leavingLandmarks, ['balcony doors'])
+  assert.deepStrictEqual(p12.enteringLandmarks, ['grey sofa'])
+  assert.strictEqual(
+    p12.rotationDirection,
+    'clockwise',
+    'north → east is a quarter turn clockwise — DERIVED, not assumed'
+  )
+  assert.ok(p12.hasEvidence)
+  assert.match(p12.motionInstruction!, /kitchen island/, 'the anchor is named')
+  assert.match(p12.motionInstruction!, /balcony doors/, 'and what leaves frame')
+  assert.match(p12.motionInstruction!, /grey sofa/, 'and what enters it')
+
+  // 2→3: sofa shared, island leaves, fireplace enters, east→east (no turn).
+  const p23 = richPlans[1]
+  assert.deepStrictEqual(p23.sharedLandmarks, ['grey sofa'])
+  assert.strictEqual(p23.rotationDirection, 'none', 'east → east is no turn at all')
+  assert.notStrictEqual(
+    p23.motionInstruction,
+    p12.motionInstruction,
+    'TWO SAME-ROOM PAIRS PRODUCE DIFFERENT PLANS — the whole point of this change'
+  )
+  assert.ok(!/clockwise/i.test(p23.motionInstruction!), 'and no turn is described where none exists')
+
+  // 3→4: east→north is three steps clockwise, i.e. counter-clockwise.
+  assert.strictEqual(
+    richPlans[2].rotationDirection,
+    'counter-clockwise',
+    'east → north is derived as counter-clockwise'
+  )
+
+  // ── 6. UNKNOWN STAYS UNKNOWN ─────────────────────────────────────────
+  const p45 = richPlans[3]
+  assert.strictEqual(p45.endOrientation, 'unknown')
+  assert.strictEqual(
+    p45.rotationDirection,
+    'unknown',
+    'one unrecorded orientation makes the turn unknowable, and it stays that way'
+  )
+  assert.ok(
+    !/clockwise/i.test(p45.motionInstruction ?? ''),
+    'and no direction leaks into THIS pair’s own motion clause'
+  )
+  // The rendered prompt may still mention a direction — but only in the
+  // continuity sentence, which reports what the PREVIOUS clip actually
+  // did. That is a derived fact about a different pair, offered as a
+  // preference, and it is the one legitimate place a direction may appear
+  // for a pair whose own rotation is unknown.
+  for (const sentence of (renderMotionInstruction(p45, {}) ?? '').split(/(?<=\.)\s+/)) {
+    if (/clockwise/i.test(sentence)) {
+      assert.match(
+        sentence,
+        /^Continuity: the previous shot ended rotating/,
+        `a direction appeared outside a continuity clause: "${sentence}"`
+      )
+    }
+  }
+
+  // A HALF TURN is unknown too: nothing records which way round it went.
+  assert.strictEqual(deriveRotation('north', 'south'), 'unknown', 'a 180° turn has no derivable direction')
+  assert.strictEqual(deriveRotation('west', 'north'), 'clockwise')
+  assert.strictEqual(deriveRotation('north', 'west'), 'counter-clockwise')
+  assert.strictEqual(deriveRotation('into-room', 'out-of-room'), 'unknown', 'facing is not a bearing')
+  assert.strictEqual(deriveRotation('south', 'south'), 'none')
+
+  const richDiversity = motionDiversity(richPlans)
+  assert.ok(!richDiversity.lowDiversity, 'varied evidence produces varied plans, so nothing is flagged')
+  assert.strictEqual(richDiversity.distinct, 4, 'all four differ')
+
+  const richQuality = planningQuality(rich, ids, richPlans)
+  assert.strictEqual(richQuality.transitionsWithEvidence, 4)
+  assert.strictEqual(richQuality.transitionsUsingFallback, 0)
+  assert.strictEqual(richQuality.namedSpaces, 1, 'a real room name counts')
+  assert.ok(!richQuality.insufficient)
+
+  // ── 8. THE VISIBLE-OPENING SAFETY RULE IS UNCHANGED ──────────────────
+  const twoRooms: PropertyAnalysis = {
+    ...emptyAnalysis('p'),
+    state: 'accepted',
+    rooms: [room('a', 'Living Room', ['i1']), room('b', 'Kitchen', ['i2'])],
+    images: [
+      { imageId: 'i1', roomId: 'a', orientation: 'north', landmarks: [], openings: ['kitchen doorway'] },
+      { imageId: 'i2', roomId: 'b', orientation: 'north', landmarks: [], openings: [] }
+    ],
+    edges: [
+      { id: 'e', fromRoomId: 'a', toRoomId: 'b', confidence: 'confirmed', supportingImageIds: ['i1'] }
+    ]
+  }
+  const navPlan = planSequence(twoRooms, ['i1', 'i2'])[0]
+  assert.ok(navPlan.physicalNavigationAllowed, 'confirmed adjacency + visible opening still allows it')
+  assert.strictEqual(navPlan.visiblePassage, 'kitchen doorway')
+  assert.strictEqual(navPlan.translationDirection, 'forward', 'travel through a seen opening IS forward')
+  assert.match(navPlan.motionInstruction!, /advance through the kitchen doorway/)
+
+  // Remove the visible opening: navigation must stop, and no direction
+  // may survive.
+  const noOpening: PropertyAnalysis = {
+    ...twoRooms,
+    images: twoRooms.images.map((x) => (x.imageId === 'i1' ? { ...x, openings: [] } : x))
+  }
+  const blocked = planSequence(noOpening, ['i1', 'i2'])[0]
+  assert.ok(!blocked.physicalNavigationAllowed, 'no visible opening, no navigation')
+  assert.strictEqual(blocked.visiblePassage, null)
+  assert.notStrictEqual(blocked.translationDirection, 'forward', 'and no forward travel is claimed')
+  assert.ok(
+    !/advance through/i.test(renderMotionInstruction(blocked, {}) ?? ''),
+    'the prompt never describes moving through anything'
+  )
+
+  // ── 11. ALL LOGICAL TRANSITIONS ARE STILL PLANNED ────────────────────
+  const many = Array.from({ length: 30 }, (_, i) => `img-${i}`)
+  const manyPlans = planSequence(
+    {
+      ...barren,
+      rooms: [room('r', 'Unsorted', many)],
+      images: many.map((id) => ({
+        imageId: id,
+        roomId: 'r',
+        orientation: 'unknown' as const,
+        landmarks: [],
+        openings: []
+      }))
+    },
+    many
+  )
+  assert.strictEqual(manyPlans.length, 29, 'thirty images still plan twenty-nine transitions')
+  assert.ok(
+    manyPlans.every((p) => p.rotationDirection === 'unknown'),
+    'and not one of the twenty-nine invents a direction'
+  )
+  assert.ok(motionDiversity(manyPlans).lowDiversity, 'the diagnostic flags the whole run')
+
+  // ── 1 & 2. A MOCK CANNOT MASQUERADE AS PRODUCTION ANALYSIS ───────────
+  //
+  // The mock is a development tool. Listing it beside real analyzers made
+  // it possible to accept a placeholder and then treat the result as
+  // though the property had been analysed.
+  const mockMeta = availableAnalyzers({
+    apiKey: '',
+    model: GEMINI_DEFAULT_MODEL,
+    mode: 'dry-run',
+    allowLive: false
+  })
+    .map((a) => a.metadata())
+    .find((m) => m.id === 'mock')
+  assert.ok(mockMeta, 'the mock analyzer still exists — it is genuinely useful for the workflow')
+  assert.strictEqual(
+    mockMeta!.developerOnly,
+    true,
+    'but it is flagged as a development tool and grouped away from real analyzers'
+  )
+  const productionAnalyzers = availableAnalyzers({
+    apiKey: '',
+    model: GEMINI_DEFAULT_MODEL,
+    mode: 'dry-run',
+    allowLive: false
+  })
+    .map((a) => a.metadata())
+    .filter((m) => !m.developerOnly)
+  assert.ok(
+    productionAnalyzers.length > 0,
+    'and real analyzers remain available without opening a developer section'
+  )
+  assert.ok(
+    !productionAnalyzers.some((m) => m.id === 'mock'),
+    'the production list does not contain the mock'
+  )
+
+  // Provenance keeps saying what it is, whatever the panel does.
+  const mockProvenance: AnalysisProvenance = {
+    analyzerId: 'mock',
+    displayName: 'Mock (development)',
+    provider: 'local',
+    model: null,
+    mode: 'mock',
+    imageCount: 30,
+    analyzedAt: 1,
+    acceptedAt: 2
+  }
+  assert.ok(
+    !isRealAnalysis(mockProvenance),
+    'an accepted mock is never reported as a real analysis'
+  )
+  assert.match(provenanceLabel(mockProvenance), /mock, no AI request/i)
+
+  log('evidence planning: no direction is invented, pair evidence drives per-pair motion')
+}
+
+/**
  * LOGICAL TRANSITIONS — N images means N − 1 transitions, always.
  *
  * ── THE BUG THIS PINS ────────────────────────────────────────────────
@@ -1993,6 +2317,10 @@ function testLogicalTransitions(workDir: string, created: string[]): void {
     29,
     'the dialog reports twenty-nine logical transitions'
   )
+  assert.ok(
+    !plan.analysisIsMock,
+    'a provider analysis is not flagged as a placeholder, so rebuild is offered normally'
+  )
   const accounted = plan.rebuildable.length + plan.preserved.length + plan.unchanged.length
   assert.strictEqual(
     accounted,
@@ -2105,6 +2433,36 @@ function testLogicalTransitions(workDir: string, created: string[]): void {
     plans[28].continuity.incomingRotation,
     'none',
     'and the final pair genuinely received continuity rather than starting fresh'
+  )
+
+  // ── A MOCK ANALYSIS IS FLAGGED, SO REBUILD CANNOT HAPPEN BY REFLEX ───
+  //
+  // The renderer disables the confirm button on this flag until the
+  // operator explicitly opts in. Rebuilding every prompt from a
+  // placeholder replaces real wording with wording derived from nothing.
+  saveAnalysis({
+    ...readAnalysis(project.id),
+    source: 'mock',
+    provenance: {
+      analyzerId: 'mock',
+      displayName: 'Mock (development)',
+      provider: 'local',
+      model: null,
+      mode: 'mock',
+      imageCount: 30,
+      analyzedAt: 1,
+      acceptedAt: 2
+    }
+  })
+  const mockPlan = planPromptRebuild(project.id)
+  assert.ok(
+    mockPlan.analysisIsMock,
+    'an accepted mock analysis is flagged, and the dialog requires an explicit override'
+  )
+  assert.strictEqual(
+    mockPlan.logicalTransitionCount,
+    29,
+    'the counts are still honest — the flag gates the action, it does not hide the work'
   )
 
   log('logical transitions: 30 images = 29 transitions, none lost for want of a row')
@@ -3747,8 +4105,13 @@ function testGroundTruthReview(workDir: string, created: string[]): void {
   )
   assert.match(unsurePlans[0].reviewBlock ?? '', /unsure/i, 'and says the REVIEW is why')
   assert.ok(
-    !unsurePlans[0].cameraAction.some((a) => /advance through/i.test(a)),
+    !/advance through/i.test(unsurePlans[0].motionInstruction ?? ''),
     'the camera is no longer told to move through the doorway'
+  )
+  assert.strictEqual(
+    unsurePlans[0].visiblePassage,
+    null,
+    'and no passage is named at all — a review can only ever restrict'
   )
   assert.match(
     renderMotionInstruction(unsurePlans[0], { fromRoom: 'Living Room', toRoom: 'Kitchen' }) ?? '',
@@ -4190,10 +4553,50 @@ function testTransitionPlanning(): void {
   for (const plan of plans) {
     assert.strictEqual(plan.continuity.staticEndpoint, true, 'every clip must settle on its end frame')
   }
-  // Continuity is a PREFERENCE. It must never outrank the end frame.
-  const continued = renderMotionInstruction(plans[1], { fromRoom: 'Living Room', toRoom: 'Kitchen' })!
+  // ── CONTINUITY IS ONLY OFFERED WHEN IT WAS DERIVED ───────────────────
+  //
+  // This fixture records no compass headings, so no rotation can be
+  // derived and NO continuity sentence is emitted. That is the fix: the
+  // old planner manufactured a clockwise turn for the first pair and
+  // handed it down the whole chain, so this clause always appeared and
+  // always described a direction nobody had observed.
+  assert.strictEqual(
+    plans[0].continuity.outgoingRotation,
+    'unknown',
+    'with no recorded orientation, nothing is handed to the next clip'
+  )
+  assert.ok(
+    !/prefer to continue/i.test(
+      renderMotionInstruction(plans[1], { fromRoom: 'Living Room', toRoom: 'Kitchen' }) ?? ''
+    ),
+    'so no continuity direction is suggested from evidence that does not exist'
+  )
+
+  // Give the same pair real headings and the clause returns — phrased as a
+  // PREFERENCE that must never outrank the end frame.
+  const orientated: PropertyAnalysis = {
+    ...analysis,
+    images: analysis.images.map((i, idx) => ({
+      ...i,
+      orientation: (['north', 'east', 'south', 'west'] as const)[idx % 4]
+    }))
+  }
+  const derivedPlans = planSequence(orientated, ids)
+  assert.strictEqual(
+    derivedPlans[0].continuity.outgoingRotation,
+    'clockwise',
+    'north → east really is clockwise, and now it is derived rather than assumed'
+  )
+  const continued = renderMotionInstruction(derivedPlans[1], {
+    fromRoom: 'Living Room',
+    toRoom: 'Kitchen'
+  })!
   assert.match(continued, /prefer to continue/i, 'continuity is phrased as a preference')
-  assert.match(continued, /unless reaching the end frame requires otherwise/i, 'and yields to the end frame')
+  assert.match(
+    continued,
+    /unless reaching the end frame requires otherwise/i,
+    'and yields to the end frame'
+  )
 
   log('transition planning: navigation gated on visible openings, continuity hinted not enforced')
 }

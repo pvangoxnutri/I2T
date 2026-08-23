@@ -200,6 +200,13 @@ export async function runUiProbe(win: BrowserWindow): Promise<void> {
         analyzerModeClass: q('.analyzer-status') ? q('.analyzer-status').className : null,
         provenance: t('.analysis-provenance'),
         helper: t('.analysis-summary-helper'),
+        mockWarning: t('.analysis-mock-warning'),
+        quality: Array.from(document.querySelectorAll('.planning-quality li')).map((l) =>
+          l.textContent.trim()
+        ),
+        qualityVerdicts: Array.from(document.querySelectorAll('.planning-quality-verdict')).map(
+          (l) => l.textContent.trim()
+        ),
         primaryButton: q('.analysis-summary-actions button')
           ? q('.analysis-summary-actions button').textContent.trim()
           : null,
