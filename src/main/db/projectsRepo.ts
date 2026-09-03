@@ -50,6 +50,8 @@ interface ProjectRow {
   preview_sent_at: number | null
   paid_at: number | null
   final_sent_at: number | null
+  feed_sequence_json: string | null
+  customer_details_json: string | null
 }
 
 interface ImageRow {
@@ -78,6 +80,7 @@ interface TransitionRow {
   prompt_planned_at: number | null
   prompt_analysis_at: number | null
   mode: string | null
+  mode_provenance: string | null
 }
 
 export function listProjects(): Project[] {
@@ -127,6 +130,8 @@ export function listProjects(): Project[] {
         storedName: i.stored_name,
         src: imageUrl(p.id, i.stored_name)
       })),
+    feedSequence: p.feed_sequence_json ? JSON.parse(p.feed_sequence_json) as string[] : undefined,
+    customer: p.customer_details_json ? JSON.parse(p.customer_details_json) : undefined,
     transitions: Object.fromEntries(
       transitions
         .filter((t) => t.project_id === p.id)
@@ -138,6 +143,13 @@ export function listProjects(): Project[] {
             status: t.status,
             // NULL is `auto`: never configured, so the evidence decides.
             mode: (t.mode ?? 'auto') as TransitionMode,
+            // Anything that is not an explicit marker reads as ABSENT.
+            // `manual` is the branch that lets a generation proceed without
+            // an accepted map, so it is never inferred — only stored.
+            modeProvenance:
+              t.mode_provenance === 'manual' || t.mode_provenance === 'analysis'
+                ? t.mode_provenance
+                : undefined,
             clip: t.clip_name
               ? {
                   storedName: t.clip_name,
@@ -178,8 +190,8 @@ export function saveProject(project: Project): void {
       db,
       `INSERT INTO projects
          (id, name, created_at, updated_at, watermark_json, signature_json,
-          status, preview_sent_at, paid_at, final_sent_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          status, preview_sent_at, paid_at, final_sent_at, feed_sequence_json, customer_details_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          updated_at = excluded.updated_at,
@@ -188,7 +200,9 @@ export function saveProject(project: Project): void {
          status = excluded.status,
          preview_sent_at = excluded.preview_sent_at,
          paid_at = excluded.paid_at,
-         final_sent_at = excluded.final_sent_at`,
+         final_sent_at = excluded.final_sent_at,
+         feed_sequence_json = excluded.feed_sequence_json,
+         customer_details_json = excluded.customer_details_json`,
       [
         project.id,
         project.name,
@@ -200,7 +214,9 @@ export function saveProject(project: Project): void {
         project.status === 'queued' || project.status === 'generating' ? 'ready' : project.status,
         project.workflow?.previewSentAt ?? null,
         project.workflow?.paidAt ?? null,
-        project.workflow?.finalSentAt ?? null
+        project.workflow?.finalSentAt ?? null,
+        project.feedSequence ? JSON.stringify(project.feedSequence) : null,
+        project.customer ? JSON.stringify(project.customer) : null
       ]
     )
 
@@ -223,8 +239,8 @@ export function saveProject(project: Project): void {
             clip_name, clip_original_name, clip_source,
             prompt_base, prompt_motion, prompt_effective, prompt_basis,
             prompt_rationale, prompt_manually_edited, prompt_planned_at,
-            prompt_analysis_at, mode)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            prompt_analysis_at, mode, mode_provenance)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           project.id,
           pairKey,
@@ -246,7 +262,9 @@ export function saveProject(project: Project): void {
           // Storing 'auto' explicitly would be indistinguishable from a
           // deliberate choice, and re-analysis must be free to revisit one
           // but never the other.
-          t.mode && t.mode !== 'auto' ? t.mode : null
+          t.mode && t.mode !== 'auto' ? t.mode : null,
+          // Only meaningful alongside a stored mode; auto has no author.
+          t.mode && t.mode !== 'auto' ? (t.modeProvenance ?? null) : null
         ]
       )
     }

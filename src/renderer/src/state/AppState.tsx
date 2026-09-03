@@ -20,6 +20,8 @@ import {
   type TransitionSettings
 } from '../types'
 import { DEFAULT_PRICING } from '../../../shared/pricing'
+import { getEffectiveFeedSequence } from '../../../shared/feedSequence'
+import { applyProposalToProject } from '../../../shared/feedProposalApply'
 
 /**
  * App state with SQLite persistence behind it.
@@ -118,13 +120,27 @@ interface AppState {
 
   addImages: (projectId: string, images: ProjectImage[]) => void
   removeImage: (projectId: string, imageId: string) => void
+  addToFeed: (projectId: string, imageId: string) => void
+  removeFromFeed: (projectId: string, imageId: string) => void
   moveImage: (projectId: string, fromIndex: number, toIndex: number) => void
+  moveFeedImage: (projectId: string, fromIndex: number, toIndex: number) => void
   updateTransition: (
     projectId: string,
     fromImageId: string,
     toImageId: string,
     patch: Partial<TransitionSettings>
   ) => void
+  /**
+   * Replace the feed and its transition modes in ONE write, then persist
+   * before returning. Accepting an AI proposal is a single decision, not a
+   * stream of per-image edits — see the implementation for why that
+   * distinction is load-bearing.
+   */
+  applyFeedProposal: (
+    projectId: string,
+    sequence: string[],
+    modes: Record<string, 'ai' | 'cut'>
+  ) => Promise<Project>
 
   updateWatermark: (projectId: string, patch: Partial<PreviewWatermark>) => void
   updateSignature: (projectId: string, patch: Partial<BrandSignature>) => void
@@ -284,6 +300,7 @@ export function AppStateProvider({ children }: { children: ReactNode }): React.J
       createdAt: Date.now(),
       updatedAt: Date.now(),
       images: [],
+      feedSequence: [],
       transitions: {},
       watermark: makeWatermark(),
       signature: { ...settingsRef.current.defaultSignature },
@@ -370,6 +387,72 @@ export function AppStateProvider({ children }: { children: ReactNode }): React.J
     [patchProject]
   )
 
+  const addToFeed = useCallback(
+    (projectId: string, imageId: string) =>
+      patchProject(projectId, (p) => {
+        const feed = getEffectiveFeedSequence(p)
+        if (feed.includes(imageId)) return p
+        const newFeed = [...feed, imageId]
+
+        // Safety guard: add should increase length by 1
+        if (newFeed.length !== feed.length + 1) {
+          console.error(
+            `[addToFeed] Invariant violation: expected length ${feed.length} → ${feed.length + 1}, got ${feed.length} → ${newFeed.length}`,
+            { projectId, imageId, feed, newFeed }
+          )
+          return p // Abort mutation on invariant violation
+        }
+
+        return { ...p, feedSequence: newFeed }
+      }),
+    [patchProject]
+  )
+
+  const removeFromFeed = useCallback(
+    (projectId: string, imageId: string) =>
+      patchProject(projectId, (p) => {
+        const feed = getEffectiveFeedSequence(p)
+        const newFeed = feed.filter((id) => id !== imageId)
+
+        // Safety guard: single-item delete should reduce length by 1
+        if (newFeed.length !== feed.length - 1) {
+          console.error(
+            `[removeFromFeed] Invariant violation: expected length ${feed.length} → ${feed.length - 1}, got ${feed.length} → ${newFeed.length}`,
+            { projectId, imageId, feed, newFeed }
+          )
+          return p // Abort mutation on invariant violation
+        }
+
+        return { ...p, feedSequence: newFeed }
+      }),
+    [patchProject]
+  )
+
+  const moveFeedImage = useCallback(
+    (projectId: string, fromIndex: number, toIndex: number) =>
+      patchProject(projectId, (p) => {
+        const feed = getEffectiveFeedSequence(p)
+        if (fromIndex === toIndex) return p
+        if (fromIndex < 0 || fromIndex >= feed.length) return p
+        if (toIndex < 0 || toIndex >= feed.length) return p
+        const next = [...feed]
+        const [moved] = next.splice(fromIndex, 1)
+        next.splice(toIndex, 0, moved)
+
+        // Safety guard: move should preserve length
+        if (next.length !== feed.length) {
+          console.error(
+            `[moveFeedImage] Invariant violation: expected length ${feed.length}, got ${next.length}`,
+            { projectId, fromIndex, toIndex, feed, next }
+          )
+          return p // Abort mutation on invariant violation
+        }
+
+        return { ...p, feedSequence: next }
+      }),
+    [patchProject]
+  )
+
   const updateTransition = useCallback(
     (projectId: string, fromImageId: string, toImageId: string, patch: Partial<TransitionSettings>) =>
       patchProject(projectId, (p) => {
@@ -380,6 +463,50 @@ export function AppStateProvider({ children }: { children: ReactNode }): React.J
         return { ...p, transitions: { ...p.transitions, [key]: { ...current, ...patch } } }
       }),
     [patchProject]
+  )
+
+  /**
+   * ACCEPTING A PROPOSAL IS ONE TRANSACTION.
+   *
+   * A proposal is a single decision about the whole sequence. It used to
+   * be applied as 2N+M separate debounced store calls, which meant there
+   * was no instant at which it had either happened or not, no way to wait
+   * for it, and nowhere for a failed write to surface — the dialog closed
+   * reporting success regardless. See `applyProposalToProject` for the
+   * full reasoning and for the guard behaviour that made the loop unsafe
+   * with duplicate ids.
+   *
+   * PERSISTENCE IS AWAITED, not debounced: the caller closes a modal and
+   * tells the operator it worked, and neither may happen before the write
+   * actually lands.
+   */
+  const applyFeedProposal = useCallback(
+    async (
+      projectId: string,
+      sequence: string[],
+      modes: Record<string, 'ai' | 'cut'>
+    ): Promise<Project> => {
+      const current = projectsRef.current.find((p) => p.id === projectId)
+      if (!current) throw new Error('Project not found')
+
+      // The whole result is computed in `shared`, so it is asserted by the
+      // smoke suite rather than only by clicking.
+      const next = applyProposalToProject(
+        current,
+        sequence,
+        modes,
+        settingsRef.current.exportDefaults.defaultTransitionDurationSec
+      )
+
+      setProjects((prev) => prev.map((p) => (p.id === projectId ? next : p)))
+      // We are writing this row ourselves, so drop any pending debounced
+      // save for it — otherwise the debounce could later re-save a stale
+      // copy captured before this change.
+      dirtyProjectIdsRef.current.delete(projectId)
+      await window.f2f.projects.save(next)
+      return next
+    },
+    []
   )
 
   const updateWatermark = useCallback(
@@ -417,8 +544,12 @@ export function AppStateProvider({ children }: { children: ReactNode }): React.J
       renameProject,
       addImages,
       removeImage,
+      addToFeed,
+      removeFromFeed,
       moveImage,
+      moveFeedImage,
       updateTransition,
+      applyFeedProposal,
       updateWatermark,
       updateSignature,
       updateSettings
@@ -437,8 +568,12 @@ export function AppStateProvider({ children }: { children: ReactNode }): React.J
       renameProject,
       addImages,
       removeImage,
+      addToFeed,
+      removeFromFeed,
       moveImage,
+      moveFeedImage,
       updateTransition,
+      applyFeedProposal,
       updateWatermark,
       updateSignature,
       updateSettings

@@ -1,8 +1,14 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAppState } from '../../state/AppState'
-import { transitionKey, type CornerPosition, type Project, type WatermarkPosition } from '../../types'
+import type { CornerPosition, Project, WatermarkPosition } from '../../types'
 import { formatPrice, priceSnapshot } from '../../../../shared/pricing'
 import { rasterizeSignature, rasterizeWatermark } from '../../utils/rasterizeOverlays'
+import { getFeedImages } from '../../../../shared/feedSequence'
+import {
+  DEFAULT_EXPORT_FORMAT,
+  EXPORT_FORMATS,
+  type ExportFormatId
+} from '../../../../shared/exportFormat'
 import {
   Field,
   ImagePickerButton,
@@ -48,15 +54,50 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
   const [comparing, setComparing] = useState(false)
   const wm = project.watermark
   const sig = project.signature
-  const coverSrc = project.images[0]?.src ?? null
+  const feedImages = getFeedImages(project)
+  const coverSrc = feedImages[0]?.src ?? null
 
-  // Sequence validation: N images need N-1 clips before export is possible.
-  const missingPairs: string[] = []
-  for (let i = 0; i < project.images.length - 1; i++) {
-    const key = transitionKey(project.images[i].id, project.images[i + 1].id)
-    if (!project.transitions[key]?.clip) missingPairs.push(`${i + 1} → ${i + 2}`)
-  }
-  const canExport = project.images.length >= 2 && missingPairs.length === 0 && !starting
+  /**
+   * READINESS COMES FROM MAIN, NOT FROM HERE.
+   *
+   * ── THE BUG THIS REPLACES ──────────────────────────────────────────
+   *
+   * This block used to be a loop with the rule "N images in the feed need
+   * N−1 clips", demanding a generated clip for EVERY pair without ever
+   * asking what the transition is. A cut generates nothing by definition,
+   * so on a finished feed every cut was reported as a missing clip and
+   * Export stayed disabled — on the real project, exactly
+   * "5 → 6, 7 → 8, 9 → 10, 11 → 12, 13 → 14", the five pairs that are a
+   * cut with no clip.
+   *
+   * It was also a SECOND readiness implementation. Fixing the assembler
+   * changed nothing here because this never called it. Now there is one
+   * answer, from the same assembly the exporter runs on.
+   */
+  const [readiness, setReadiness] = useState<{
+    ready: boolean
+    missingAiClips: string[]
+    reason: string | null
+  } | null>(null)
+
+  useEffect(() => {
+    void window.f2f.exports.readiness(project.id).then(setReadiness)
+    // Re-read whenever a mode, a clip or the feed itself changes — all of
+    // which move through `updatedAt`.
+  }, [project.id, project.updatedAt])
+
+  const missingPairs = readiness?.missingAiClips ?? []
+  const canExport = (readiness?.ready ?? false) && !starting
+
+  /**
+   * WHERE THIS FILM IS GOING.
+   *
+   * An export choice, not a project setting: the source files, the
+   * project's own aspect ratio and everything the editor previews stay
+   * exactly as they are. The same project can be exported for a desktop
+   * page and for a phone without editing anything in between.
+   */
+  const [format, setFormat] = useState<ExportFormatId>(DEFAULT_EXPORT_FORMAT)
 
   const runExport = async (kind: 'preview' | 'final'): Promise<void> => {
     setStarting(true)
@@ -68,10 +109,13 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
         kind === 'preview' ? rasterizeWatermark(wm, settings.exportDefaults) : null,
         rasterizeSignature(sig, settings.exportDefaults)
       ])
-      const result = await window.f2f.exports.run(project.id, kind, {
-        watermarkPng,
-        signaturePng
-      })
+      const result = await window.f2f.exports.run(
+        project.id,
+        kind,
+        { watermarkPng, signaturePng },
+        null,
+        format
+      )
       if (result.ok) {
         setExportNote('Export queued — follow progress under Queue.')
       } else if ('canceled' in result && result.canceled) {
@@ -154,6 +198,30 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
           )}
         </div>
 
+        {/* ── FORMAT ─────────────────────────────────────────────────
+            Chosen per export. Nothing here is stretched: the desktop
+            format fits the whole frame, the vertical one fills the phone
+            screen by cropping evenly from the sides. */}
+        <fieldset className="export-format">
+          <legend>Format</legend>
+          {EXPORT_FORMATS.map((f) => (
+            <label
+              key={f.id}
+              className={`export-format-option${format === f.id ? ' is-active' : ''}`}
+            >
+              <input
+                type="radio"
+                name="export-format"
+                value={f.id}
+                checked={format === f.id}
+                onChange={() => setFormat(f.id)}
+              />
+              <span className="export-format-label">{f.label}</span>
+              <span className="export-format-desc">{f.description}</span>
+            </label>
+          ))}
+        </fieldset>
+
         <div className="export-actions">
           <button
             type="button"
@@ -190,9 +258,9 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
           <button
             type="button"
             className="btn btn-ghost btn-block btn-dev"
-            disabled={!canExport || project.images.length < 3 || comparing}
+            disabled={!canExport || feedImages.length < 3 || comparing}
             title={
-              project.images.length < 3
+              feedImages.length < 3
                 ? 'Needs at least two clips — a single clip has no seam to compare'
                 : 'Development tool: exports these clips twice, hard cuts and seamless, for side-by-side comparison. Generates nothing and costs nothing.'
             }
@@ -214,7 +282,7 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
           >
             {comparing ? 'Assembling both versions…' : '⚙ Compare Assembly (dev)'}
           </button>
-          {missingPairs.length > 0 && project.images.length >= 2 && (
+          {missingPairs.length > 0 && feedImages.length >= 2 && (
             <p className="export-missing">
               Missing transition clips: <strong>{missingPairs.join(', ')}</strong>
             </p>

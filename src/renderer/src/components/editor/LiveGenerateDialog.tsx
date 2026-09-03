@@ -17,6 +17,10 @@ export function LiveGenerateDialog({
   onCancel: () => void
   onConfirm: () => void
 }): React.JSX.Element {
+  // Generating without any spatial map behind it — allowed only because
+  // the operator chose this mode themselves, and only once they say so.
+  const isOverride = data.spatialGuidance === 'none'
+
   return (
     <div className="dialog-backdrop" onClick={onCancel}>
       <div className="dialog-card" onClick={(e) => e.stopPropagation()}>
@@ -154,17 +158,32 @@ export function LiveGenerateDialog({
           </ul>
         )}
 
+        {/* ── AN OVERRIDE IS NAMED AS AN OVERRIDE ────────────────────
+            The operator may generate a transition the map does not
+            support — they may know the property better than the
+            photographs show — but nothing here may let that read as a
+            safe, analysis-backed move. This is the exact state that
+            produced a moved sofa and a duplicated television, so it is
+            described in those words and the button says what it does. */}
+        {isOverride && (
+          <div className="confirm-override" role="alert">
+            <p className="confirm-override-title">{data.overrideWarning}</p>
+            {data.overrideReason && <p className="confirm-override-why">{data.overrideReason}</p>}
+            <p className="confirm-override-guidance">Spatial guidance: none — manual override</p>
+          </div>
+        )}
+
         <div className="dialog-actions">
           <button type="button" className="btn btn-ghost btn-tiny" onClick={onCancel}>
             Cancel
           </button>
           <button
             type="button"
-            className="btn btn-primary btn-tiny"
+            className={`btn btn-tiny ${isOverride ? 'btn-danger' : 'btn-primary'}`}
             disabled={!data.ok || busy}
             onClick={onConfirm}
           >
-            {busy ? 'Submitting…' : 'Generate 1 Transition'}
+            {busy ? 'Submitting…' : isOverride ? 'Generate anyway' : 'Generate 1 Transition'}
           </button>
         </div>
       </div>

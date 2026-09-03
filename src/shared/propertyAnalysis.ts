@@ -65,6 +65,15 @@ export interface RoomRecord {
   landmarks: string[]
   /** How sure we are these images really are one room. */
   confidence?: AnalysisConfidence
+  /**
+   * Marketing importance of this room as a selling point. 0-10 scale.
+   * Pool, patio, or spectacular views: 9-10.
+   * Primary social spaces (living, dining, kitchen): 8-9.
+   * Master suite: 7-8.
+   * Secondary spaces: 5-7.
+   * Functional/utility: 2-4.
+   */
+  marketingImportance?: number
   notes?: string
 }
 
@@ -85,6 +94,14 @@ export interface ImageAnalysis {
    * no overlap at all (opposite corners, facing away).
    */
   overlapWith?: string[]
+  /**
+   * Marketing importance score 0-10. Used to prioritize highlights and
+   * selling points in feed order. A pool, spectacular view, or strong USP
+   * would score 9-10. Functional spaces score 2-4.
+   */
+  marketingImportance?: number
+  /** Hero/highlight status. True for standout images that should be featured prominently. */
+  isHero?: boolean
   notes?: string
 }
 
@@ -107,6 +124,25 @@ export interface RoomEdge {
 }
 
 /**
+ * Safety assessment for a specific image-to-image transition.
+ * Replaces vague "probable" with explicit safety levels.
+ */
+export interface TransitionSafety {
+  fromImageId: string
+  toImageId: string
+  /** safe: strong visual evidence supports this transition without invented geometry
+   *  uncertain: evidence is weak or requires inference
+   *  unsafe: would require invented/hidden geometry */
+  level: 'safe' | 'uncertain' | 'unsafe'
+  /** Short explanation of why (e.g., "Same sofa and window visible in both frames" or "No visible path between pool and interior") */
+  reasoning: string
+  /** Visualconfidence 0-1 based on overlap, shared landmarks, visible openings */
+  visualOverlap?: number
+  /** Risk of hallucinated geometry 0-1 */
+  hallucinationRisk?: number
+}
+
+/**
  * Optional planner hints an analyzer may volunteer. Advisory only — the
  * planner's own confidence rules always win, so a hint can never talk it
  * into navigation the evidence does not support.
@@ -117,6 +153,8 @@ export interface TransitionHint {
   suggestedMotion?: string
   anchorLandmark?: string
   notes?: string
+  /** Safety level: safe, uncertain, or unsafe */
+  safetyLevel?: 'safe' | 'uncertain' | 'unsafe'
 }
 
 /**

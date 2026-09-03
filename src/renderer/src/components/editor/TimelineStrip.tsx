@@ -4,8 +4,11 @@ import { transitionKey, type Project, type TransitionStatus } from '../../types'
 import { resolveGenerationAction } from '../../../../shared/generationState'
 import { roomOfImage, relateImages, type PropertyAnalysis } from '../../../../shared/propertyAnalysis'
 import { dropTargetIndex, scrollIntoViewOffset } from '../../../../shared/sequence'
+import { getFeedImages } from '../../../../shared/feedSequence'
 import type { EditorSelection } from '../../../../shared/editorSelection'
 import { MODE_LABEL, type ResolvedModeRow } from '../../../../shared/transitionMode'
+import { analyzeFeedMutation, type FeedMutationReport } from '../../../../shared/feedMutationGuard'
+import { FeedMutationWarningDialog } from './FeedMutationWarningDialog'
 
 /**
  * The sequence, as a horizontal timeline.
@@ -62,12 +65,15 @@ export function TimelineStrip({
   onSelectImage: (imageId: string) => void
   onSelectTransition: (pairKey: string) => void
 }): React.JSX.Element {
-  const { moveImage, queue } = useAppState()
+  const { moveFeedImage, queue } = useAppState()
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [dropSlot, setDropSlot] = useState<number | null>(null)
+  const [dragWarning, setDragWarning] = useState<{ mutation: () => void; report: FeedMutationReport } | null>(null)
   const dragRef = useRef<number | null>(null)
   const trackRef = useRef<HTMLDivElement>(null)
   const cellRefs = useRef(new Map<string, HTMLDivElement>())
+
+  const feedImages = getFeedImages(project)
 
   const selectedImageId = selection.kind === 'image' ? selection.imageId : null
   const selectedPairKey = selection.kind === 'transition' ? selection.pairKey : null
@@ -113,15 +119,29 @@ export function TimelineStrip({
 
   const commitDrop = (slot: number): void => {
     const from = dragRef.current
-    endDrag()
     if (from === null) return
-    // The off-by-one that makes a rightward drop land where the insertion
-    // marker was drawn — see `dropTargetIndex`, where it is spelled out.
     const target = dropTargetIndex(from, slot)
-    if (target === from) return
-    // The SAME persistent reorder path as Shift+Arrow, so prompts keyed by
-    // image pair survive a move either way.
-    moveImage(project.id, from, target)
+    if (target === from) {
+      endDrag()
+      return
+    }
+
+    // Simulate the reorder to check if it breaks generated clips
+    const feedIds = getFeedImages(project).map((i) => i.id)
+    const newFeedIds = [...feedIds]
+    const [moved] = newFeedIds.splice(from, 1)
+    newFeedIds.splice(target, 0, moved)
+
+    const report = analyzeFeedMutation(project, newFeedIds)
+    if (report.requiresConfirmation) {
+      setDragWarning({
+        mutation: () => moveFeedImage(project.id, from, target),
+        report
+      })
+    } else {
+      moveFeedImage(project.id, from, target)
+    }
+    endDrag()
   }
 
   /** Which gap the pointer is nearest, given the block it is over. */
@@ -135,18 +155,18 @@ export function TimelineStrip({
       <div className="timeline-head">
         <span className="timeline-title">Timeline</span>
         <span className="timeline-hint">
-          {project.images.length} images · {Math.max(0, project.images.length - 1)} transitions ·
+          {feedImages.length} images · {Math.max(0, feedImages.length - 1)} transitions ·
           drag to reorder · ← → to review · Shift + ← → to move
         </span>
       </div>
 
       <div className="timeline-track" ref={trackRef}>
-        {project.images.length === 0 && (
-          <p className="timeline-empty">Import property photos to build the sequence.</p>
+        {feedImages.length === 0 && (
+          <p className="timeline-empty">Add photos to the Transition Feed to build the sequence.</p>
         )}
 
-        {project.images.map((image, index) => {
-          const next = project.images[index + 1]
+        {feedImages.map((image, index) => {
+          const next = feedImages[index + 1]
           const key = next ? transitionKey(image.id, next.id) : null
           const transition = key ? project.transitions[key] : undefined
           const room = roomLabel(image.id)
@@ -224,7 +244,7 @@ export function TimelineStrip({
                 )}
                 <span className="timeline-image-meta">
                   <span className="timeline-image-name">IMAGE {String(index + 1).padStart(2, '0')}</span>
-                  <span className="timeline-image-room">{room ?? 'No room'}</span>
+                  <span className="timeline-image-room">{room ?? (analysis && analysis.rooms.length > 0 ? 'Room uncertain' : 'Not analysed')}</span>
                 </span>
               </button>
 
@@ -291,17 +311,29 @@ export function TimelineStrip({
             className="timeline-tail-drop"
             onDragOver={(e) => {
               e.preventDefault()
-              setDropSlot(project.images.length)
+              setDropSlot(feedImages.length)
             }}
             onDrop={(e) => {
               e.preventDefault()
-              commitDrop(project.images.length)
+              commitDrop(feedImages.length)
             }}
           >
-            {dropSlot === project.images.length && <span className="timeline-drop" aria-hidden />}
+            {dropSlot === feedImages.length && <span className="timeline-drop" aria-hidden />}
           </div>
         )}
       </div>
+
+      {dragWarning && (
+        <FeedMutationWarningDialog
+          project={project}
+          report={dragWarning.report}
+          onCancel={() => setDragWarning(null)}
+          onContinue={() => {
+            dragWarning.mutation()
+            setDragWarning(null)
+          }}
+        />
+      )}
     </section>
   )
 }

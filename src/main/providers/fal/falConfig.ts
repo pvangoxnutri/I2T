@@ -85,6 +85,18 @@ export const FAL_FIELDS = {
   generateAudio: 'generate_audio'
 } as const
 
+/**
+ * The endpoint's own ceiling on the `prompt` field.
+ *
+ * Published as a constant because it is a CONTRACT, not a style choice:
+ * exceeding it returns HTTP 422 "String should have at most 2500
+ * characters" and the whole request is rejected before any work starts.
+ * The preset grew past it once, which failed every generation until the
+ * prompt was rebuilt — see `fitPromptToLimit`, which now enforces it on
+ * the way into the body so a future edit cannot repeat that.
+ */
+export const FAL_PROMPT_MAX_CHARS = 2500
+
 // ── Queue status vocabulary ──────────────────────────────────────────────
 
 /** The three documented queue states, mapped explicitly. */

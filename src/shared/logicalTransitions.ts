@@ -1,14 +1,15 @@
 import { defaultTransitionSettings, transitionKey, type Project, type TransitionSettings } from './types'
+import { getFeedImages } from './feedSequence'
 
 /**
  * THE TRANSITIONS A PROJECT HAS.
  *
  * ── THE INVARIANT ────────────────────────────────────────────────────
  *
- * A transition is defined by two ADJACENT ORDERED IMAGES. For N images
- * there are always exactly N − 1 of them. Thirty photographs is
- * twenty-nine transitions, whether or not anything has ever been stored
- * about any of them.
+ * A transition is defined by two ADJACENT ORDERED IMAGES IN THE FEED.
+ * For N images in the feed there are always exactly N − 1 of them.
+ * Thirty photographs in feed is twenty-nine transitions, whether or not
+ * anything has ever been stored about any of them.
  *
  * ── THE BUG THIS EXISTS TO END ───────────────────────────────────────
  *
@@ -34,7 +35,7 @@ export interface LogicalTransition {
   startImageId: string
   endImageId: string
   pairKey: string
-  /** 0-based index in the sequence. `position + 1` → `position + 2` reads. */
+  /** 0-based index in the feed sequence. `position + 1` → `position + 2` reads. */
   position: number
   /** Human label, e.g. "Image 4 → Image 5". */
   label: string
@@ -45,20 +46,23 @@ export interface LogicalTransition {
 }
 
 /**
- * Every transition in the project, in sequence order.
+ * Every transition in the project's FEED, in sequence order.
  *
  * The ONE derivation. Anything that needs the list of transitions asks
  * here rather than reading the map, so no caller can quietly disagree
  * with another about how many there are.
+ *
+ * Uses getFeedImages to respect feedSequence if defined.
  */
 export function logicalTransitions(
   project: Project,
   defaultDurationSec: number
 ): LogicalTransition[] {
   const out: LogicalTransition[] = []
-  for (let i = 0; i < project.images.length - 1; i++) {
-    const start = project.images[i]
-    const end = project.images[i + 1]
+  const feedImages = getFeedImages(project)
+  for (let i = 0; i < feedImages.length - 1; i++) {
+    const start = feedImages[i]
+    const end = feedImages[i + 1]
     const pairKey = transitionKey(start.id, end.id)
     const persisted = project.transitions[pairKey]
     out.push({
@@ -74,18 +78,19 @@ export function logicalTransitions(
   return out
 }
 
-/** How many transitions a project has. Always images − 1, never fewer. */
+/** How many transitions a project has in the feed. Always feedImages − 1, never fewer. */
 export function logicalTransitionCount(project: Project): number {
-  return Math.max(0, project.images.length - 1)
+  const feedImages = getFeedImages(project)
+  return Math.max(0, feedImages.length - 1)
 }
 
 /**
- * Rows stored for pairs that are no longer adjacent.
+ * Rows stored for pairs that are no longer adjacent in the feed.
  *
- * A reorder can leave these behind. They are NOT deleted — a prompt
- * someone wrote is worth keeping in case the order comes back — but they
- * must never be counted as transitions, which is the mirror image of the
- * bug above.
+ * A reorder (removing from or reordering within the feed) can leave these
+ * behind. They are NOT deleted — a prompt someone wrote is worth keeping in
+ * case the order comes back — but they must never be counted as transitions,
+ * which is the mirror image of the bug above.
  */
 export function strandedTransitionKeys(project: Project): string[] {
   const live = new Set(

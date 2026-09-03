@@ -1,5 +1,6 @@
 import { defaultTransitionSettings, transitionKey, type Project, type TransitionSettings, type TransitionStatus } from './types'
 import type { EditorSelection } from './editorSelection'
+import { getFeedImages } from './feedSequence'
 
 /**
  * WHAT THE MAIN PREVIEW SHOWS, decided once.
@@ -62,11 +63,12 @@ export function transitionSettingsFor(
   return project.transitions[pairKey] ?? defaultTransitionSettings(defaultDurationSec)
 }
 
-/** The index of the pair in the CURRENT order, or -1 if not adjacent. */
+/** The index of the pair in the CURRENT feed sequence, or -1 if not adjacent. */
 export function pairIndexOf(project: Project, pairKey: string): number {
-  return project.images.findIndex(
+  const feedImages = getFeedImages(project)
+  return feedImages.findIndex(
     (img, i) =>
-      i < project.images.length - 1 && transitionKey(img.id, project.images[i + 1].id) === pairKey
+      i < feedImages.length - 1 && transitionKey(img.id, feedImages[i + 1].id) === pairKey
   )
 }
 
@@ -79,14 +81,16 @@ export function resolvePreviewSource(
   if (selection.kind === 'full') return { kind: 'full', src: assembledUrl }
 
   if (selection.kind === 'image') {
-    const index = project.images.findIndex((i) => i.id === selection.imageId)
-    if (index === -1) {
-      return { kind: 'unavailable', reason: 'That photograph is no longer in this project.' }
+    const feedImages = getFeedImages(project)
+    const feedIndex = feedImages.findIndex((i) => i.id === selection.imageId)
+    if (feedIndex === -1) {
+      return { kind: 'unavailable', reason: 'That photograph is not in the Transition Feed.' }
     }
-    const image = project.images[index]
-    return { kind: 'image', imageId: image.id, index, src: image.src, fileName: image.fileName }
+    const image = feedImages[feedIndex]
+    return { kind: 'image', imageId: image.id, index: feedIndex, src: image.src, fileName: image.fileName }
   }
 
+  const feedImages = getFeedImages(project)
   const index = pairIndexOf(project, selection.pairKey)
   if (index === -1) {
     // A reorder can leave a selection naming a pair that is no longer
@@ -106,8 +110,8 @@ export function resolvePreviewSource(
     kind: 'transition-endpoints',
     pairKey: selection.pairKey,
     index,
-    startSrc: project.images[index].src,
-    endSrc: project.images[index + 1].src,
+    startSrc: feedImages[index].src,
+    endSrc: feedImages[index + 1].src,
     status: settings.status,
     // Generating while one is already in flight would submit a second
     // paid request for the same transition.

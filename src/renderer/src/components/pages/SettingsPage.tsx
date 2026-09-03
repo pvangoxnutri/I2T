@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useAppState } from '../../state/AppState'
+import { durationChoices } from '../../../../shared/transitionDuration'
 import type {
   AspectRatio,
   CornerPosition,
@@ -23,8 +24,11 @@ import {
   Toggle
 } from '../common/controls'
 
+type SettingsTab = 'general' | 'ai' | 'video' | 'branding' | 'advanced'
+
 export function SettingsPage(): React.JSX.Element {
   const { settings, updateSettings } = useAppState()
+  const [tab, setTab] = useState<SettingsTab>('general')
   const [ffmpeg, setFfmpeg] = useState<FfmpegStatus | null>(null)
   const [catalog, setCatalog] = useState<ProviderMetadataPayload[]>([])
   const [keyStatus, setKeyStatus] = useState<Record<string, boolean>>({})
@@ -116,6 +120,11 @@ export function SettingsPage(): React.JSX.Element {
   const hasKey = keyStatus[active.id] === true
   const exp = settings.exportDefaults
   const sig = settings.defaultSignature
+  const activeProviderLabel = providerName
+  /** Durations the SELECTED model publishes — never a hardcoded list. */
+  const defaultDurationChoices = durationChoices(
+    catalog.find((p) => p.id === active.id)?.models.find((m) => m.id === active.model)?.durationsSec
+  )
 
   /** Patches ONLY the active provider's entry — the other one is untouched. */
   const patchProvider = (patch: Partial<typeof active>): void =>
@@ -185,7 +194,76 @@ export function SettingsPage(): React.JSX.Element {
         </div>
       </header>
 
+      <nav className="settings-tabs" role="tablist">
+        {(
+          [
+            ['general', 'General'],
+            ['ai', 'AI'],
+            ['video', 'Video'],
+            ['branding', 'Branding'],
+            ['advanced', 'Advanced']
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={tab === key}
+            className={`settings-tab${tab === key ? ' is-active' : ''}`}
+            onClick={() => setTab(key)}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {/* ── ONE TAB, ONE SUBJECT ───────────────────────────────────────
+          The tab bar used to sit above a grid that rendered every card
+          regardless of which tab was selected, so choosing a tab changed
+          nothing and the page stayed a single long scroll. Each card now
+          renders only under the tab it belongs to.
+
+          The paid-request confirmation below is deliberately NOT gated:
+          a dialog that only exists while one tab is mounted is how a
+          confirmation becomes unreachable. */}
       <div className="settings-grid">
+        {tab === 'video' && (
+        <SectionCard
+          title="Generation Defaults"
+          subtitle="Applied to transitions that have not been given their own length."
+        >
+          {/* ── DEFAULT LENGTH ─────────────────────────────────────────
+              A default, not a cap: any transition can be set to its own
+              length in the inspector, and that choice always wins. The
+              values offered are the ones the SELECTED model publishes —
+              this list used to be a hardcoded 5/10/15 taken from a model
+              this build no longer points at, which put most of the
+              configured endpoint's range out of reach. */}
+          <Field label="Default transition duration">
+            <SelectInput
+              value={String(exp.defaultTransitionDurationSec)}
+              onChange={(e) =>
+                patchExport({ defaultTransitionDurationSec: Number(e.target.value) })
+              }
+            >
+              {defaultDurationChoices.map((s) => (
+                <option key={s} value={s}>
+                  {s} seconds
+                </option>
+              ))}
+            </SelectInput>
+          </Field>
+          <p className="field-hint">
+            {defaultDurationChoices.length > 0
+              ? `${activeProviderLabel} offers ${defaultDurationChoices[0]}–${
+                  defaultDurationChoices[defaultDurationChoices.length - 1]
+                } seconds. A per-transition duration overrides this.`
+              : 'The selected model publishes no duration options.'}
+          </p>
+        </SectionCard>
+        )}
+
+        {tab === 'video' && (
         <SectionCard
           title="AI Provider"
           subtitle="Stored locally only. Dry Run validates and builds the request without contacting the provider; Live sends paid requests, one transition at a time."
@@ -564,6 +642,7 @@ export function SettingsPage(): React.JSX.Element {
             </details>
           )}
         </SectionCard>
+        )}
 
         {confirmLock && (
           <div className="dialog-backdrop" onClick={() => setConfirmLock(null)}>
@@ -603,6 +682,7 @@ export function SettingsPage(): React.JSX.Element {
           </div>
         )}
 
+        {tab === 'advanced' && (
         <SectionCard title="FFmpeg" subtitle="Local video assembly engine.">
           <div className="ffmpeg-status">
             {ffmpeg === null ? (
@@ -621,6 +701,7 @@ export function SettingsPage(): React.JSX.Element {
             </p>
           </div>
         </SectionCard>
+        )}
 
         {/* ── PROPERTY ANALYZER ──────────────────────────────────────────
             Structure for a future vision provider, deliberately inert.
@@ -628,6 +709,7 @@ export function SettingsPage(): React.JSX.Element {
             selected — a roadmap the operator can see, with no way to
             accidentally reach a half-finished adapter or store a key for
             something that cannot use it. */}
+        {tab === 'ai' && (
         <SectionCard
           title="Property Analyzer"
           subtitle="Whole-property analysis reads ALL photos together so transitions can be planned from real context instead of two frames. Only local analyzers exist in this build."
@@ -781,7 +863,9 @@ export function SettingsPage(): React.JSX.Element {
             generation. It reads $0.00 today because manual and mock analysis are free.
           </p>
         </SectionCard>
+        )}
 
+        {tab === 'branding' && (
         <SectionCard title="Export Defaults" subtitle="Applied to every new project.">
           <div className="field-row">
             <Field label="Aspect ratio">
@@ -833,22 +917,11 @@ export function SettingsPage(): React.JSX.Element {
                 <option value="60">60 fps</option>
               </SelectInput>
             </Field>
-            <Field label="Default transition duration">
-              <SelectInput
-                value={String(exp.defaultTransitionDurationSec)}
-                onChange={(e) =>
-                  patchExport({ defaultTransitionDurationSec: Number(e.target.value) })
-                }
-              >
-                {/* Kling 3.0 Omni's real durations, up to its 15 s maximum. */}
-                <option value="5">5 seconds</option>
-                <option value="10">10 seconds</option>
-                <option value="15">15 seconds</option>
-              </SelectInput>
-            </Field>
           </div>
         </SectionCard>
+        )}
 
+        {tab === 'general' && (
         <SectionCard
           title="Pricing"
           subtitle="What the CUSTOMER pays — per project image. Unrelated to future AI generation costs."
@@ -883,7 +956,9 @@ export function SettingsPage(): React.JSX.Element {
             work.
           </p>
         </SectionCard>
+        )}
 
+        {tab === 'advanced' && (
         <SectionCard
           title="Production"
           subtitle="Queue and future AI orchestration. FFmpeg always renders one job at a time."
@@ -941,7 +1016,9 @@ export function SettingsPage(): React.JSX.Element {
             integration; customer pricing above stays completely separate from production cost.
           </p>
         </SectionCard>
+        )}
 
+        {tab === 'branding' && (
         <SectionCard
           title="Default Branding"
           subtitle="The small I2T signature applied to new projects. Each project can override it."
@@ -1006,6 +1083,7 @@ export function SettingsPage(): React.JSX.Element {
             onChange={(opacityPct) => patchSignature({ opacityPct })}
           />
         </SectionCard>
+        )}
       </div>
     </div>
   )

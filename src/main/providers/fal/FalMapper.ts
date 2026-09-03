@@ -1,6 +1,7 @@
 import { basename } from 'node:path'
 import type { GenerationRequest, ModelCapabilities } from '../types'
-import { FAL_FIELDS } from './falConfig'
+import { fitPromptToLimit } from '../../../shared/prompts'
+import { FAL_FIELDS, FAL_PROMPT_MAX_CHARS } from './falConfig'
 
 /**
  * FrameToFrame → fal.ai request mapping. Pure functions only: no I/O, no
@@ -52,10 +53,30 @@ export function buildFalBody(
   startImage: string,
   endImage: string
 ): Record<string, unknown> {
+  // ── THE LIMIT IS ENFORCED HERE, ON THE WAY INTO THE BODY ──────────
+  //
+  // Not at the call sites, and not by trusting whoever composed the
+  // prompt. This is the last point before the request is serialised, so
+  // a prompt that is too long cannot reach fal from ANY path — a preset
+  // edit, an operator's custom wording, or a motion instruction appended
+  // by the planner. Over-length previously meant HTTP 422 and a rejected
+  // request on every single generation.
+  //
+  // `fitPromptToLimit` drops tone and camera-feel first and never the
+  // reflection or geometry constraints; see shared/prompts.
+  const fitted = fitPromptToLimit(request.prompt, FAL_PROMPT_MAX_CHARS)
+  if (fitted.dropped.length > 0 || fitted.truncatedCustomText) {
+    console.warn(
+      `[fal] prompt ${request.prompt.length} → ${fitted.prompt.length} / ${FAL_PROMPT_MAX_CHARS} chars` +
+        (fitted.dropped.length > 0 ? ` — dropped: ${fitted.dropped.join(', ')}` : '') +
+        (fitted.truncatedCustomText ? ' — custom text shortened, constraints kept' : '')
+    )
+  }
+
   return {
     [FAL_FIELDS.startImage]: startImage,
     [FAL_FIELDS.endImage]: endImage,
-    [FAL_FIELDS.prompt]: request.prompt,
+    [FAL_FIELDS.prompt]: fitted.prompt,
     [FAL_FIELDS.duration]: String(mapDuration(request.durationSec, model)),
     // Explicitly off: the field name is confirmed, so we send it rather than
     // relying on a default we do not control. Audio also costs 33 % more.

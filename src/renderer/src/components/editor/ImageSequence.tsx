@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAppState } from '../../state/AppState'
 import { LiveGenerateDialog } from './LiveGenerateDialog'
-import type { LiveConfirmationPayload } from '../../../../preload/index'
+import type { LiveConfirmationPayload, ProviderMetadataPayload } from '../../../../preload/index'
+import { durationChoices } from '../../../../shared/transitionDuration'
 import { resolveGenerationAction } from '../../../../shared/generationState'
 import { markManuallyEdited } from '../../../../shared/promptPlanner'
 import {
@@ -10,6 +11,7 @@ import {
   type Project,
   type TransitionStatus
 } from '../../types'
+import { getFeedImages } from '../../../../shared/feedSequence'
 
 /** Human file size for the clip meta line. */
 function formatBytes(bytes: number): string {
@@ -61,10 +63,17 @@ export function ImageSequence({ project }: { project: Project }): React.JSX.Elem
    * rendering a <video> that silently fails to load.
    */
   const [clipInfo, setClipInfo] = useState<Record<string, { exists: boolean; bytes: number }>>({})
+  const [providerCatalog, setProviderCatalog] = useState<ProviderMetadataPayload[]>([])
   const clipNames = Object.values(project.transitions)
     .map((t) => t.clip?.storedName)
     .filter((n): n is string => typeof n === 'string')
   const clipNamesKey = clipNames.join('|')
+
+  // Provider capabilities decide which durations may be offered.
+  useEffect(() => {
+    void window.f2f.providers.catalog().then(setProviderCatalog)
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     if (clipNames.length === 0) {
@@ -103,6 +112,12 @@ export function ImageSequence({ project }: { project: Project }): React.JSX.Elem
     settings.providers.find((p) => p.id === (settings.activeProviderId ?? settings.providers[0]?.id)) ??
     settings.providers[0]
   const providerName = activeProvider?.id === 'fal' ? 'fal.ai' : 'Kling'
+  // The lengths the configured model actually publishes.
+  const allowedDurations = durationChoices(
+    providerCatalog
+      .find((p) => p.id === activeProvider?.id)
+      ?.models.find((m) => m.id === activeProvider?.model)?.durationsSec
+  )
   const liveLockOn =
     activeProvider?.id === 'fal'
       ? settings.production.allowLiveFalRequests
@@ -145,10 +160,11 @@ export function ImageSequence({ project }: { project: Project }): React.JSX.Elem
     endDrag()
   }
 
-  // Every pair key in image order, for the selection toolbar.
+  // Every pair key in feed sequence order, for the selection toolbar.
+  const feedImages = getFeedImages(project)
   const pairKeys: { key: string; completed: boolean }[] = []
-  for (let i = 0; i < project.images.length - 1; i++) {
-    const key = transitionKey(project.images[i].id, project.images[i + 1].id)
+  for (let i = 0; i < feedImages.length - 1; i++) {
+    const key = transitionKey(feedImages[i].id, feedImages[i + 1].id)
     pairKeys.push({ key, completed: project.transitions[key]?.status === 'completed' })
   }
 
@@ -201,8 +217,8 @@ export function ImageSequence({ project }: { project: Project }): React.JSX.Elem
         </div>
       )}
 
-      {project.images.map((image, index) => {
-        const next = project.images[index + 1]
+      {feedImages.map((image, index) => {
+        const next = feedImages[index + 1]
         const key = next ? transitionKey(image.id, next.id) : null
         const transition =
           key !== null
@@ -396,9 +412,11 @@ export function ImageSequence({ project }: { project: Project }): React.JSX.Elem
                           })
                         }
                       >
-                        {/* Kling 3.0 Omni's real durations — offering values
-                            it cannot honour would silently snap on submit. */}
-                        {[5, 10, 15].map((s) => (
+                        {/* Offered by the CONFIGURED model, not by a literal.
+                            Offering a value the model cannot honour would
+                            silently snap on submit, handing back a clip of a
+                            length nobody chose. */}
+                        {allowedDurations.map((s) => (
                           <option key={s} value={s}>
                             {s} s
                           </option>
@@ -593,7 +611,7 @@ export function ImageSequence({ project }: { project: Project }): React.JSX.Elem
         )
       })}
 
-      {dropIndex === project.images.length && dragIndex !== null && (
+      {dropIndex === feedImages.length && dragIndex !== null && (
         <div className="drop-indicator" />
       )}
 

@@ -3,6 +3,7 @@ import type { Project } from '../../types'
 import type { CameraOrientation, PropertyAnalysis } from '../../../../shared/propertyAnalysis'
 import type { ImageFacts, OverrideField } from '../../../../shared/imageFacts'
 import { imageRoomFactKey, type ReviewVerdict } from '../../../../shared/analysisReview'
+import { getFeedImages } from '../../../../shared/feedSequence'
 
 type Tab = 'basics' | 'spatial' | 'analysis' | 'advanced'
 
@@ -42,8 +43,12 @@ export function ImageInspector({
   const [facts, setFacts] = useState<ImageFacts | null>(null)
   const [verdict, setVerdict] = useState<ReviewVerdict>('unreviewed')
 
-  const index = project.images.findIndex((i) => i.id === imageId)
-  const image = index >= 0 ? project.images[index] : null
+  const feedImages = getFeedImages(project)
+  const feedIndex = feedImages.findIndex((i) => i.id === imageId)
+  const image = project.images.find((i) => i.id === imageId) ?? null
+  // Position in the video sequence (for display), or null if not in feed
+  const sequencePosition = feedIndex >= 0 ? feedIndex + 1 : null
+  const sequenceTotal = feedImages.length
 
   const load = useCallback((): void => {
     if (!imageId) return
@@ -94,8 +99,9 @@ export function ImageInspector({
     if (!room) return
     const key = imageRoomFactKey(imageId, room)
     const value = verdict === next ? 'unreviewed' : next
+    const label = sequencePosition !== null ? `Image ${sequencePosition} → ${room}` : `Image (not in sequence) → ${room}`
     void window.f2f.projects.review
-      .set(project.id, 'accepted', key, 'image-room', `Image ${index + 1} → ${room}`, value)
+      .set(project.id, 'accepted', key, 'image-room', label, value)
       .then(() => setVerdict(value))
   }
 
@@ -105,7 +111,14 @@ export function ImageInspector({
     <section className="inspector">
       <header className="inspector-head">
         <span className="inspector-pair">
-          IMAGE {String(index + 1).padStart(2, '0')}
+          {sequencePosition !== null ? (
+            <>
+              IMAGE {String(sequencePosition).padStart(2, '0')}
+              {sequenceTotal > 0 && <span className="inspector-pair-total">/ {sequenceTotal}</span>}
+            </>
+          ) : (
+            <>IMAGE (library)</>
+          )}
           {facts.overridden && (
             <span className="override-badge" title="This image has manual corrections">
               Manual override
@@ -141,13 +154,20 @@ export function ImageInspector({
         {/* ── BASICS ─────────────────────────────────────────────────── */}
         {tab === 'basics' && (
           <div className="inspector-grid">
-            <Sourced label="Image" value={`IMAGE ${String(index + 1).padStart(2, '0')}`} />
             <Sourced label="File" value={image.fileName} />
-            <Sourced
-              label="Position in sequence"
-              value={`${index + 1} of ${project.images.length}`}
-              note="Drag in the timeline, or Shift + ← →"
-            />
+            {sequencePosition !== null ? (
+              <Sourced
+                label="Position in sequence"
+                value={`${sequencePosition} of ${sequenceTotal}`}
+                note="Drag in the timeline, or Shift + ← →"
+              />
+            ) : (
+              <Sourced
+                label="Position in sequence"
+                value="Not in Transition Feed"
+                note="Drag from Imported Images to add to sequence"
+              />
+            )}
             <Sourced
               label="Room / Space"
               value={facts.room.value ?? 'Not assigned'}

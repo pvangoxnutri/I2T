@@ -57,6 +57,16 @@ exports/
 !build/**/*.png
 !build/**/*.ico
 
+# The holding page under _Website/ is the public Image2Transition site.
+# Its artwork is brand material meant to be published, not customer media,
+# so it is exempted from the blanket image rule above — without these the
+# page would be committed with every image path pointing at nothing.
+!_Website/**/*.png
+!_Website/**/*.svg
+!_Website/**/*.ico
+!_Website/**/*.jpg
+!_Website/**/*.webp
+
 # ── Logs, temp and scratch ───────────────────────────────────────────
 *.log
 npm-debug.log*

@@ -48,6 +48,24 @@ export interface TransitionClip {
   src: string
 }
 
+/** Historical record of one generation in the project catalogue. */
+export interface GenerationRecord {
+  id: string
+  projectId: string
+  fromImageId: string
+  toImageId: string
+  provider: string
+  model: string | null
+  createdAt: number
+  status: 'completed' | 'failed' | 'cancelled'
+  clip: TransitionClip | null
+  promptUsed: string
+  providerMeta: Record<string, unknown> | null
+  generationCost: number | null
+  generationCredits: number | null
+  active: boolean
+}
+
 /** Settings for the AI transition between two specific images. Keyed by the
  * image PAIR so reordering unrelated images never loses a prompt. */
 export interface TransitionSettings {
@@ -74,6 +92,23 @@ export interface TransitionSettings {
    * one — see shared/transitionMode.ts.
    */
   mode?: TransitionMode
+  /**
+   * WHO CHOSE THAT MODE.
+   *
+   * A stored `mode` records WHAT was decided; this records who decided
+   * it, and the two need separating because they carry different
+   * permissions. An AI mode the analyzer proposed must be backed by an
+   * accepted spatial map before money is spent on it — that map is the
+   * whole reason it was proposed. An AI mode a human deliberately set is
+   * their call to make on a property they may know better than the
+   * photographs show, and is allowed through with a stated risk.
+   *
+   * ABSENT MEANS NOT MANUAL. Rows written before this field existed —
+   * including eight that generated against an empty analysis — must not
+   * read as deliberate human overrides, because `manual` is the
+   * permissive branch. Only an explicit marker unlocks it.
+   */
+  modeProvenance?: 'analysis' | 'manual'
 }
 
 export const defaultTransitionSettings = (durationSec: number): TransitionSettings => ({
@@ -148,12 +183,30 @@ export interface CustomerWorkflow {
   finalSentAt: number | null
 }
 
+/** Optional customer/property information for delivery and invoicing. */
+export interface CustomerDetails {
+  /** Customer or company name. */
+  name?: string
+  /** Primary contact person. */
+  contactPerson?: string
+  /** Contact email. */
+  email?: string
+  /** Contact phone. */
+  phone?: string
+  /** Additional notes or property address. */
+  notes?: string
+}
+
 export interface Project {
   id: string
   name: string
   createdAt: number
   updatedAt: number
+  /** All imported images (library). */
   images: ProjectImage[]
+  /** Ordered subset of image IDs that form the video sequence (Transition Feed).
+   * If undefined, defaults to all images in order for backward compatibility. */
+  feedSequence?: string[]
   /** Transition settings per image pair (see transitionKey). */
   transitions: Record<string, TransitionSettings>
   watermark: PreviewWatermark
@@ -161,6 +214,8 @@ export interface Project {
   /** Persisted, user-set status (never `queued`/`generating`). */
   status: ProjectStatus
   workflow: CustomerWorkflow
+  /** Optional customer/property details for delivery. */
+  customer?: CustomerDetails
 }
 
 // ── Queue ────────────────────────────────────────────────────────────────
@@ -186,6 +241,15 @@ export interface JobMetadata {
   outputPath?: string
   /** Managed overlay PNG file names, composited in order. */
   overlayFiles?: string[]
+  /**
+   * Which shape this export renders to — see shared/exportFormat.
+   *
+   * Carried on the JOB rather than read from settings at run time, so a
+   * queued export produces the format it was queued for. Absent on jobs
+   * written before formats existed, which correctly read as the desktop
+   * default.
+   */
+  exportFormat?: 'computer' | 'instagram'
   /** Provider attribution for AI work. */
   provider?: string
   model?: string
@@ -207,6 +271,24 @@ export interface ProviderJobState {
   providerTaskId: string | null
   /** Last status string reported by the provider. */
   providerStatus: string | null
+  /**
+   * WHY A PROVIDER CALL FAILED, classified rather than described.
+   *
+   * `terminal` is the load-bearing bit: it separates "the provider
+   * refused this request" from "we lost contact with a task that may
+   * still be running and is already paid for". Both look like a failed
+   * job locally, and treating them alike is how a rejected request kept
+   * offering Resume — which could only return the same rejection.
+   *
+   * Absent on jobs that never failed, and on jobs failed before this was
+   * recorded; see `looksTerminalFromMessage` for the latter.
+   */
+  providerFailure?: {
+    code: string
+    message: string
+    httpStatus?: number
+    terminal: boolean
+  } | null
   submittedAt: number | null
   lastPolledAt: number | null
   /** Sanitized provider response metadata (never credentials). */

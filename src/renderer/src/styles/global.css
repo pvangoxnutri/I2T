@@ -55,7 +55,16 @@
 
   --toolbar-h: 46px;
   --timeline-h: 132px;
-  --inspector-h: 214px;
+  /* ── FUNCTION OVER SPECTACLE ──────────────────────────────────────
+     The preview used to absorb every spare pixel while the inspector
+     was pinned to a short fixed row, so the controls that actually do
+     the work — mode, prompt, duration, Generate — were the first thing
+     pushed out of view. The inspector now gets the taller row and the
+     preview shrinks around it: a compact frame you can still judge a
+     clip in beats a large one whose buttons need scrolling to reach. */
+  --inspector-h: 300px;
+  /* The preview never grows past this, however tall the window is. */
+  --preview-max-h: 46vh;
   --left-panel-w: 300px;
 
   --font-body:
@@ -339,6 +348,11 @@ textarea {
   filter: brightness(1.07);
 }
 
+.btn-primary:focus {
+  outline: 2px solid var(--accent-ink);
+  outline-offset: 2px;
+}
+
 .btn-ghost {
   background: rgba(255, 255, 255, 0.04);
   border-color: var(--border-strong);
@@ -347,6 +361,39 @@ textarea {
 
 .btn-ghost:not(:disabled):hover {
   background: rgba(255, 255, 255, 0.08);
+}
+
+.btn-secondary {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.btn-secondary:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.btn-secondary:focus {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 2px;
+}
+
+.btn-destructive {
+  background: var(--err);
+  border-color: rgba(0, 0, 0, 0.3);
+  color: #ffffff;
+}
+
+.btn-destructive:not(:disabled):hover {
+  background: #d99a8f;
+  border-color: rgba(0, 0, 0, 0.4);
+}
+
+.btn-destructive:focus {
+  outline: 2px solid var(--err);
+  outline-offset: 2px;
 }
 
 .btn-block {
@@ -1430,6 +1477,73 @@ textarea {
   color: var(--text-mute);
   border-color: var(--border-strong);
   background: rgba(255, 255, 255, 0.03);
+}
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+
+.dialog-box {
+  width: 100%;
+  max-width: 380px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+}
+
+.dialog-header {
+  margin-bottom: 12px;
+}
+
+.dialog-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.affected-transitions {
+  margin: 12px 0;
+  padding: 10px;
+  background: var(--bg-inset);
+  border-radius: var(--radius);
+}
+
+.affected-label {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.affected-transitions ul {
+  margin: 0;
+  padding-left: 20px;
+  list-style: disc;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.affected-transitions li {
+  margin: 2px 0;
+}
+
+.dialog-note {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--text-mute);
+  line-height: 1.4;
 }
 
 .dialog-backdrop {
@@ -2635,7 +2749,13 @@ textarea {
      `minmax(0, 1fr)` lets the column shrink below its content, which is
      what makes the timeline's own `overflow-x: auto` take effect. */
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: var(--toolbar-h) minmax(0, 1fr) var(--timeline-h) var(--inspector-h);
+  /* The preview row shrinks first and is capped; the inspector keeps its
+     full row so nothing important is pushed below the fold. */
+  grid-template-rows:
+    var(--toolbar-h)
+    minmax(150px, var(--preview-max-h))
+    var(--timeline-h)
+    minmax(var(--inspector-h), 1fr);
   height: 100vh;
   min-width: 0;
   overflow: hidden;
@@ -2901,6 +3021,695 @@ textarea {
 .media-remove:hover { color: var(--err); background: var(--accent-soft); }
 
 .media-empty { font-size: 11.5px; color: var(--text-mute); padding: 8px 2px; }
+
+.media-ai-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
+}
+
+.media-ai-button {
+  background: var(--accent-soft);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.media-ai-button:hover {
+  background: var(--accent);
+  border-color: var(--accent-border);
+  color: var(--accent-ink);
+}
+
+.media-ai-button:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.media-ai-button:active {
+  opacity: 0.85;
+}
+
+.media-ai-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.media-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+.media-proposal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.media-proposal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+}
+
+/* ── THE DIALOG IS A COLUMN, NOT A BLOCK ────────────────────────────
+   It used to be an unbounded block with 20px of padding: a thirty-image
+   proposal simply grew past the bottom of the screen, taking Accept and
+   Dismiss with it, and the page behind does not scroll. The proposal was
+   reviewable and un-acceptable at the same time.
+
+   Header and actions are fixed rows; the list between them is the only
+   thing that scrolls. */
+.media-proposal-dialog {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  width: min(720px, calc(100vw - 48px));
+  max-height: 90vh;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+  overflow: hidden; /* keeps the rounded corners over a scrolling child */
+}
+
+.media-proposal-head {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.media-proposal-head h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text);
+}
+
+.media-proposal-close {
+  background: none;
+  border: none;
+  color: var(--text-mute);
+  cursor: pointer;
+  font-size: 18px;
+  padding: 0;
+  line-height: 1;
+}
+
+.media-proposal-close:hover {
+  color: var(--text);
+}
+
+/* THE ONLY SCROLLING SURFACE. `min-height: 0` is load-bearing: without
+   it a flex child refuses to shrink below its content, the column grows
+   past its own max-height, and the footer is pushed off screen again. */
+.media-proposal-preview {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain; /* never chain the scroll to the page */
+  padding: 16px 20px;
+  color: var(--text);
+}
+
+.media-proposal-info,
+.media-proposal-error,
+.media-proposal-warning,
+.media-proposal-basis {
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.media-proposal-error { color: var(--err); }
+.media-proposal-warning { color: var(--warn); }
+.media-proposal-basis { color: var(--text-mute); }
+
+.media-proposal-list {
+  margin: 8px 0;
+  padding-left: 20px;
+  list-style: disc;
+}
+
+.media-proposal-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.media-proposal-filename {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.media-proposal-mode {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.media-proposal-mode.mode-ai { color: var(--info); }
+.media-proposal-mode.mode-cut { color: var(--warn); }
+.media-proposal-mode.mode-auto { color: var(--text-mute); }
+
+/* The review dialog shows the whole basis for the decision: the frame, the
+   room it was placed in, how each joint will behave and why. Ordered list
+   markers are dropped — the thumbnails carry the sequence. */
+.media-proposal-list { list-style: none; padding-left: 0; }
+
+.media-proposal-thumb {
+  width: 40px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: 3px;
+  background: var(--bg-inset);
+  flex: none;
+}
+
+.media-proposal-item { justify-content: flex-start; }
+.media-proposal-filename { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+.media-proposal-room {
+  font-size: 11px;
+  color: var(--text-mute);
+  flex: none;
+}
+
+/* The joint between two frames, indented under the frame it follows. */
+.media-proposal-joint {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0 6px 48px;
+  border-left: 1px solid var(--border);
+  margin-left: 19px;
+}
+
+.media-proposal-safety {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  flex: none;
+}
+
+.media-proposal-safety.safety-safe { color: var(--ok); }
+.media-proposal-safety.safety-uncertain { color: var(--warn); }
+.media-proposal-safety.safety-unsafe { color: var(--err); }
+
+.media-proposal-reason {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.media-proposal-excluded {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.media-proposal-excluded summary {
+  cursor: pointer;
+  color: var(--text-mute);
+}
+
+.media-proposal-excluded ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+/* Confirmation that the write landed. Accepting a proposal changes the
+   feed off-screen when the Tools tab is showing, so the outcome is stated
+   rather than left to be noticed. */
+.media-proposal-toast {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+}
+
+.media-proposal-toast button {
+  background: none;
+  border: none;
+  color: var(--text-mute);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.media-proposal-toast button:hover { color: var(--text); }
+
+/* Always reachable, whatever the list length. */
+.media-proposal-actions {
+  flex: none;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-card);
+}
+
+/* An error belongs beside the button that failed, not off the end of it. */
+.media-proposal-actions .media-proposal-error {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+.media-proposal-accept,
+.media-proposal-reject {
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.media-proposal-accept {
+  background: var(--accent-bright);
+  color: var(--accent-ink);
+  border-color: rgba(0, 0, 0, 0.4);
+}
+
+.media-proposal-accept:hover:not(:disabled) {
+  background: #ffffff;
+  color: var(--accent-ink);
+}
+
+.media-proposal-accept:focus {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 2px;
+}
+
+.media-proposal-reject {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.media-proposal-reject:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text);
+}
+
+.media-proposal-reject:focus {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 2px;
+}
+
+.media-proposal-accept:disabled,
+.media-proposal-reject:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.media-context-menu {
+  background: var(--bg-card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 4px 0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.media-context-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+
+.media-context-item:hover {
+  background: var(--accent-soft);
+}
+
+/* ── Project Catalogue ──────────────────────────────────────────────── */
+
+.catalogue-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 2000;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.catalogue-drawer {
+  background: var(--bg-card);
+  border-left: 1px solid var(--border-strong);
+  width: 100%;
+  max-width: 420px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.4);
+}
+
+.catalogue-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.catalogue-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.catalogue-close {
+  background: none;
+  border: none;
+  color: var(--text-mute);
+  cursor: pointer;
+  font-size: 18px;
+  padding: 0;
+  line-height: 1;
+}
+
+.catalogue-close:hover {
+  color: var(--text);
+}
+
+.catalogue-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.catalogue-empty {
+  color: var(--text-mute);
+  font-size: 13px;
+  text-align: center;
+  padding: 24px 12px;
+  margin: 0;
+}
+
+.catalogue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.catalogue-item {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.catalogue-item-preview {
+  width: 60px;
+  height: 40px;
+  background: var(--bg-inset);
+  border-radius: 2px;
+  overflow: hidden;
+  flex: none;
+}
+
+.catalogue-item-preview video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.catalogue-item-info {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.catalogue-pair {
+  color: var(--text);
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+.catalogue-provider {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 4px;
+}
+
+.catalogue-timestamp {
+  color: var(--text-mute);
+  font-size: 11px;
+}
+
+.catalogue-active {
+  display: inline-block;
+  margin-top: 4px;
+  color: var(--ok);
+  font-size: 11px;
+}
+
+.catalogue-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  role: tablist;
+}
+
+.settings-tab {
+  background: none;
+  border: none;
+  padding: 8px 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s ease;
+}
+
+.settings-tab:hover:not(.is-active) {
+  color: var(--text);
+  border-bottom-color: var(--border);
+}
+
+.settings-tab.is-active {
+  color: var(--text);
+  border-bottom-color: var(--text);
+}
+
+.toolbox {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+
+.toolbox-summary {
+  display: flex;
+  gap: 16px;
+  padding: 10px 12px;
+  background: var(--bg-inset);
+  border-radius: var(--radius);
+  font-size: 11px;
+}
+
+.toolbox-summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toolbox-label {
+  color: var(--text-mute);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+
+.toolbox-value {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.toolbox-section {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.toolbox-section-empty {
+  border: none;
+  background: transparent;
+  padding: 10px;
+}
+
+.toolbox-section-header {
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  text-align: left;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.toolbox-section-header:hover:not(:disabled) {
+  background: var(--bg-card);
+  color: var(--text);
+  border-bottom-color: var(--border-strong);
+}
+
+.toolbox-section-header:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  color: var(--text-mute);
+}
+
+.toolbox-section-header.is-expanded {
+  color: var(--text);
+  background: var(--bg-card);
+}
+
+.toolbox-section-title {
+  flex: 1;
+}
+
+.toolbox-section-arrow {
+  margin-left: 8px;
+  font-size: 10px;
+  transition: transform 0.2s ease;
+}
+
+.toolbox-section-header.is-expanded .toolbox-section-arrow {
+  transform: rotate(180deg);
+}
+
+.toolbox-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.toolbox-description {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.toolbox-help {
+  margin: 0;
+  padding: 8px;
+  font-size: 11px;
+  color: var(--text-mute);
+  background: var(--bg-inset);
+  border-radius: 3px;
+  line-height: 1.45;
+}
+
+.toolbox-status {
+  margin: 8px 0 0;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-mute);
+}
+
+.customer-details-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.customer-details-form .form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.customer-details-form label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.customer-details-form input,
+.customer-details-form textarea {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.customer-details-form input:focus,
+.customer-details-form textarea:focus {
+  outline: none;
+  border-color: var(--border-strong);
+  background: var(--bg-card);
+}
+
+.customer-details-form input::placeholder,
+.customer-details-form textarea::placeholder {
+  color: var(--text-mute);
+}
 
 /* ── Preview stage ──────────────────────────────────────────────────── */
 
@@ -3291,6 +4100,41 @@ textarea {
 
 .inspector-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 
+/* ── THE DESTRUCTIVE ACTION SITS APART ────────────────────────────────
+   Delete used to be a third identical ghost button in this row, so the
+   one action that throws work away looked exactly like "Add to Queue".
+   `margin-left: auto` pushes it to the far end and the rule draws the
+   line: everything left of it builds, the thing right of it removes. */
+.inspector-danger {
+  margin-left: auto;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+}
+
+/* Destructive, but not alarming: this detaches a clip, it does not
+   delete a file. Outlined rather than filled so it never competes with
+   the primary action for the eye. */
+.btn-danger-ghost {
+  background: none;
+  border: 1px solid var(--err);
+  color: var(--err);
+}
+
+.btn-danger-ghost:hover:not(:disabled) {
+  background: rgba(201, 139, 129, 0.12);
+  border-color: var(--err);
+}
+
+.btn-danger-ghost:focus-visible { outline: 1px solid var(--err); outline-offset: 1px; }
+
+/* On a narrow inspector the row wraps; the separator would then sit at
+   the start of a line and read as a divider rather than a boundary. */
+@media (max-width: 1280px) {
+  .inspector-danger { margin-left: 0; padding-left: 0; border-left: none; }
+}
+
 .inspector-attempts { list-style: none; margin: 6px 0 0; padding: 0; flex-basis: 100%; }
 .inspector-attempts li { font-size: 11px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
 
@@ -3464,13 +4308,33 @@ textarea {
 
 /* ── Narrower desktops ──────────────────────────────────────────────── */
 
+/* ── THE PREVIEW GIVES WAY, NOT THE CONTROLS ──────────────────────────
+   These breakpoints used to SHRINK the inspector on smaller windows,
+   which is backwards: the tighter the screen, the sooner the controls
+   fall off the bottom. The inspector keeps its height and the preview
+   cap comes down instead. */
+
 @media (max-width: 1500px) {
-  :root { --left-panel-w: 260px; --inspector-h: 200px; }
+  :root { --left-panel-w: 260px; --preview-max-h: 42vh; }
 }
 
 @media (max-width: 1280px) {
-  :root { --left-panel-w: 232px; --timeline-h: 124px; --inspector-h: 190px; }
+  :root {
+    --left-panel-w: 232px;
+    --timeline-h: 124px;
+    --preview-max-h: 38vh;
+  }
   .toolbar-project-name { max-width: 190px; }
+}
+
+/* SHORT WINDOWS are where "everything visible" is actually won or lost —
+   a 1440×800 laptop has far less to spare vertically than horizontally. */
+@media (max-height: 900px) {
+  :root { --timeline-h: 118px; --inspector-h: 272px; --preview-max-h: 36vh; }
+}
+
+@media (max-height: 760px) {
+  :root { --timeline-h: 106px; --inspector-h: 250px; --preview-max-h: 30vh; }
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -3485,55 +4349,42 @@ textarea {
   color: var(--text);
 }
 
+/* The artwork is near-white for a dark ground. On a light one it would
+   disappear, so the inverted tone inverts the pixels rather than setting
+   a colour the image does not inherit. */
+.brand-tone-light .brand-img { filter: invert(1); }
 .brand-tone-light { color: var(--bg); }
 
-/* The wordmark: tight tracking so I-2-T reads as one object, with the 2
-   and T touching. The streak trails off the T. */
-.brand-word {
-  display: inline-flex;
-  align-items: baseline;
-  position: relative;
-  font-family: var(--font-display);
-  font-weight: 600;
-  letter-spacing: -0.06em;
-  line-height: 1;
-  white-space: nowrap;
+/* `full` stacks: the tagline belongs under the lockup, not beside it. */
+.brand-variant-full {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
 }
 
-.brand-i { opacity: 0.92; }
-
-/* Lighter, so the 2 reads as the hinge between the two letters rather
-   than a third equal character. */
-.brand-2 {
-  font-weight: 300;
-  opacity: 0.7;
-  margin: 0 -0.02em;
+.brand-img {
+  display: block;
+  width: auto;
+  height: auto;
+  /* Never let a narrow sidebar crop the lockup — it scales down instead. */
+  max-width: 100%;
+  object-fit: contain;
+  user-select: none;
 }
 
-.brand-t { margin-left: -0.03em; }
+/* Sized by WIDTH: the lockup is a 3.7:1 strip whose height is a
+   consequence, and the width is what has to fit the sidebar. */
+.brand-sm .brand-img-lockup { width: 124px; }
+.brand-md .brand-img-lockup { width: 168px; }
+.brand-lg .brand-img-lockup { width: 240px; }
+.brand-xl .brand-img-lockup { width: 380px; }
 
-.brand-streak {
-  position: absolute;
-  left: 100%;
-  bottom: 0.14em;
-  margin-left: 0.16em;
-  height: 0.52em;
-  width: 1.5em;
-  color: currentColor;
-  pointer-events: none;
-}
-
-.brand-lines { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-
-/* Generous tracking, uppercase, thin — the editorial half of the lockup. */
-.brand-name {
-  font-size: 0.44em;
-  text-transform: uppercase;
-  letter-spacing: 0.26em;
-  font-weight: 400;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
+/* Sized by HEIGHT: the bare symbol sits in toolbar rows, where matching
+   the row height is what matters and its width follows. */
+.brand-sm .brand-img-mark { height: 21px; }
+.brand-md .brand-img-mark { height: 27px; }
+.brand-lg .brand-img-mark { height: 38px; }
+.brand-xl .brand-img-mark { height: 58px; }
 
 .brand-tagline {
   font-size: 0.34em;
@@ -3543,16 +4394,6 @@ textarea {
   color: var(--text-mute);
   white-space: nowrap;
 }
-
-.brand-sm .brand-word { font-size: 17px; }
-.brand-md .brand-word { font-size: 23px; }
-.brand-lg .brand-word { font-size: 34px; }
-.brand-xl .brand-word { font-size: 56px; }
-
-.brand-sm .brand-lines,
-.brand-md .brand-lines,
-.brand-lg .brand-lines,
-.brand-xl .brand-lines { font-size: inherit; }
 
 .brand-sm { font-size: 17px; }
 .brand-md { font-size: 23px; }
@@ -4572,4 +5413,555 @@ textarea {
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
 }
 
+/* ─────────────────────────────────────────────────────────────────
+   Transition Analysis Review Modal
+   ───────────────────────────────────────────────────────────────── */
+
+.transition-analysis-review {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.transition-review-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 1;
+}
+
+.transition-review-modal {
+  position: relative;
+  z-index: 2;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  width: 90%;
+  max-width: 800px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8);
+}
+
+.transition-review-head {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.transition-review-head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.transition-review-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.transition-review-close:hover {
+  color: var(--text);
+}
+
+.transition-review-warning {
+  background: var(--bg-inset);
+  border-left: 3px solid var(--warn);
+  padding: 12px 16px;
+  margin: 12px;
+  border-radius: 4px;
+}
+
+.transition-review-warning-title {
+  margin: 0 0 4px 0;
+  font-weight: 600;
+  color: var(--warn);
+  font-size: 13px;
+}
+
+.transition-review-warning-text {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.transition-review-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.transition-review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.transition-review-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  gap: 12px;
+}
+
+.transition-review-pair {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.transition-review-image {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-inset);
+}
+
+.transition-review-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.transition-review-number {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--text);
+  font-size: 10px;
+  padding: 2px 4px;
+  border-radius: 2px;
+}
+
+.transition-review-arrow {
+  color: var(--text-dim);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.transition-review-arrow-text {
+  color: var(--text-dim);
+  margin: 0 4px;
+}
+
+.transition-review-details {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.transition-review-names {
+  font-size: 12px;
+  color: var(--text-dim);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.transition-review-recommendation {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.transition-review-mode {
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.transition-review-mode.mode-ai {
+  background: rgba(143, 174, 151, 0.2);
+  color: var(--ok);
+}
+
+.transition-review-mode.mode-cut {
+  background: rgba(201, 139, 129, 0.2);
+  color: var(--err);
+}
+
+.transition-review-safety {
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.transition-review-safety.safety-safe {
+  background: rgba(143, 174, 151, 0.15);
+  color: var(--ok);
+}
+
+.transition-review-safety.safety-uncertain {
+  background: rgba(194, 172, 126, 0.15);
+  color: var(--warn);
+}
+
+.transition-review-safety.safety-unsafe {
+  background: rgba(201, 139, 129, 0.15);
+  color: var(--err);
+}
+
+.transition-review-evidence {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.transition-review-evidence-label {
+  font-weight: 600;
+  color: var(--text-mute);
+  margin-right: 4px;
+}
+
+.transition-review-prompt {
+  background: var(--bg-inset);
+  padding: 8px;
+  border-radius: 3px;
+}
+
+.transition-review-prompt-label {
+  display: block;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--text-mute);
+  margin-bottom: 4px;
+}
+
+.transition-review-prompt-text {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.4;
+  font-family: monospace;
+}
+
+.transition-review-actions {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .timeline-transition-warn { margin-left: 4px; }
+
+/* ─────────────────────────────────────────────────────────────────
+   Transition generation duration — a setting, not a result.
+   Stepper rather than a dropdown: the common gesture is nudging by
+   one second, and a 13-item select makes that a two-click hunt.
+   ───────────────────────────────────────────────────────────────── */
+
+.inspector-duration {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+}
+
+.inspector-duration-label {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.inspector-duration-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inspector-duration-step {
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.inspector-duration-step:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
+.inspector-duration-step:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.inspector-duration-value {
+  min-width: 44px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.inspector-duration-range,
+.inspector-duration-note,
+.inspector-duration-na {
+  font-size: 11px;
+  color: var(--text-mute);
+}
+
+/* Stated explicitly because the alternative — an operator assuming the
+   clip they can see just changed length — is a support question. */
+.inspector-duration-note { color: var(--warn); }
+
+.inspector-duration-na { margin: 6px 0; }
+
+/* A proposal that kept nothing is reported as a fault, not offered as a
+   choice — accepting it would replace a working feed with an empty one. */
+.media-proposal-suspect {
+  border-left: 3px solid var(--err);
+  background: var(--bg-inset);
+  padding: 10px 12px;
+  border-radius: 4px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.media-proposal-suspect-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+  color: var(--err);
+}
+
+.media-proposal-suspect p { margin: 0; }
+
+/* ── PROPOSAL ROWS: SCANNABLE AT THIRTY IMAGES ──────────────────────
+   Each frame is one line and each joint is one line beneath it, so a
+   long proposal can be read down the left edge — mode, safety, reason —
+   rather than as a stack of paragraphs. */
+.media-proposal-list li { margin-bottom: 2px; }
+
+.media-proposal-index {
+  flex: none;
+  width: 20px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--text-mute);
+}
+
+.media-proposal-item {
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.media-proposal-joint {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0 5px 28px;
+  margin-left: 19px;
+  border-left: 1px solid var(--border);
+}
+
+/* Fixed columns so the eye can run straight down them. */
+.media-proposal-joint .media-proposal-mode { flex: none; min-width: 30px; }
+.media-proposal-joint .media-proposal-safety { flex: none; min-width: 64px; }
+.media-proposal-joint .media-proposal-reason { flex: 1; min-width: 0; }
+
+/* The analyzer's own words, when it offered any — additional colour on
+   top of the rule that actually decided, never a substitute for it. */
+.media-proposal-hint { color: var(--text-mute); font-style: italic; }
+
+/* ── MAPPING QUALITY ────────────────────────────────────────────────
+   A thin analysis and a strong one used to look identical. Coverage is
+   stated before the proposal, and an unusable mapping reads as a fault
+   rather than as a result. */
+.media-proposal-quality {
+  border-left: 3px solid var(--warn);
+  background: var(--bg-inset);
+  padding: 10px 12px;
+  border-radius: 4px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+.media-proposal-quality.is-unusable { border-left-color: var(--err); }
+
+.media-proposal-quality-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.media-proposal-quality.is-unusable .media-proposal-quality-title { color: var(--err); }
+
+.media-proposal-quality ul { margin: 4px 0; padding-left: 18px; }
+.media-proposal-quality p { margin: 4px 0 0; }
+.media-proposal-quality-counts { color: var(--text-mute); }
+
+/* ── MANUAL OVERRIDE ────────────────────────────────────────────────
+   Generating a transition the accepted map does not support. Allowed,
+   because the operator may know the property better than the photographs
+   show — but never dressed as a safe transition, because this is the
+   state that produced a moved sofa and a duplicated television. */
+.confirm-override {
+  border: 1px solid var(--err);
+  border-left-width: 3px;
+  background: var(--bg-inset);
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.confirm-override-title {
+  margin: 0 0 6px;
+  font-weight: 600;
+  color: var(--err);
+}
+
+.confirm-override-why { margin: 0 0 6px; }
+
+.confirm-override-guidance {
+  margin: 0;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The button states what it does. "Generate anyway" is not "Generate". */
+.btn-danger {
+  background: var(--err);
+  border-color: var(--err);
+  color: var(--accent-ink);
+}
+
+.btn-danger:hover:not(:disabled) { filter: brightness(1.08); }
+.btn-danger:disabled { opacity: 0.5; }
+
+/* Reuse an existing generation for its own transition — bookkeeping over
+   work already paid for, so it reads as a quiet action, not a purchase. */
+.catalogue-attach { flex: none; align-self: center; }
+
+.catalogue-note {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-mute);
+  text-align: right;
+  padding-right: 8px;
+}
+
+/* ── TOOLBOX: THREE WORKFLOWS, THREE GROUPS ────────────────────────
+   Media proposes a feed, Feed judges the chosen order, Prompts writes
+   wording. Grouped and labelled separately because a single "Analyse"
+   button hid three different questions — and three different costs. */
+.toolbox-group {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.toolbox-group:last-child { border-bottom: none; }
+
+.toolbox-group-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+
+.toolbox-status {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.toolbox-status strong { color: var(--text); font-weight: 600; }
+
+/* Why an action is unavailable, never a silently greyed button. */
+.toolbox-help {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-mute);
+  line-height: 1.45;
+}
+
+/* ── EXPORT FORMAT ──────────────────────────────────────────────────
+   A per-export choice, not a project setting. Each option states its
+   real dimensions so "Instagram" is not a guess about what comes out. */
+.export-format {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px 10px;
+  margin: 0 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.export-format legend {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-mute);
+  padding: 0 4px;
+}
+
+.export-format-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas: 'radio label' 'radio desc';
+  gap: 0 8px;
+  align-items: baseline;
+  padding: 5px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.export-format-option:hover { background: var(--accent-soft); }
+.export-format-option.is-active { background: var(--accent-soft); }
+
+.export-format-option input { grid-area: radio; align-self: center; }
+.export-format-label { grid-area: label; font-size: 12.5px; color: var(--text); }
+.export-format-desc { grid-area: desc; font-size: 11px; color: var(--text-mute); }

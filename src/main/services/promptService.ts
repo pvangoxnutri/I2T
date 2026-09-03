@@ -1,3 +1,4 @@
+import { getFeedSequenceIds } from '../../shared/feedSequence'
 import { transitionKey } from '../../shared/types'
 import {
   canRebuildPrompt,
@@ -100,7 +101,12 @@ export function planPromptRebuild(projectId: string): RebuildPlanSummary {
   const hasAnalysis = analysis.rooms.length > 0
   // The WHOLE sequence at once, so each plan can see the one before it.
   // Planning pair-by-pair could not do continuity at all.
-  const plans = planSequence(analysis, project.images.map((i) => i.id))
+  // PLANNED OVER THE FEED, because that is what `logicalTransitions`
+  // iterates and what `t.position` indexes into. Planning over
+  // `project.images` meant feed position N looked up the plan for library
+  // position N — a different pair entirely whenever the feed had been
+  // reordered, which is exactly what accepting a proposal does.
+  const plans = planSequence(analysis, getFeedSequenceIds(project))
 
   const rebuildable: RebuildPlanSummary['rebuildable'] = []
   const preserved: RebuildPlanSummary['preserved'] = []
@@ -192,7 +198,12 @@ export function rebuildPromptsFromAnalysis(projectId: string): RebuildResult {
   // Planned as a SEQUENCE. A manually edited transition is skipped for
   // writing but still occupies its slot in the plan list, so the clips
   // around it inherit the right continuity rather than being renumbered.
-  const plans = planSequence(analysis, project.images.map((i) => i.id))
+  // PLANNED OVER THE FEED, because that is what `logicalTransitions`
+  // iterates and what `t.position` indexes into. Planning over
+  // `project.images` meant feed position N looked up the plan for library
+  // position N — a different pair entirely whenever the feed had been
+  // reordered, which is exactly what accepting a proposal does.
+  const plans = planSequence(analysis, getFeedSequenceIds(project))
 
   // EVERY logical transition, not only the ones with a stored row. The
   // `if (!transition) continue` that used to be here is what made a
@@ -294,7 +305,12 @@ export function applyAnalysisPromptToTransition(
   // rebuild would write for the very same pair — and the next rebuild
   // would immediately list it as needing an update. Two paths that claim
   // to produce "the analysis prompt" must produce the same one.
-  const plans = planSequence(analysis, project.images.map((i) => i.id))
+  // PLANNED OVER THE FEED, because that is what `logicalTransitions`
+  // iterates and what `t.position` indexes into. Planning over
+  // `project.images` meant feed position N looked up the plan for library
+  // position N — a different pair entirely whenever the feed had been
+  // reordered, which is exactly what accepting a proposal does.
+  const plans = planSequence(analysis, getFeedSequenceIds(project))
 
   for (const t of logicalTransitions(project, defaultDurationSec())) {
     if (t.pairKey !== pairKey) continue

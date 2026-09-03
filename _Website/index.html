@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <meta
+    name="description"
+    content="Image2Transition - AI-powered image transitions. Website currently under development."
+  />
+
+  <title>Image2Transition</title>
+
+  <!-- The standalone symbol, as the tab icon. -->
+  <link rel="icon" type="image/png" href="assets/logo.png" />
+  <meta name="theme-color" content="#030303" />
+
+  <style>
+    :root {
+      --background: #030303;
+      --surface: #0b0b0d;
+      --surface-hover: #111116;
+      --text: #ffffff;
+      --muted: #8d8d95;
+      --blue: #43b5fc;
+      --border: rgba(255, 255, 255, 0.09);
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      min-height: 100vh;
+      background:
+        radial-gradient(
+          circle at 50% 15%,
+          rgba(67, 181, 252, 0.08),
+          transparent 30%
+        ),
+        var(--background);
+
+      color: var(--text);
+
+      font-family:
+        Inter,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Roboto,
+        Helvetica,
+        Arial,
+        sans-serif;
+
+      display: flex;
+      align-items: center;
+      justify-content: center;
+
+      padding: 40px 22px;
+    }
+
+    .page {
+      width: 100%;
+      max-width: 850px;
+
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+
+      text-align: center;
+    }
+
+    /* -------------------------
+       LOGO
+    -------------------------- */
+
+    /* Sized against the trimmed artwork. The supplied file carried about
+       a third of its width and half its height as transparent margin, so
+       the old 620px box drew a much smaller logo than it looked like it
+       would and the spacing below it was mostly empty pixels. Trimmed,
+       the width is the logo, and the gap underneath is real. */
+    .logo {
+      width: min(545px, 88vw);
+      height: auto;
+
+      display: block;
+
+      margin-bottom: 62px;
+
+      filter:
+        drop-shadow(0 0 18px rgba(67, 181, 252, 0.12))
+        drop-shadow(0 0 45px rgba(67, 181, 252, 0.06));
+    }
+
+    /* -------------------------
+       STATUS
+    -------------------------- */
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+
+      margin-bottom: 23px;
+
+      padding: 8px 14px;
+
+      border: 1px solid var(--border);
+      border-radius: 100px;
+
+      background: rgba(255, 255, 255, 0.025);
+
+      color: #b4b4bc;
+
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+
+      background: var(--blue);
+      border-radius: 50%;
+
+      /* Enough to read as lit, short of the neon halo the brief rules out. */
+      box-shadow: 0 0 8px rgba(67, 181, 252, 0.55);
+    }
+
+    /* -------------------------
+       TEXT
+    -------------------------- */
+
+    h1 {
+      max-width: 750px;
+
+      font-size: clamp(40px, 7vw, 72px);
+      line-height: 1.02;
+
+      font-weight: 600;
+      letter-spacing: -0.045em;
+
+      margin-bottom: 25px;
+    }
+
+    .intro {
+      max-width: 610px;
+
+      color: var(--muted);
+
+      font-size: clamp(16px, 2vw, 19px);
+      line-height: 1.7;
+
+      margin-bottom: 45px;
+    }
+
+    /* -------------------------
+       CONTACT
+    -------------------------- */
+
+    .contact-title {
+      font-size: 13px;
+      color: #62626a;
+
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+
+      margin-bottom: 16px;
+    }
+
+    .contacts {
+      width: 100%;
+      max-width: 560px;
+
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .contact-card {
+      width: 100%;
+
+      display: flex;
+      align-items: center;
+
+      padding: 16px 18px;
+
+      background: var(--surface);
+
+      border: 1px solid var(--border);
+      border-radius: 14px;
+
+      color: var(--text);
+      text-decoration: none;
+
+      transition:
+        transform 160ms ease,
+        background 160ms ease,
+        border-color 160ms ease;
+    }
+
+    .contact-card:hover {
+      transform: translateY(-2px);
+
+      background: var(--surface-hover);
+
+      border-color: rgba(67, 181, 252, 0.32);
+    }
+
+    .icon-container {
+      width: 42px;
+      height: 42px;
+
+      flex: 0 0 42px;
+
+      display: flex;
+      align-items: center;
+      justify-content: center;
+
+      margin-right: 15px;
+
+      border-radius: 10px;
+
+      background: rgba(67, 181, 252, 0.08);
+      border: 1px solid rgba(67, 181, 252, 0.12);
+    }
+
+    .icon-container svg {
+      width: 21px;
+      height: 21px;
+    }
+
+    .contact-info {
+      text-align: left;
+
+      display: flex;
+      flex-direction: column;
+
+      min-width: 0;
+    }
+
+    .contact-label {
+      color: #777780;
+
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+
+      margin-bottom: 3px;
+    }
+
+    .contact-value {
+      color: #f4f4f5;
+
+      font-size: 15px;
+      font-weight: 500;
+
+      overflow-wrap: anywhere;
+    }
+
+    .arrow {
+      margin-left: auto;
+
+      color: #4d4d55;
+
+      font-size: 18px;
+
+      padding-left: 15px;
+
+      transition:
+        transform 160ms ease,
+        color 160ms ease;
+    }
+
+    .contact-card:hover .arrow {
+      transform: translateX(3px);
+      color: var(--blue);
+    }
+
+    /* -------------------------
+       THANK YOU
+    -------------------------- */
+
+    .thanks {
+      margin-top: 52px;
+
+      color: #55555c;
+
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .thanks strong {
+      color: #8b8b92;
+      font-weight: 500;
+    }
+
+    /* -------------------------
+       MOBILE
+    -------------------------- */
+
+    @media (max-width: 600px) {
+      body {
+        padding: 32px 18px;
+      }
+
+      .logo {
+        width: min(430px, 100%);
+        margin-bottom: 42px;
+      }
+
+      h1 {
+        font-size: 44px;
+      }
+
+      .intro {
+        font-size: 16px;
+        margin-bottom: 38px;
+      }
+
+      .contact-card {
+        padding: 14px;
+      }
+
+      .icon-container {
+        width: 40px;
+        height: 40px;
+        flex-basis: 40px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <main class="page">
+
+    <!--
+      The supplied artwork, trimmed to its own edges. Intrinsic size is
+      given so the page reserves the right box before the file arrives
+      and nothing below it jumps as it loads.
+    -->
+    <img
+      src="assets/logo-full.png"
+      alt="Image2Transition"
+      class="logo"
+      width="1467"
+      height="484"
+    />
+
+    <div class="status">
+      <span class="status-dot"></span>
+      Currently in development
+    </div>
+
+    <h1>
+      Website is being built.
+    </h1>
+
+    <p class="intro">
+      Image2Transition is currently under development.
+      For inquiries, questions or business opportunities,
+      please get in touch.
+    </p>
+
+    <div class="contact-title">
+      Contact
+    </div>
+
+    <div class="contacts">
+
+      <!-- EMAIL -->
+      <a
+        class="contact-card"
+        href="mailto:pontus@image2transition.com"
+      >
+
+        <div class="icon-container">
+
+          <!-- Email icon -->
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+            aria-hidden="true"
+          >
+            <path
+              d="M4 5H20C21.1046 5 22 5.89543 22 7V17C22 18.1046 21.1046 19 20 19H4C2.89543 19 2 18.1046 2 17V7C2 5.89543 2.89543 5 4 5Z"
+              stroke="#43B5FC"
+              stroke-width="1.8"
+              stroke-linejoin="round"
+            />
+
+            <path
+              d="M3 7L12 13L21 7"
+              stroke="#43B5FC"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+
+        </div>
+
+        <div class="contact-info">
+          <span class="contact-label">
+            Email
+          </span>
+
+          <span class="contact-value">
+            pontus@image2transition.com
+          </span>
+        </div>
+
+        <span class="arrow">→</span>
+
+      </a>
+
+
+      <!-- WHATSAPP -->
+      <a
+        class="contact-card"
+        href="https://wa.me/46709821065"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+
+        <div class="icon-container">
+
+          <!-- Official WhatsApp brand mark shape -->
+          <svg
+            viewBox="0 0 32 32"
+            xmlns="http://www.w3.org/2000/svg"
+            aria-hidden="true"
+          >
+            <path
+              fill="#25D366"
+              d="M16.004 3C8.832 3 3 8.815 3 15.963c0 2.279.597 4.505 1.728 6.464L3 29l6.744-1.766a13.046 13.046 0 0 0 6.254 1.592h.006C23.174 28.826 29 23.01 29 15.963 29 8.815 23.174 3 16.004 3Zm0 23.638h-.004a10.84 10.84 0 0 1-5.525-1.51l-.395-.234-4.003 1.05 1.068-3.899-.257-.4a10.73 10.73 0 0 1-1.655-5.682c0-5.924 4.833-10.75 10.775-10.75 5.94 0 10.77 4.826 10.77 10.75 0 5.925-4.83 10.675-10.774 10.675Z"
+            />
+
+            <path
+              fill="#25D366"
+              d="M21.91 18.493c-.324-.162-1.918-.944-2.216-1.051-.298-.108-.515-.162-.731.162-.217.324-.84 1.051-1.03 1.268-.19.216-.38.243-.705.081-.324-.162-1.369-.503-2.607-1.605-.963-.841-1.613-1.879-1.803-2.203-.19-.324-.02-.499.143-.66.146-.145.325-.378.487-.567.162-.189.216-.324.325-.54.108-.216.054-.405-.027-.567-.081-.162-.731-1.754-1.002-2.402-.264-.631-.532-.545-.731-.555l-.623-.011c-.217 0-.569.081-.867.405-.298.324-1.138 1.105-1.138 2.699 0 1.593 1.165 3.133 1.327 3.349.163.216 2.291 3.49 5.55 4.894.775.334 1.38.533 1.852.682.778.246 1.486.211 2.046.128.624-.092 1.918-.781 2.189-1.537.271-.756.271-1.404.19-1.539-.081-.135-.298-.216-.623-.378Z"
+            />
+          </svg>
+
+        </div>
+
+        <div class="contact-info">
+          <span class="contact-label">
+            WhatsApp
+          </span>
+
+          <span class="contact-value">
+            +46 70 982 10 65
+          </span>
+        </div>
+
+        <span class="arrow">→</span>
+
+      </a>
+
+    </div>
+
+    <p class="thanks">
+      Thank you for your interest in
+      <strong>Image2Transition.</strong>
+    </p>
+
+  </main>
+
+</body>
+</html>

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAppState } from '../../state/AppState'
 import type { JobClipStatus, JobKind, JobStatus, QueueJob } from '../../types'
 import { formatPrice } from '../../../../shared/pricing'
+import { canResumeProviderTask } from '../../../../shared/generationState'
 
 /** The provider status written when our status path turns out to be wrong.
  * Mirrors STATUS_ENDPOINT_UNVERIFIED in the generation service. */
@@ -150,8 +151,18 @@ function JobRow({ job, canReorder }: { job: QueueJob; canReorder: boolean }): Re
 
   // Polling has nothing left to learn once the task is done AND the media is
   // here. Offering it then just invites pointless requests.
+  //
+  // Nor when the provider REFUSED the request. History showed "Resume
+  // polling" on every row that had ever been given a task id, so a 422
+  // rejection — where that id is dead — read as recoverable and led back
+  // to the same rejection. `canResumeProviderTask` is the same decision
+  // the editor makes, so the two views cannot disagree about whether a
+  // task is still worth tracking.
   const canResumePolling =
-    taskId !== null && !waiting && job.status !== 'processing' && !clipsReady
+    canResumeProviderTask(job.provider, job.note) &&
+    !waiting &&
+    job.status !== 'processing' &&
+    !clipsReady
 
   return (
     <article className={`queue-row status-${job.status}`}>
@@ -374,9 +385,14 @@ function JobRow({ job, canReorder }: { job: QueueJob; canReorder: boolean }): Re
               type="button"
               className="btn btn-ghost btn-tiny"
               title={
-                taskId
+                // The middle case is the one that used to lie: a task id
+                // whose task the provider refused promises a free resume
+                // it cannot deliver.
+                taskId && canResumePolling
                   ? 'Re-queue with the original frozen price — the existing remote task is resumed, never resubmitted'
-                  : 'Re-queue with the original frozen price'
+                  : taskId
+                    ? 'The provider refused this request — re-queueing cannot recover it. Start a new generation from the project instead.'
+                    : 'Re-queue with the original frozen price'
               }
               onClick={() => void window.f2f.queue.retry(job.id)}
             >

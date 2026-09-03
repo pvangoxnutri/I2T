@@ -22,11 +22,16 @@ import { BrandMark } from '../common/Brand'
 export function EditorToolbar({
   project,
   onBack,
-  onOpenExport
+  onOpenExport,
+  onOpenCustomer,
+  onOpenCatalogue
 }: {
   project: Project
   onBack: () => void
   onOpenExport: () => void
+  onOpenCustomer: () => void
+  /** Every clip this project has ever generated. */
+  onOpenCatalogue: () => void
 }): React.JSX.Element {
   const { queue, renameProject, settings } = useAppState()
   const [spend, setSpend] = useState<ProjectSpendSummary | null>(null)
@@ -90,6 +95,18 @@ export function EditorToolbar({
       </span>
 
       <span className="toolbar-divider" aria-hidden />
+
+      <button type="button" className="btn btn-ghost btn-tiny" onClick={onOpenCustomer}>
+        Customer…
+      </button>
+
+      {/* The catalogue is the project's generation HISTORY — every clip
+          ever produced, including ones no longer in the sequence. It had
+          no entry point at all until now, which made "nothing is ever
+          lost" a promise nobody could check. */}
+      <button type="button" className="btn btn-ghost btn-tiny" onClick={onOpenCatalogue}>
+        History…
+      </button>
 
       <button type="button" className="btn btn-ghost btn-tiny" onClick={onOpenExport}>
         Export…

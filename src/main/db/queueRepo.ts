@@ -55,6 +55,7 @@ interface JobRow {
   provider_submitted_at: number | null
   provider_last_polled_at: number | null
   provider_meta_json: string | null
+  provider_failure_json: string | null
   estimated_cost: number | null
   actual_cost: number | null
   estimated_credits: number | null
@@ -92,6 +93,12 @@ function toJob(row: JobRow): QueueJob {
           providerMeta: row.provider_meta_json
             ? (JSON.parse(row.provider_meta_json) as Record<string, unknown>)
             : null,
+          // OUR classification of why a provider call failed — the thing
+          // that separates a refusal (task id dead) from lost contact
+          // (task may still be running). See migration 23.
+          providerFailure: row.provider_failure_json
+            ? (JSON.parse(row.provider_failure_json) as ProviderJobState['providerFailure'])
+            : null,
           estimatedCost: row.estimated_cost,
           actualCost: row.actual_cost,
           estimatedCredits: row.estimated_credits ?? null,
@@ -114,6 +121,7 @@ function providerParams(p: ProviderJobState | undefined): unknown[] {
     p?.submittedAt ?? null,
     p?.lastPolledAt ?? null,
     p?.providerMeta ? JSON.stringify(p.providerMeta) : null,
+    p?.providerFailure ? JSON.stringify(p.providerFailure) : null,
     p?.estimatedCost ?? null,
     p?.actualCost ?? null,
     p?.estimatedCredits ?? null,
@@ -138,9 +146,9 @@ export function insertJob(job: QueueJob): void {
         error, price_json, metadata_json, output_path,
         provider, provider_model, provider_dry_run, provider_task_id,
         provider_status, provider_submitted_at, provider_last_polled_at,
-        provider_meta_json, estimated_cost, actual_cost,
+        provider_meta_json, provider_failure_json, estimated_cost, actual_cost,
         estimated_credits, actual_credits, retry_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       job.id,
       job.projectId,
@@ -174,7 +182,7 @@ export function updateJob(job: QueueJob): void {
        error = ?, price_json = ?, metadata_json = ?, output_path = ?,
        provider = ?, provider_model = ?, provider_dry_run = ?, provider_task_id = ?,
        provider_status = ?, provider_submitted_at = ?, provider_last_polled_at = ?,
-       provider_meta_json = ?, estimated_cost = ?, actual_cost = ?,
+       provider_meta_json = ?, provider_failure_json = ?, estimated_cost = ?, actual_cost = ?,
        estimated_credits = ?, actual_credits = ?, retry_count = ?
      WHERE id = ?`,
     [

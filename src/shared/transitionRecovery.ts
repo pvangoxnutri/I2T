@@ -105,8 +105,11 @@ export function transitionRecovery(
   // Only reached with no clip and nothing running. The remote task state
   // — not the local status word — decides whether anything must be paid
   // for again.
-  const action = resolveGenerationAction(job?.provider)
   const reason = sanitizeReason(job?.note)
+  // The recorded message is passed in so a job that failed BEFORE the
+  // structured provider code existed still resolves correctly — those
+  // rows kept the provider's own sentence and nothing else.
+  const action = resolveGenerationAction(job?.provider, job?.note)
 
   if (action === 'download') {
     return {
@@ -128,7 +131,13 @@ export function transitionRecovery(
         'A paid request is already running at the provider. Resuming continues to track it and costs nothing.',
       costsMoney: false,
       jobId: job?.id ?? null,
-      secondary: null
+      // BOTH ARE LEGITIMATE HERE, AND THEY ARE NOT THE SAME THING.
+      //
+      // Resume tracks the request already paid for. Regenerate abandons
+      // waiting and buys another. Offering only Resume is what turned it
+      // into the de-facto "try again" button — the one action that
+      // cannot produce a different result, since it is the same task.
+      secondary: { kind: 'regenerate', label: REGENERATE_LABEL, costsMoney: true }
     }
   }
 
@@ -139,7 +148,14 @@ export function transitionRecovery(
       // A remote task that FAILED cannot be resumed or downloaded — there
       // is nothing there. Regenerating is the only way forward, and it is
       // a new paid request, which the label says out loud.
-      detail: reason ?? 'The generation failed and there is no remote result to recover.',
+      //
+      // SAYS SO EXPLICITLY when the provider refused the request. The
+      // operator has just been offered Resume on this transition and had
+      // it lead back to the same rejection; "cannot be resumed" is the
+      // sentence that stops them looking for it.
+      detail: reason
+        ? `${reason} This generation cannot be resumed.`
+        : 'The generation failed and there is no remote result to recover.',
       costsMoney: true,
       jobId: job?.id ?? null,
       secondary: null

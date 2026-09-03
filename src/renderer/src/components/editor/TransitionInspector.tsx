@@ -2,12 +2,19 @@ import { useEffect, useState } from 'react'
 import { useAppState } from '../../state/AppState'
 import { defaultTransitionSettings, transitionKey, type Project } from '../../types'
 import { LiveGenerateDialog } from './LiveGenerateDialog'
-import type { LiveConfirmationPayload } from '../../../../preload/index'
+import type { LiveConfirmationPayload, ProviderMetadataPayload } from '../../../../preload/index'
+import {
+  durationChoices,
+  resolveTransitionDuration,
+  stepDuration
+} from '../../../../shared/transitionDuration'
 import { markManuallyEdited } from '../../../../shared/promptPlanner'
 import { relateImages, type PropertyAnalysis } from '../../../../shared/propertyAnalysis'
 import { attemptsForPair, formatSpend, type GenerationCostEntry } from '../../../../shared/costLedger'
 import { latestJobForPair, transitionRecovery } from '../../../../shared/transitionRecovery'
 import { NEUTRAL_MOTION, planSequence } from '../../../../shared/transitionPlan'
+import { pairIndexOf } from '../../../../shared/previewSource'
+import { getFeedImages } from '../../../../shared/feedSequence'
 import { MODE_LABEL, type ResolvedModeRow } from '../../../../shared/transitionMode'
 import { orientationLabel } from '../../../../shared/transitionEvidence'
 
@@ -43,15 +50,35 @@ export function TransitionInspector({
   const [liveConfirm, setLiveConfirm] = useState<LiveConfirmationPayload | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [entries, setEntries] = useState<GenerationCostEntry[]>([])
+  const [providerCatalog, setProviderCatalog] = useState<ProviderMetadataPayload[]>([])
+  const [confirmClearClip, setConfirmClearClip] = useState(false)
+  /** Asked before a NEW paid submit, separately from Resume. */
+  const [confirmRegenerate, setConfirmRegenerate] = useState(false)
   const [clipInfo, setClipInfo] = useState<{ exists: boolean; bytes: number } | null>(null)
   const [note, setNote] = useState<string | null>(null)
 
-  const index = project.images.findIndex(
-    (img, i) =>
-      i < project.images.length - 1 && transitionKey(img.id, project.images[i + 1].id) === pairKey
-  )
-  const start = index >= 0 ? project.images[index] : null
-  const end = index >= 0 ? project.images[index + 1] : null
+  /**
+   * THE PAIR, LOCATED IN THE FEED.
+   *
+   * ── THE BUG THIS FIXES ─────────────────────────────────────────────
+   *
+   * This searched `project.images` — the imported LIBRARY — while the
+   * preview header resolved the very same `pairKey` through
+   * `pairIndexOf`, which reads the FEED. One selection, two lookup
+   * lists, and they disagree the moment the feed stops matching library
+   * order — which is precisely what accepting a proposal does.
+   *
+   * The visible result was a header reading "TRANSITION 1 → 2" above an
+   * inspector saying "Select a transition in the timeline", about the
+   * transition that was already selected.
+   *
+   * `pairIndexOf` is the canonical lookup and is now the only one used,
+   * so the two panes cannot describe different things again.
+   */
+  const feedImages = getFeedImages(project)
+  const index = pairKey ? pairIndexOf(project, pairKey) : -1
+  const start = index >= 0 ? feedImages[index] : null
+  const end = index >= 0 ? feedImages[index + 1] : null
 
   /**
    * A TRANSITION EXISTS AS SOON AS TWO PHOTOS ARE ADJACENT.
@@ -86,6 +113,11 @@ export function TransitionInspector({
     void window.f2f.projects.cost.entries(project.id).then(setEntries)
   }, [project.id, pairKey, project.updatedAt])
 
+  // Provider capabilities drive which durations may be offered.
+  useEffect(() => {
+    void window.f2f.providers.catalog().then(setProviderCatalog)
+  }, [])
+
   useEffect(() => {
     const stored = transition?.clip?.storedName
     if (!stored) {
@@ -117,10 +149,14 @@ export function TransitionInspector({
   const hasAnalysis = analysis !== null && analysis.rooms.length > 0
   // The plan for THIS pair, from the whole-sequence planner so continuity
   // is the same value the prompt was built with.
+  // PLANNED OVER THE FEED, because `index` is a FEED position. Planning
+  // over the library meant feed position N read the plan for library
+  // position N — a different pair, and therefore safety reasoning and a
+  // motion instruction belonging to two other photographs.
   const plan =
     planSequence(
       analysis,
-      project.images.map((i) => i.id)
+      feedImages.map((i) => i.id)
     )[index] ?? null
   const relation = analysis ? relateImages(analysis, start.id, end.id) : { kind: 'unknown' as const }
   const attempts = attemptsForPair(entries, pairKey)
@@ -129,6 +165,28 @@ export function TransitionInspector({
   )
   const providerName = provider?.id === 'fal' ? 'fal.ai' : 'Kling'
   const pendingDownload = transition.clip === null && attempts.length > 0
+
+  // WHAT THIS MODEL CAN ACTUALLY BE ASKED FOR.
+  //
+  // Read from the provider's published capability rather than a literal.
+  // The control used to offer [5, 10] from a comment about a model this
+  // build no longer points at, while the configured endpoint accepts every
+  // integer from 3 to 15 — so most of the range was unreachable, and the
+  // reason was a stale hardcode nobody could see from the UI.
+  const allowedDurations = durationChoices(
+    providerCatalog
+      .find((p) => p.id === provider?.id)
+      ?.models.find((m) => m.id === provider?.model)?.durationsSec
+  )
+  const durationSec = resolveTransitionDuration(
+    transition,
+    settings.exportDefaults.defaultTransitionDurationSec
+  )
+  // A cut generates nothing, so a generation length is not a question that
+  // applies to it.
+  const generatesClip = mode ? mode.effectiveMode === 'ai' : true
+  const setDuration = (next: number): void =>
+    updateTransition(project.id, start.id, end.id, { durationSec: next })
 
   const openGenerate = (): void => {
     void window.f2f.generation.liveConfirmation(project.id, pairKey).then((data) => {
@@ -190,7 +248,17 @@ export function TransitionInspector({
               className={`transition-mode-option${
                 (transition.mode ?? 'auto') === value ? ' is-active' : ''
               }`}
-              onClick={() => updateTransition(project.id, start.id, end.id, { mode: value })}
+              // MARKED AS THE OPERATOR'S OWN DECISION. This is the only
+              // place a human sets a mode, and it is what distinguishes an
+              // informed AI override — allowed with a stated risk — from
+              // one the analyzer proposed, which needs the accepted map
+              // that justified it before money is spent.
+              onClick={() =>
+                updateTransition(project.id, start.id, end.id, {
+                  mode: value,
+                  modeProvenance: 'manual'
+                })
+              }
             >
               {label}
             </button>
@@ -461,23 +529,50 @@ export function TransitionInspector({
           <div className="inspector-generation">
             <Field label="Provider" value={providerName} />
             <Field label="Model" value={provider?.model ?? '—'} />
-            <label className="inspector-inline">
-              <span>Duration</span>
-              <select
-                value={String(transition.durationSec)}
-                onChange={(e) =>
-                  updateTransition(project.id, start.id, end.id, {
-                    durationSec: Number(e.target.value)
-                  })
-                }
-              >
-                {[5, 10].map((s) => (
-                  <option key={s} value={s}>
-                    {s}s
-                  </option>
-                ))}
-              </select>
-            </label>
+            {/* ── GENERATION LENGTH ────────────────────────────────────
+                A setting, not a result: changing it sends nothing, costs
+                nothing and leaves any existing clip exactly as it was. It
+                describes the next generation of THIS transition. */}
+            {generatesClip && allowedDurations.length > 0 && (
+              <div className="inspector-duration">
+                <span className="inspector-duration-label">Duration</span>
+                <div className="inspector-duration-control">
+                  <button
+                    type="button"
+                    className="inspector-duration-step"
+                    aria-label="Shorter"
+                    disabled={durationSec <= allowedDurations[0]}
+                    onClick={() => setDuration(stepDuration(durationSec, -1, allowedDurations))}
+                  >
+                    –
+                  </button>
+                  <span className="inspector-duration-value">{durationSec} s</span>
+                  <button
+                    type="button"
+                    className="inspector-duration-step"
+                    aria-label="Longer"
+                    disabled={durationSec >= allowedDurations[allowedDurations.length - 1]}
+                    onClick={() => setDuration(stepDuration(durationSec, 1, allowedDurations))}
+                  >
+                    +
+                  </button>
+                  <span className="inspector-duration-range">
+                    {allowedDurations[0]}–{allowedDurations[allowedDurations.length - 1]} s
+                  </span>
+                </div>
+                {transition.clip && (
+                  <span className="inspector-duration-note">
+                    Applies to the next generation. The existing clip is unchanged.
+                  </span>
+                )}
+              </div>
+            )}
+            {!generatesClip && (
+              <p className="inspector-duration-na">
+                This transition is a {MODE_LABEL[mode!.effectiveMode].toLowerCase()}, so no clip is
+                generated and no duration applies.
+              </p>
+            )}
             <Field
               label="Spent on this transition"
               value={
@@ -533,8 +628,38 @@ export function TransitionInspector({
                     : 'Costs nothing — the provider work is already paid for'
                 }
               >
-                {recovery.kind === 'preview' ? `Regenerate — costs again` : recovery.label}
+                {/* NAMED, NOT ABBREVIATED. "Regenerate clip" says what
+                    is produced, which is what separates it at a glance
+                    from the Delete beside it — one makes a new clip, the
+                    other stops using this one. */}
+                {recovery.kind === 'preview'
+                  ? 'Regenerate clip — costs again'
+                  : recovery.kind === 'regenerate'
+                    ? 'Regenerate clip'
+                    : recovery.label}
               </button>
+              {/* ── A DELIBERATE NEW GENERATION ───────────────────────
+                  `recovery.secondary` was computed by the shared logic
+                  and rendered nowhere, so whenever a paid task already
+                  existed the only visible action was Resume — which
+                  merely keeps tracking that same task and can never
+                  produce a different clip. Resume became the de-facto
+                  "try again" button while being the one action that
+                  cannot try anything.
+
+                  Regenerate is a NEW paid submit. It never replaces or
+                  deletes an earlier generation: those stay in History,
+                  and the new one becomes active when it succeeds. */}
+              {recovery.secondary?.kind === 'regenerate' && (
+                <button
+                  type="button"
+                  className="btn btn-tiny btn-regenerate"
+                  onClick={() => setConfirmRegenerate(true)}
+                  title="Submits a NEW paid request. Existing generations stay in History."
+                >
+                  {transition.clip ? 'Regenerate clip — costs again' : 'Generate new clip'}
+                </button>
+              )}
               <button
                 type="button"
                 className="btn btn-ghost btn-tiny"
@@ -547,6 +672,33 @@ export function TransitionInspector({
               >
                 Add to Queue
               </button>
+              {/* ── DETACH, NEVER DESTROY ────────────────────────────
+                  Removes only which clip this transition USES. The
+                  generation, its provider metadata and the file itself
+                  stay in the catalogue, which is what makes this
+                  reversible — the same clip can be re-attached from
+                  History without paying again.
+
+                  ── WHY IT IS PUSHED APART AND STYLED AS DESTRUCTIVE ──
+                  This sat immediately beside "Add to Queue" as a third
+                  identical ghost button, so the one action that throws
+                  work away looked exactly like the two that do not. It
+                  is now separated from the constructive actions and
+                  reads as destructive, and its label names precisely
+                  what goes — the CLIP, not the transition and not the
+                  image. */}
+              {transition.clip && (
+                <div className="inspector-danger">
+                  <button
+                    type="button"
+                    className="btn btn-danger-ghost btn-tiny"
+                    onClick={() => setConfirmClearClip(true)}
+                    title="Removes only which clip this transition uses. The generation stays in History and can be re-attached without paying again."
+                  >
+                    Delete clip
+                  </button>
+                </div>
+              )}
             </div>
             )}
             <p className={`inspector-cost-note${recovery.costsMoney ? '' : ' is-free'}`}>
@@ -684,6 +836,95 @@ export function TransitionInspector({
             })
           }}
         />
+      )}
+
+      {/* ── A NEW PAID GENERATION IS A DECISION ────────────────────────
+          Stated before the provider confirmation rather than after,
+          because the thing being agreed to here is "buy another one",
+          which is different from the cost dialog's "this is what it
+          costs". It also says plainly what is NOT lost, so an operator
+          is never guessing whether regenerating discards the clip they
+          already have. */}
+      {confirmRegenerate && (
+        <div className="dialog-backdrop" onClick={() => setConfirmRegenerate(false)}>
+          <div className="dialog-card" onClick={(e) => e.stopPropagation()}>
+            <h3 className="dialog-title">Generate a new clip?</h3>
+            <p className="dialog-body">
+              This creates a new paid generation for this transition. Your existing generations
+              remain in History and can be attached again at any time.
+            </p>
+            {recovery.kind === 'resume' && (
+              <p className="dialog-body">
+                A previous request is still running at the provider. Generating now starts a
+                separate one — it does not cancel or replace the request already paid for.
+              </p>
+            )}
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="btn btn-ghost btn-tiny"
+                onClick={() => setConfirmRegenerate(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-tiny"
+                onClick={() => {
+                  setConfirmRegenerate(false)
+                  // Straight into the normal paid path: the provider
+                  // confirmation, its cost figure and its one-shot token
+                  // are not bypassed by this dialog.
+                  openGenerate()
+                }}
+              >
+                Generate new clip
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Detaching is reversible, but the operator should still know what
+          it does and — more importantly — what it does NOT do. */}
+      {confirmClearClip && (
+        <div className="dialog-backdrop" onClick={() => setConfirmClearClip(false)}>
+          <div className="dialog-card" onClick={(e) => e.stopPropagation()}>
+            <h3 className="dialog-title">Delete this transition’s clip?</h3>
+            <p className="dialog-body">
+              Only the clip this transition currently uses is removed. The transition itself, both
+              images and the Transition Feed are untouched.
+            </p>
+            <p className="dialog-body">
+              The generated clip will remain available in Project Catalogue, and can be attached
+              to this transition again without generating — or paying — a second time.
+            </p>
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="btn btn-ghost btn-tiny"
+                onClick={() => setConfirmClearClip(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger btn-tiny"
+                onClick={() => {
+                  void window.f2f.projects.transitions
+                    .clearClip(project.id, pairKey)
+                    .then((res) => {
+                      setConfirmClearClip(false)
+                      refreshProjects()
+                      setNote(res.ok ? 'Clip removed. It is still in Project Catalogue.' : res.reason)
+                    })
+                }}
+              >
+                Remove clip
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </section>
   )

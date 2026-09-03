@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { transitionKey, type Project } from '../../types'
+import { getFeedImages } from '../../../../shared/feedSequence'
 import {
   attemptsForPair,
   COST_CATEGORY_LABEL,
@@ -47,9 +48,15 @@ export function ProductionCostPanel({ project }: { project: Project }): React.JS
   const byCategory = spendByCategory(entries, currency)
   // Pairs in the order the operator sees them, so the history reads like
   // the timeline rather than like the database.
-  const pairs = project.images.slice(0, -1).map((image, i) => ({
+  //
+  // FROM THE FEED, not the library: a transition exists between two
+  // images that are adjacent IN THE VIDEO. Built from library order this
+  // listed pairs the project never had and missed the ones it was
+  // actually charged for.
+  const feedImages = getFeedImages(project)
+  const pairs = feedImages.slice(0, -1).map((image, i) => ({
     label: `Image ${i + 1} → Image ${i + 2}`,
-    attempts: attemptsForPair(entries, transitionKey(image.id, project.images[i + 1].id))
+    attempts: attemptsForPair(entries, transitionKey(image.id, feedImages[i + 1].id))
   }))
   const withHistory = pairs.filter((p) => p.attempts.length > 0)
 

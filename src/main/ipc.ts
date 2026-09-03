@@ -18,6 +18,12 @@ import {
   getSettingsJson,
   saveSettingsJson
 } from './db/projectsRepo'
+import { getAllProjectGenerations } from './db/generationCatalogueRepo'
+import { logProposalEvidence } from './analysisDiagnostics'
+import {
+  attachGenerationToTransition,
+  clearActiveClip
+} from './services/transitionClipService'
 import {
   attachClipFromPath,
   deleteProjectFiles,
@@ -28,7 +34,20 @@ import {
   type ImportItem
 } from './files'
 import { ffmpegStatus } from './services/ffmpegService'
-import { readAnalysis, saveAnalysis } from './db/analysisRepo'
+import {
+  readAnalysis,
+  readAnalysisDraft,
+  saveAnalysis,
+  saveAnalysisDraft
+} from './db/analysisRepo'
+import {
+  readTransitionDraft,
+  saveTransitionDraft,
+  markTransitionDraftOutdated,
+  deleteTransitionDraft,
+  acceptTransitionDraft,
+  type PersistedTransitionDraft
+} from './db/transitionAnalysisRepo'
 import {
   applyAnalysisPromptToTransition,
   planPromptRebuild,
@@ -78,6 +97,9 @@ import {
 import { ALL_CAPABILITIES, type AnalyzerRequest } from '../shared/analyzerTypes'
 import { diffAnalyses } from '../shared/analysisDiff'
 import { planSequence } from '../shared/transitionPlan'
+import { proposeFeedOrder, proposeTransitionModes } from '../shared/feedProposal'
+import { getFeedImages, getFeedSequenceIds } from '../shared/feedSequence'
+import { extractTransitionAnalysis } from '../shared/transitionAnalysisExtractor'
 
 /**
  * Builds the provider-independent analyzer request.
@@ -148,6 +170,7 @@ import {
   buildEditorPreview,
   compareAssembly,
   editorPreviewState,
+  exportReadiness,
   startExport,
   type ExportKind,
   type ExportOverlays,
@@ -214,6 +237,14 @@ export function registerIpc(): void {
 
   ipcMain.handle('analysis:get', (_e, projectId: string): PropertyAnalysis =>
     readAnalysis(projectId)
+  )
+
+  /**
+   * The last analyzer DRAFT — what the model returned, before anyone
+   * accepted anything. Read-only, and null when no run has been stored.
+   */
+  ipcMain.handle('analysis:draft', (_e, projectId: string): PropertyAnalysis | null =>
+    readAnalysisDraft(projectId)
   )
 
   /**
@@ -595,7 +626,7 @@ export function registerIpc(): void {
       // who fixed a wrong room assignment expects the transition prompts to
       // follow the fix, not the model's mistake.
       applyImageOverrides(readAnalysis(projectId), listOverrides(projectId)),
-      project.images.map((i) => i.id),
+      getFeedImages(project).map((i) => i.id),
       reviewMap(projectId, 'accepted')
     )
   })
@@ -617,7 +648,8 @@ export function registerIpc(): void {
     const project = listProjects().find((p) => p.id === projectId)
     if (!project) return []
     const analysis = applyImageOverrides(readAnalysis(projectId), listOverrides(projectId))
-    const imageIds = project.images.map((i) => i.id)
+    const feedImages = getFeedImages(project)
+    const imageIds = feedImages.map((i) => i.id)
     const plans = planSequence(analysis, imageIds, reviewMap(projectId, 'accepted'))
 
     return logicalTransitions(project, storedSettings()?.exportDefaults.defaultTransitionDurationSec ?? 5).map(
@@ -648,6 +680,306 @@ export function registerIpc(): void {
         }
       }
     )
+  })
+
+  // ── Transition Analysis Draft Persistence ─────────────────────────────
+
+  ipcMain.handle(
+    'transitionAnalysis:read',
+    (_e, projectId: string): PersistedTransitionDraft | null => readTransitionDraft(projectId)
+  )
+
+  ipcMain.handle(
+    'transitionAnalysis:save',
+    (_e, projectId: string, draft: any): PersistedTransitionDraft => {
+      return saveTransitionDraft(projectId, draft)
+    }
+  )
+
+  ipcMain.handle('transitionAnalysis:markOutdated', (_e, projectId: string) => {
+    markTransitionDraftOutdated(projectId)
+  })
+
+  ipcMain.handle('transitionAnalysis:accept', (_e, projectId: string) => {
+    acceptTransitionDraft(projectId)
+  })
+
+  ipcMain.handle('transitionAnalysis:delete', (_e, projectId: string) => {
+    deleteTransitionDraft(projectId)
+  })
+
+  // ── Transition Feed proposal ──────────────────────────────────────────
+  //
+  // AI-generated suggestion for feed order.
+  // Uses existing analysis if available, but can also run a fresh analysis
+  // on the current library to determine which images to include.
+
+  ipcMain.handle('feed:propose', (_e, projectId: string) => {
+    const project = listProjects().find((p) => p.id === projectId)
+    if (!project) return { ok: false, reason: 'Project not found' }
+
+    // Read existing analysis
+    let analysis = readAnalysis(projectId)
+
+    // If no analysis, cannot propose
+    if (analysis.rooms.length === 0) {
+      return {
+        ok: false,
+        reason:
+          'No property analysis available. Run "Analyze Property" first in the Analysis tab to get AI suggestions.'
+      }
+    }
+
+    // Generate proposed order
+    const proposedOrder = proposeFeedOrder(project.images, analysis)
+    const proposedModes = proposeTransitionModes(analysis, proposedOrder)
+
+    return {
+      ok: true,
+      proposedFeedSequence: proposedOrder,
+      proposedTransitionModes: proposedModes
+    }
+  })
+
+  /**
+   * Analyze the current library and propose a feed with AI guidance.
+   *
+   * This runs Gemini over the CURRENT imported images library to:
+   *   - Identify which images should be used (subset)
+   *   - Determine spatial relationships
+   *   - Suggest feed order
+   *   - Recommend transition modes (ai vs cut)
+   *
+   * Like analysis:run, the result is a DRAFT returned for review.
+   *
+   * CRITICAL: Token consumption is ONE-SHOT.
+   * - If this call fails after consuming token, the UI must get a new confirmation
+   * - Token is consumed BEFORE any analysis runs, so a retry requires a new token
+   */
+  ipcMain.handle(
+    'feed:analyze',
+    async (_e, projectId: string, notes: string = '', token?: string) => {
+      const runtime = analyzerRuntimeFrom(storedSettings())
+      const analyzer = analyzerById('gemini', runtime)
+      if (!analyzer) return { ok: false as const, reason: 'Gemini analyzer not available' }
+      const meta = analyzer.metadata()
+
+      const project = listProjects().find((p) => p.id === projectId)
+      if (!project || project.images.length === 0) {
+        return { ok: false as const, reason: 'Project or images not found' }
+      }
+
+      // Validate and consume the one-shot token BEFORE any work
+      // This ensures we can't accidentally submit twice
+      const paidLive = meta.capabilities.incursCost && runtime.mode === 'live'
+      if (paidLive) {
+        if (!token) {
+          return {
+            ok: false as const,
+            reason:
+              'This analysis requires a confirmation token. Open the confirmation dialog.'
+          }
+        }
+        if (!consumeAnalysisToken(token, projectId, 'gemini')) {
+          return {
+            ok: false as const,
+            reason:
+              'This confirmation token is invalid or expired. Get a new confirmation.'
+          }
+        }
+        // Token consumed successfully - all subsequent failures are real API errors
+      }
+
+      // Build analyzer request over ALL imported images
+      const request = buildAnalyzerRequest(project, readAnalysis(projectId), notes)
+
+      // Run the analyzer
+      const result = await analyzer.analyzeProperty(request)
+      if (!result.ok) return { ok: false as const, reason: result.reason }
+
+      // Generate feed proposal from the analysis
+      // PERSIST THE DRAFT BEFORE ANYTHING ELSE CAN FAIL.
+      //
+      // This run was paid for and the draft is the only record of what the
+      // model actually saw. It goes into its OWN column — the accepted
+      // analysis is untouched, and the workflow that promotes a draft is
+      // unchanged. A failure to store it must not lose the proposal, so it
+      // is reported and the run continues.
+      try {
+        saveAnalysisDraft(result.analysis)
+      } catch (err) {
+        console.error('[analysis] could not persist the analyzer draft', err)
+      }
+
+      const proposedOrder = proposeFeedOrder(project.images, result.analysis)
+      const proposedModes = proposeTransitionModes(result.analysis, proposedOrder)
+
+      // ── WHAT THE ANALYZER ACTUALLY GAVE US ───────────────────────────
+      //
+      // A paid run is expensive and its draft is not persisted, so the
+      // one chance to see whether the evidence arrived is while it is in
+      // hand. Printed as a compact table rather than a dump: enough to
+      // answer "is this CUT because the photographs support nothing, or
+      // because a field went missing on the way in?" without re-running.
+      logProposalEvidence(result.analysis, proposedOrder, proposedModes)
+
+      return {
+        ok: true as const,
+        analysis: result.analysis,
+        proposedFeedSequence: proposedOrder,
+        proposedTransitionModes: proposedModes,
+        notes: result.notes
+      }
+    }
+  )
+
+  /**
+   * ANALYSE FEED — explain the operator's chosen sequence, never revise it.
+   *
+   * ── HOW THIS DIFFERS FROM `feed:analyze` ─────────────────────────────
+   *
+   * `feed:analyze` reads the whole library and PROPOSES a feed: which
+   * images to use and in what order. It is the only analysis allowed to
+   * do that.
+   *
+   * This one takes the feed as given. The operator already chose the
+   * story; this run works out what is true about the transitions that
+   * story contains. Every imported image is still sent — a photograph
+   * that never appears in the video can still prove two that do belong to
+   * the same room — but only the feed's own adjacent pairs are decided,
+   * and `feedImageIds` tells the model exactly that.
+   *
+   * The analyzer supplies EVIDENCE. The AI/CUT decision is made by the
+   * canonical local evaluator via `extractTransitionAnalysis`, the same
+   * one the timeline and the proposal use. Nothing here re-decides safety.
+   */
+  ipcMain.handle(
+    'feed:analyzeFeed',
+    async (_e, projectId: string, notes: string = '', token?: string) => {
+      const runtime = analyzerRuntimeFrom(storedSettings())
+      const analyzer = analyzerById('gemini', runtime)
+      if (!analyzer) return { ok: false as const, reason: 'Gemini analyzer not available' }
+      const meta = analyzer.metadata()
+
+      const project = listProjects().find((p) => p.id === projectId)
+      if (!project) return { ok: false as const, reason: 'Project not found' }
+
+      const feedImageIds = getFeedSequenceIds(project)
+      if (feedImageIds.length < 2) {
+        return {
+          ok: false as const,
+          reason: 'Add at least two images to the Transition Feed before analysing it.'
+        }
+      }
+
+      // Same one-shot token gate as every other paid analyzer run.
+      const paidLive = meta.capabilities.incursCost && runtime.mode === 'live'
+      if (paidLive) {
+        if (!token) {
+          return {
+            ok: false as const,
+            reason: 'This analysis requires a confirmation token. Open the confirmation dialog.'
+          }
+        }
+        if (!consumeAnalysisToken(token, projectId, 'gemini')) {
+          return {
+            ok: false as const,
+            reason: 'This confirmation token is invalid or expired. Get a new confirmation.'
+          }
+        }
+      }
+
+      const request = {
+        ...buildAnalyzerRequest(project, readAnalysis(projectId), notes),
+        // The decisions. Everything in `images` remains context.
+        feedImageIds
+      }
+      const result = await analyzer.analyzeProperty(request)
+      if (!result.ok) return { ok: false as const, reason: result.reason }
+
+      try {
+        saveAnalysisDraft(result.analysis)
+      } catch (err) {
+        console.error('[analysis] could not persist the analyzer draft', err)
+      }
+
+      // Decisions from the CANONICAL evaluator, over exactly these pairs.
+      const extracted = extractTransitionAnalysis(result.analysis, feedImageIds, Date.now())
+      if (!extracted.draft) {
+        return { ok: false as const, reason: extracted.error ?? 'Could not derive feed analysis' }
+      }
+
+      const draft = {
+        ...extracted.draft,
+        // BOTH fingerprints: the feed that was judged, and the library
+        // that was its evidence. Either moving makes this outdated.
+        mediaImageIds: project.images.map((i) => i.id),
+        analyzer: 'gemini',
+        model: runtime.model
+      }
+
+      try {
+        saveTransitionDraft(projectId, draft)
+      } catch (err) {
+        console.error('[feed-analysis] could not persist the draft', err)
+        return { ok: false as const, reason: 'The feed analysis could not be saved.' }
+      }
+
+      logProposalEvidence(
+        result.analysis,
+        feedImageIds,
+        Object.fromEntries(
+          draft.pairs.map((p) => [`${p.fromId}->${p.toId}`, p.recommendation])
+        )
+      )
+
+      return { ok: true as const, draft, analysis: result.analysis, notes: result.notes }
+    }
+  )
+
+  /**
+   * What would be sent if feed:analyze ran live — same as analysis:confirmation
+   * but focuses on feed proposal context.
+   */
+  ipcMain.handle('feed:analyzeConfirmation', (_e, projectId: string) => {
+    const runtime = analyzerRuntimeFrom(storedSettings())
+    const analyzer = analyzerById('gemini', runtime)
+    const project = listProjects().find((p) => p.id === projectId)
+    if (!analyzer || !project) return null
+    const meta = analyzer.metadata()
+    const existing = readAnalysis(projectId)
+    const request = buildAnalyzerRequest(project, existing, '')
+    const valid = analyzer.validateInput(request)
+    const estimate = analyzer.estimateCost(request)
+
+    const rate = meta.model ? rateFor(meta.model) : null
+    const rateVerified = rate?.verified === true
+
+    return {
+      ok: valid.ok,
+      blockers: valid.ok ? [] : valid.reasons,
+      analyzer: meta.displayName,
+      provider: meta.provider,
+      model: meta.model,
+      imageCount: project.images.length,
+      imageRange:
+        project.images.length > 0
+          ? `IMAGE_001 – IMAGE_${String(project.images.length).padStart(3, '0')}`
+          : '—',
+      incursCost: meta.capabilities.incursCost,
+      paidLive: meta.capabilities.incursCost && runtime.mode === 'live',
+      rateVerified,
+      estimatedCostLabel: !estimate
+        ? 'unavailable'
+        : rateVerified
+          ? `$${estimate.amount.toFixed(4)}`
+          : 'unavailable — rate not verified',
+      estimatedCostBasis: estimate?.basis ?? 'No rate configured for this model.',
+      warning: 'This sends all imported photos to Gemini and may incur API cost.',
+      token: valid.ok && meta.capabilities.incursCost && runtime.mode === 'live'
+        ? issueAnalysisToken(projectId, 'gemini')
+        : null
+    }
   })
 
   // ── Manual image overrides ────────────────────────────────────────────
@@ -759,15 +1091,18 @@ export function registerIpc(): void {
     }
 
     const pairsNeedingClip: string[] = []
-    for (let i = 0; i < project.images.length - 1; i++) {
-      const key = transitionKey(project.images[i].id, project.images[i + 1].id)
+    const feedImages = getFeedImages(project)
+    for (let i = 0; i < feedImages.length - 1; i++) {
+      const key = transitionKey(feedImages[i].id, feedImages[i + 1].id)
       const clip = project.transitions[key]?.clip
       const onDisk = clip ? resolveClipPath(projectId, clip.storedName) !== null : false
       if (!onDisk) pairsNeedingClip.push(key)
     }
 
     const pairsWithActiveTask = listJobs()
-      .filter((j) => j.projectId === projectId && resolveGenerationAction(j.provider) !== 'submit')
+      .filter(
+        (j) => j.projectId === projectId && resolveGenerationAction(j.provider, j.note) !== 'submit'
+      )
       .flatMap((j) => j.metadata?.pairKeys ?? [])
 
     const settings = storedSettings()
@@ -972,6 +1307,28 @@ export function registerIpc(): void {
 
   // ── Exports & queue ───────────────────────────────────────────────────
 
+  /**
+   * Whether this project can be exported, and what is stopping it.
+   *
+   * Published from `projectAssembly` — the same computation the exporter
+   * runs on. The panel used to work this out itself and demanded a clip
+   * for every pair, so every CUT read as a missing clip.
+   */
+  ipcMain.handle('exports:readiness', (_e, projectId: string) => {
+    const project = listProjects().find((p) => p.id === projectId)
+    if (!project) {
+      return {
+        ready: false,
+        missingAiClips: [],
+        cutPairs: [],
+        crossfadePairs: [],
+        sequenceLength: 0,
+        reason: 'Project not found'
+      }
+    }
+    return exportReadiness(project)
+  })
+
   ipcMain.handle(
     'exports:run',
     (
@@ -979,8 +1336,10 @@ export function registerIpc(): void {
       projectId: string,
       kind: ExportKind,
       overlays: ExportOverlays,
-      scheduledFor: number | null
-    ): Promise<ExportStartResult> => startExport(projectId, kind, overlays, scheduledFor)
+      scheduledFor: number | null,
+      format?: 'computer' | 'instagram'
+    ): Promise<ExportStartResult> =>
+      startExport(projectId, kind, overlays, scheduledFor, format)
   )
 
   ipcMain.handle('queue:list', (): QueueJob[] => listJobs())
@@ -1035,11 +1394,12 @@ export function registerIpc(): void {
     const project = listProjects().find((p) => p.id === job.projectId)
     if (!project) return []
 
-    // Image ORDER gives the human label, exactly as the editor numbers them.
+    // Image ORDER gives the human label, exactly as the editor numbers them in the feed.
     const labels = new Map<string, string>()
-    for (let i = 0; i < project.images.length - 1; i++) {
+    const feedImages = getFeedImages(project)
+    for (let i = 0; i < feedImages.length - 1; i++) {
       labels.set(
-        transitionKey(project.images[i].id, project.images[i + 1].id),
+        transitionKey(feedImages[i].id, feedImages[i + 1].id),
         `Image ${i + 1} → Image ${i + 2}`
       )
     }
@@ -1083,4 +1443,25 @@ export function registerIpc(): void {
   ipcMain.handle('queue:reveal', (_e, path: string): void => {
     shell.showItemInFolder(path)
   })
+
+  // ── Generation Catalogue ───────────────────────────────────────────────
+
+  ipcMain.handle('catalogue:getAll', (_e, projectId: string) => getAllProjectGenerations(projectId))
+
+  /**
+   * Reuse a clip this project already generated. Pure bookkeeping over
+   * work that was paid for once: no file copy, no provider request, no
+   * new spend, and nothing removed from history.
+   */
+  ipcMain.handle('catalogue:attach', (_e, projectId: string, generationId: string) =>
+    attachGenerationToTransition(projectId, generationId)
+  )
+
+  /**
+   * Detach the active clip. The generation row, the file and the pair all
+   * survive — only the assignment goes, so it can be re-attached.
+   */
+  ipcMain.handle('transitions:clearClip', (_e, projectId: string, pairKey: string) =>
+    clearActiveClip(projectId, pairKey)
+  )
 }

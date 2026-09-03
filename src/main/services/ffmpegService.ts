@@ -1,3 +1,4 @@
+import type { FrameFit } from '../../shared/exportFormat'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import type { AspectRatio, ExportDefaults, FfmpegStatus } from '../../shared/types'
@@ -134,6 +135,12 @@ export interface AssembleOptions {
   segments?: AssembleSegment[]
   /** Per-boundary seam seconds (length segments − 1). */
   seamOverrideSec?: (number | null)[]
+  /**
+   * How source frames meet the output frame. Defaults to `contain`, the
+   * long-standing behaviour. `cover` crops to fill and is what a vertical
+   * export needs — see shared/exportFormat. Neither ever stretches.
+   */
+  fit?: FrameFit
   defaults: ExportDefaults
   /** Full-frame transparent PNG overlays, applied bottom-up in order
    * (watermark first, signature last so it stays on top). */
@@ -159,6 +166,7 @@ export interface AssembleHandle {
  */
 export function assemble(options: AssembleOptions): AssembleHandle {
   const { clipPaths, defaults, overlayPngPaths, outputPath, onProgress } = options
+  const fit: FrameFit = options.fit ?? 'contain'
   const { w, h } = outputDims(defaults)
   const fps = defaults.fps
   const blend: SeamBlend = options.seamBlend ?? defaults.seamBlend ?? 'subtle'
@@ -213,9 +221,25 @@ export function assemble(options: AssembleOptions): AssembleHandle {
       start > 0 || end > 0
         ? `trim=start=${start}:end=${(durations[i] - end).toFixed(3)},setpts=PTS-STARTPTS,`
         : ''
+    // ── FIT THE FRAME WITHOUT DISTORTING IT ─────────────────────────
+    //
+    // Both branches preserve the source aspect ratio — neither ever
+    // stretches. They differ only in what happens to the mismatch:
+    //
+    //   contain  scale down until it fits, pad the remainder black
+    //   cover    scale up until it fills, crop the overflow evenly
+    //
+    // `cover` is what makes a vertical export a vertical video rather
+    // than a landscape clip marooned in a tall black rectangle. The crop
+    // is centred, so the middle of every frame survives.
+    const fitChain =
+      fit === 'cover'
+        ? `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}`
+        : `scale=${w}:${h}:force_original_aspect_ratio=decrease,` +
+          `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black`
+
     chains.push(
-      `[${i}:v]${trimmed}scale=${w}:${h}:force_original_aspect_ratio=decrease,` +
-        `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},` +
+      `[${i}:v]${trimmed}${fitChain},setsar=1,fps=${fps},` +
         // A COMMON TIMEBASE. A looped still enters the graph with a
         // different one from a decoded video, and xfade refuses to join
         // two inputs whose timebases disagree — "does not match the

@@ -224,9 +224,43 @@ export function buildInstruction(request: AnalyzerRequest): string {
     .map((image, i) => `${logicalId(i)} — position ${image.sequence} in the walk-through order`)
     .join('\n')
   const notes = request.notes.trim()
+
+  /**
+   * ── THE FEED SECTION: DECISIONS vs EVIDENCE ──────────────────────
+   *
+   * Present only for Analyse Feed. The operator has already chosen the
+   * story, so this run explains that story rather than proposing another
+   * one. Every imported photograph is still supplied, because one that
+   * will never appear in the video can still prove that two which will
+   * belong to the same room — but only the feed's own adjacent pairs are
+   * being decided, and the model is told so in as many words.
+   */
+  const feed = request.feedImageIds ?? []
+  const indexOfImage = new Map(request.images.map((img, i) => [img.imageId, i]))
+  const feedLine = (id: string): string => {
+    const i = indexOfImage.get(id)
+    return i === undefined ? id : logicalId(i)
+  }
+  const feedSection =
+    feed.length >= 2
+      ? `THE TRANSITION FEED — the operator's chosen sequence, in order:\n` +
+        feed.map((id, i) => `${i + 1}. ${feedLine(id)}`).join('\n') +
+        `\n\nYou are evaluating EXACTLY these adjacent pairs and no others:\n` +
+        feed
+          .slice(0, -1)
+          .map((id, i) => `${feedLine(id)} → ${feedLine(feed[i + 1])}`)
+          .join('\n') +
+        `\n\nEvery other supplied image is CONTEXT. Use it freely as evidence to ` +
+        `identify rooms, match landmarks and establish which spaces connect — that is ` +
+        `why it is here. But do NOT propose adding it to the sequence, do not propose ` +
+        `removing or reordering anything, and do not suggest a different sequence. The ` +
+        `order above is the operator's decision and is not yours to revise.\n\n`
+      : ''
+
   return (
     `${PROPERTY_ANALYSIS_INSTRUCTION}\n\n` +
     `IMAGE MANIFEST — refer to images by these identifiers EXACTLY. Do not invent identifiers.\n${manifest}\n\n` +
+    feedSection +
     (notes ? `OPERATOR NOTES (context, not evidence — do not treat as observation):\n${notes}\n\n` : '') +
     `Return JSON matching the supplied schema. Every connection must cite supportingImageIds. ` +
     `Use "unknown" wherever the photographs do not show enough.`

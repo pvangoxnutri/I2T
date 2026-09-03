@@ -7,9 +7,11 @@ import type {
   ProjectImage,
   ProjectStatus,
   QueueJob,
-  TransitionClip
+  TransitionClip,
+  GenerationRecord
 } from '../shared/types'
 import type { PropertyAnalysis } from '../shared/propertyAnalysis'
+import type { TransitionDraft } from '../shared/transitionAnalysisExtractor'
 import type { AnalyzerDebugPreview, AnalyzerMetadata } from '../shared/analyzerTypes'
 import type { AnalysisDiff } from '../shared/analysisDiff'
 import type { TransitionPlan } from '../shared/transitionPlan'
@@ -134,6 +136,18 @@ export interface LiveConfirmationPayload {
   spentSoFarLabel: string
   /** Spend after this generation, or 'unavailable' with no verified rate. */
   projectedAfterLabel: string
+  /**
+   * What is guiding this generation: the accepted spatial map
+   * (`analysis`), nothing at all because the operator overrode
+   * (`none`), or it cannot be generated (`blocked`).
+   *
+   * `none` must never be rendered as a safe transition.
+   */
+  spatialGuidance: 'analysis' | 'none' | 'blocked'
+  /** Present only for an override: what the operator is agreeing to. */
+  overrideWarning: string | null
+  /** Why the evidence is missing. */
+  overrideReason: string | null
 }
 
 export interface ExportOverlaysPayload {
@@ -180,6 +194,14 @@ const api = {
     analysis: {
       get: (projectId: string): Promise<PropertyAnalysis> =>
         ipcRenderer.invoke('analysis:get', projectId),
+      /**
+       * The last analyzer DRAFT for this project — exactly what the model
+       * returned, kept so an expensive run stays inspectable after a
+       * restart. Null when no run has been stored. Never the accepted
+       * analysis, and reading it changes nothing.
+       */
+      draft: (projectId: string): Promise<PropertyAnalysis | null> =>
+        ipcRenderer.invoke('analysis:draft', projectId),
       /**
        * The accepted analysis with manual corrections folded in — what the
        * inspectors and the planner read. `get` stays raw so the draft diff
@@ -258,6 +280,16 @@ const api = {
       ): Promise<AnalysisConfirmationPayload | null> =>
         ipcRenderer.invoke('analysis:confirmation', projectId, analyzerId)
     },
+    /** Transition analysis draft persistence. */
+    transitionAnalysis: {
+      read: (projectId: string) => ipcRenderer.invoke('transitionAnalysis:read', projectId),
+      save: (projectId: string, draft: any) =>
+        ipcRenderer.invoke('transitionAnalysis:save', projectId, draft),
+      markOutdated: (projectId: string) =>
+        ipcRenderer.invoke('transitionAnalysis:markOutdated', projectId),
+      accept: (projectId: string) => ipcRenderer.invoke('transitionAnalysis:accept', projectId),
+      delete: (projectId: string) => ipcRenderer.invoke('transitionAnalysis:delete', projectId)
+    },
     /**
      * Analyzer configuration. The API key is WRITE-ONLY: there is no
      * channel that returns it, only one that says whether it exists.
@@ -334,7 +366,76 @@ const api = {
       projectId: string,
       field: 'previewSentAt' | 'paidAt' | 'finalSentAt',
       value: number | null
-    ): Promise<void> => ipcRenderer.invoke('projects:markWorkflow', projectId, field, value)
+    ): Promise<void> => ipcRenderer.invoke('projects:markWorkflow', projectId, field, value),
+    /**
+     * Propose a feed order and transition modes based on property analysis.
+     */
+    feed: {
+      propose: (projectId: string): Promise<
+        | { ok: true; proposedFeedSequence: string[]; proposedTransitionModes: Record<string, 'ai' | 'cut'> }
+        | { ok: false; reason: string }
+      > => ipcRenderer.invoke('feed:propose', projectId),
+      analyzeConfirmation: (projectId: string): Promise<AnalysisConfirmationPayload | null> =>
+        ipcRenderer.invoke('feed:analyzeConfirmation', projectId),
+      analyze: (
+        projectId: string,
+        notes?: string,
+        token?: string
+      ): Promise<
+        | {
+            ok: true
+            analysis: PropertyAnalysis
+            proposedFeedSequence: string[]
+            proposedTransitionModes: Record<string, 'ai' | 'cut'>
+            notes: string[]
+          }
+        | { ok: false; reason: string }
+      > => ipcRenderer.invoke('feed:analyze', projectId, notes, token),
+      /**
+       * ANALYSE FEED — judge the operator's chosen sequence as given.
+       *
+       * Distinct from `analyze` above, which PROPOSES a feed. This one
+       * evaluates exactly the adjacent pairs of the current
+       * feedSequence and can never add, remove or reorder an image. The
+       * whole library is still sent as supporting evidence.
+       */
+      analyzeFeed: (
+        projectId: string,
+        notes?: string,
+        token?: string
+      ): Promise<
+        | { ok: true; draft: TransitionDraft; analysis: PropertyAnalysis; notes: string[] }
+        | { ok: false; reason: string }
+      > => ipcRenderer.invoke('feed:analyzeFeed', projectId, notes, token)
+    },
+    /**
+     * Historical record of all generated transitions in the project.
+     */
+    catalogue: {
+      getAll: (projectId: string): Promise<GenerationRecord[]> =>
+        ipcRenderer.invoke('catalogue:getAll', projectId),
+      /**
+       * Reuse a clip this project already generated, as the active one
+       * for its own pair. Bookkeeping only — no file copy, no provider
+       * request, no new spend, and nothing removed from history.
+       */
+      attach: (
+        projectId: string,
+        generationId: string
+      ): Promise<{ ok: true; pairKey: string } | { ok: false; reason: string }> =>
+        ipcRenderer.invoke('catalogue:attach', projectId, generationId)
+    },
+    transitions: {
+      /**
+       * Detach the active clip. The generation, its file and the pair all
+       * survive; only the assignment goes, so it can be re-attached.
+       */
+      clearClip: (
+        projectId: string,
+        pairKey: string
+      ): Promise<{ ok: true } | { ok: false; reason: string }> =>
+        ipcRenderer.invoke('transitions:clearClip', projectId, pairKey)
+    }
   },
 
   images: {
@@ -433,13 +534,33 @@ const api = {
   },
 
   exports: {
+    /**
+     * Whether this project can be exported, and what is stopping it.
+     *
+     * The ONE answer, from the same assembly the exporter runs on. The
+     * export panel used to compute its own and demanded a generated clip
+     * for every pair — so every cut, which generates nothing by
+     * definition, was reported as a missing clip.
+     */
+    readiness: (
+      projectId: string
+    ): Promise<{
+      ready: boolean
+      missingAiClips: string[]
+      cutPairs: string[]
+      crossfadePairs: string[]
+      sequenceLength: number
+      reason: string | null
+    }> => ipcRenderer.invoke('exports:readiness', projectId),
     run: (
       projectId: string,
       kind: 'preview' | 'final',
       overlays: ExportOverlaysPayload,
-      scheduledFor: number | null = null
+      scheduledFor: number | null = null,
+      /** Output shape — see shared/exportFormat. Omitted is the desktop one. */
+      format: 'computer' | 'instagram' = 'computer'
     ): Promise<ExportStartResult> =>
-      ipcRenderer.invoke('exports:run', projectId, kind, overlays, scheduledFor),
+      ipcRenderer.invoke('exports:run', projectId, kind, overlays, scheduledFor, format),
     /**
      * DEVELOPMENT/EVALUATION. Re-assembles the clips already on disk twice
      * — hard cuts and seamless — so the seam work can be judged by eye.

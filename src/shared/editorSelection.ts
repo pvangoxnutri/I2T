@@ -130,7 +130,7 @@ export function isEditableTarget(target: {
  * meanings for one key is how a shortcut becomes a hazard.
  */
 export function resolveShortcut(
-  event: { key: string; shiftKey: boolean; target: Parameters<typeof isEditableTarget>[0] },
+  event: { key: string; shiftKey: boolean; ctrlKey?: boolean; target: Parameters<typeof isEditableTarget>[0] },
   selection: EditorSelection,
   imageIds: string[]
 ): ShortcutAction {
@@ -146,7 +146,9 @@ export function resolveShortcut(
   // last photo to the front of the video on a keypress meant to nudge it.
   if (target < 0 || target >= imageIds.length) return NONE
 
-  return event.shiftKey
+  // Ctrl+Arrow (or Cmd+Arrow on Mac) reorders within the sequence.
+  // Plain Arrow just navigates without modifying.
+  return event.ctrlKey
     ? { type: 'move-image', fromIndex: index, toIndex: target }
     : { type: 'select-image', imageId: imageIds[target] }
 }

@@ -434,6 +434,249 @@ const MIGRATIONS: Migration[] = [
     up: (db) => {
       db.run(`ALTER TABLE transitions ADD COLUMN mode TEXT`)
     }
+  },
+  {
+    /**
+     * Feed sequence: the ordered list of image IDs that form the video sequence.
+     *
+     * Stored as JSON array. Null/empty means the fallback applies: all images
+     * in project order. This allows old projects to work without migration,
+     * while new projects have explicit feed control separate from the library.
+     */
+    version: 15,
+    up: (db) => {
+      db.run(`ALTER TABLE projects ADD COLUMN feed_sequence_json TEXT`)
+    }
+  },
+  {
+    /**
+     * Customer details: name, contact, email, phone, notes for delivery/invoicing.
+     *
+     * Stored as JSON. Optional — projects created before this migration
+     * will have null/undefined, which is fine (all fields are optional).
+     */
+    version: 16,
+    up: (db) => {
+      db.run(`ALTER TABLE projects ADD COLUMN customer_details_json TEXT`)
+    }
+  },
+  {
+    /**
+     * Transition Generations Catalogue — immutable history of ALL generated clips.
+     *
+     * IDEMPOTENCY GUARANTEE:
+     * Each successful generation is recorded exactly once via queue_job_id.
+     * Even if polling resumes, app restarts, or completion callbacks repeat,
+     * the UNIQUE(queue_job_id) constraint ensures only ONE catalogue entry
+     * per actual generation job.
+     *
+     * New regenerations get new job IDs → new catalogue rows (full history preserved).
+     */
+    version: 17,
+    up: (db) => {
+      db.run(`
+        CREATE TABLE transition_generations (
+          id                 TEXT PRIMARY KEY,
+          queue_job_id       TEXT UNIQUE NOT NULL,
+          project_id         TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          from_image_id      TEXT NOT NULL,
+          to_image_id        TEXT NOT NULL,
+          provider           TEXT NOT NULL,
+          model              TEXT,
+          created_at         INTEGER NOT NULL,
+          status             TEXT NOT NULL,
+          clip_name          TEXT,
+          clip_original_name TEXT,
+          clip_source        TEXT,
+          prompt_used        TEXT,
+          provider_meta_json TEXT,
+          generation_cost    REAL,
+          generation_credits REAL,
+          active             INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE UNIQUE INDEX idx_generations_job ON transition_generations(queue_job_id);
+        CREATE INDEX idx_generations_project ON transition_generations(project_id);
+        CREATE INDEX idx_generations_pair ON transition_generations(project_id, from_image_id, to_image_id);
+        CREATE INDEX idx_generations_created ON transition_generations(created_at DESC);
+      `)
+    }
+  },
+  {
+    /**
+     * Transition Analysis Draft — per-project persistent draft/accepted state.
+     *
+     * UPSERT SEMANTICS: one row per project. Stores the most recent analysis draft.
+     * status: 'draft' | 'accepted' | 'declined'
+     * isOutdated: flag set when feed structure changes (but record kept for history)
+     *
+     * Feed snapshot is stored as JSON for staleness detection on load.
+     * Results (pairs with recommendations, safety levels, evidence) stored as JSON.
+     *
+     * This allows transition analysis drafts to survive app restarts and browser
+     * reloads, and Toolbox can show "Review Transition Analysis" after reopening.
+     */
+    version: 18,
+    up: (db) => {
+      db.run(`
+        CREATE TABLE transition_analysis_draft (
+          project_id    TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+          json          TEXT NOT NULL,
+          updated_at    INTEGER NOT NULL,
+          is_outdated   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_analysis_draft_project ON transition_analysis_draft(project_id);
+      `)
+    }
+  },
+  {
+    /**
+     * The analyzer DRAFT, kept beside the accepted analysis.
+     *
+     * ── WHY A SECOND COLUMN AND NOT A SECOND ROW ────────────────────
+     *
+     * `property_analysis` is keyed by project, one row each, and that row
+     * is the ACCEPTED analysis — the thing the planner and inspectors
+     * read. A paid Gemini run produces a draft, which until now existed
+     * only in renderer memory: after a restart there was no way to see
+     * what the model had actually returned, and the run cost money.
+     *
+     * Writing the draft into the existing `json` column would silently
+     * replace an accepted analysis with an unreviewed one, which is the
+     * single thing the draft/accept workflow exists to prevent. Its own
+     * columns keep both facts addressable in the same row, and no second
+     * document model appears.
+     */
+    version: 19,
+    up: (db) => {
+      db.run(`
+        ALTER TABLE property_analysis ADD COLUMN draft_json TEXT;
+        ALTER TABLE property_analysis ADD COLUMN draft_updated_at INTEGER;
+      `)
+    }
+  },
+  {
+    /**
+     * WHO chose a transition's mode.
+     *
+     * `mode` records the decision; this records its author, because the
+     * two carry different permissions at the moment money is spent. An
+     * AI mode the analyzer proposed needs the accepted spatial map that
+     * justified it. An AI mode a human deliberately set is an informed
+     * override and is allowed through with a stated risk.
+     *
+     * NULL is deliberately NOT "manual". Every row written before this
+     * column existed reads as null — including the eight that generated
+     * against an empty analysis — and those must not be retro-classified
+     * as human decisions, because manual is the permissive branch.
+     */
+    version: 20,
+    up: (db) => {
+      db.run(`ALTER TABLE transitions ADD COLUMN mode_provenance TEXT`)
+    }
+  },
+  {
+    /**
+     * The catalogue's idempotency key is scoped to the PROJECT.
+     *
+     * Migration 17 made `queue_job_id` globally unique, which does stop
+     * the duplicate we care about — the same completion recorded twice by
+     * a poll, a retry or a restart. But it also means a job id seen under
+     * ANY other project silently suppresses the insert, and the caller is
+     * told nothing. Under-recording history is the worse failure: the
+     * generation happened, the file exists, the money was spent, and the
+     * catalogue would simply not mention it.
+     *
+     * Exactly the reasoning behind migration 9 for the cost ledger, and
+     * exactly the same fix. (project_id, queue_job_id) still blocks the
+     * real duplicate.
+     */
+    version: 21,
+    up: (db) => {
+      db.run(`
+        DROP INDEX IF EXISTS idx_generations_job;
+        CREATE UNIQUE INDEX idx_generations_project_job
+          ON transition_generations(project_id, queue_job_id);
+      `)
+    }
+  },
+  {
+    /**
+     * Finish scoping the catalogue key — the column-level UNIQUE has to go.
+     *
+     * Migration 21 replaced the named index, but `queue_job_id TEXT UNIQUE`
+     * in the original table definition also creates an IMPLICIT unique
+     * index, and `DROP INDEX` cannot remove that one. So the global
+     * constraint was still enforced while the schema claimed otherwise —
+     * a migration whose comment and behaviour disagreed.
+     *
+     * SQLite has no way to drop a column constraint, so the table is
+     * recreated. Rows are copied verbatim: this table is generation
+     * HISTORY, recording money that was really spent and files that
+     * really exist, and nothing here may lose one.
+     */
+    version: 22,
+    up: (db) => {
+      db.run(`
+        CREATE TABLE transition_generations_new (
+          id                 TEXT PRIMARY KEY,
+          queue_job_id       TEXT NOT NULL,
+          project_id         TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          from_image_id      TEXT NOT NULL,
+          to_image_id        TEXT NOT NULL,
+          provider           TEXT NOT NULL,
+          model              TEXT,
+          created_at         INTEGER NOT NULL,
+          status             TEXT NOT NULL,
+          clip_name          TEXT,
+          clip_original_name TEXT,
+          clip_source        TEXT,
+          prompt_used        TEXT,
+          provider_meta_json TEXT,
+          generation_cost    REAL,
+          generation_credits REAL,
+          active             INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO transition_generations_new
+          SELECT id, queue_job_id, project_id, from_image_id, to_image_id, provider,
+                 model, created_at, status, clip_name, clip_original_name, clip_source,
+                 prompt_used, provider_meta_json, generation_cost, generation_credits, active
+          FROM transition_generations;
+
+        DROP INDEX IF EXISTS idx_generations_project;
+        DROP INDEX IF EXISTS idx_generations_pair;
+        DROP INDEX IF EXISTS idx_generations_created;
+        DROP INDEX IF EXISTS idx_generations_project_job;
+        DROP TABLE transition_generations;
+        ALTER TABLE transition_generations_new RENAME TO transition_generations;
+
+        CREATE UNIQUE INDEX idx_generations_project_job
+          ON transition_generations(project_id, queue_job_id);
+        CREATE INDEX idx_generations_project ON transition_generations(project_id);
+        CREATE INDEX idx_generations_pair
+          ON transition_generations(project_id, from_image_id, to_image_id);
+        CREATE INDEX idx_generations_created ON transition_generations(created_at DESC);
+      `)
+    }
+  },
+  {
+    /**
+     * WHY a provider call failed, classified rather than described.
+     *
+     * The queue reduced every failure to a message string, which loses
+     * the one distinction the recovery UI needs: a provider REFUSAL kills
+     * the remote task id, while losing CONTACT leaves a paid task that may
+     * still be running. Both then looked like `status=failed`, and a
+     * request rejected with HTTP 422 kept offering "Resume polling" —
+     * which could only ever return the same rejection.
+     *
+     * Its own column rather than a corner of `provider_meta_json`: that
+     * blob is the provider's sanitized response, and this is OUR
+     * conclusion about it.
+     */
+    version: 23,
+    up: (db) => {
+      db.run(`ALTER TABLE queue_jobs ADD COLUMN provider_failure_json TEXT`)
+    }
   }
 ]
 

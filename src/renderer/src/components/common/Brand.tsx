@@ -1,26 +1,33 @@
+import logoLockup from '../../assets/i2t-logo.png'
+import logoMark from '../../assets/i2t-mark.png'
+
 /**
  * The I2T brand treatment.
  *
- * ── ORIGINAL, NOT TRACED ─────────────────────────────────────────────
+ * ── THE REAL ASSET, AS PROMISED ──────────────────────────────────────
  *
- * Built from the stated direction — near-pure monochrome, very high
- * contrast, editorial, geometric, generous letter spacing, and a subtle
- * horizontal streak where the 2 and T meet. Nothing here is copied from
- * an image; it is CSS and SVG that can be swapped for a real asset later
- * without touching a single call site.
+ * This used to draw the wordmark in CSS and SVG as a stand-in. The
+ * supplied artwork replaced it, and the swap cost nothing at the call
+ * sites: they still pass only a variant and a size.
  *
- * ── THE 2/T INTERACTION ──────────────────────────────────────────────
+ * ── THE ARTWORK ALREADY CONTAINS THE NAME ────────────────────────────
  *
- * The mark's one piece of movement: the 2 and T sit tight enough to read
- * as joined, and a short horizontal fade trails off the T. That streak is
- * the whole "images into motion" idea in one gesture, so it stays quiet —
- * a gradient that ends in nothing, no glow and deliberately no outer drop
- * shadow, which would read as a 2010s SaaS logo rather than a studio mark.
+ * The lockup file is symbol + "I 2 T" + "Image2Transition.com". So the
+ * text rows this component used to render beside the mark are gone for
+ * `lockup` — keeping them would print the product name twice, side by
+ * side, in two different typefaces. Only the tagline survives, because
+ * it is the one line the image does not already say.
  *
- * ── WHEN THE REAL LOGO ARRIVES ───────────────────────────────────────
+ * ── TWO CROPS, NOT ONE SCALED FILE ───────────────────────────────────
  *
- * Drop the file in `src/renderer/src/assets`, import it, and render it in
- * place of `<Wordmark/>`. Callers only ever pass a variant and a size.
+ * `variant="mark"` appears in the editor toolbar at around 20px tall.
+ * The full lockup shrunk to that height is an illegible smear of text,
+ * so the symbol is its own file, cropped from the same source at the
+ * 130px-wide transparent gutter that separates it from the wordmark.
+ *
+ * Both are near-white (RGB 253) on transparency with a peak alpha of
+ * 223, so they are built for a dark ground and will all but vanish on a
+ * light one — which is what `tone` is for.
  */
 
 export type BrandVariant =
@@ -41,46 +48,19 @@ export function BrandMark({
   /** `dark` = light mark on dark ground (the app). `light` = inverted. */
   tone?: 'dark' | 'light'
 }): React.JSX.Element {
+  const isMark = variant === 'mark'
   return (
     <span className={`brand brand-${size} brand-tone-${tone} brand-variant-${variant}`}>
-      <Wordmark />
-      {variant !== 'mark' && (
-        <span className="brand-lines">
-          <span className="brand-name">Image 2 Transition</span>
-          {variant === 'full' && <span className="brand-tagline">Images into motion</span>}
-        </span>
-      )}
-      <span className="sr-only">I2T — Image 2 Transition</span>
-    </span>
-  )
-}
-
-/**
- * The wordmark itself.
- *
- * Text rather than paths so it stays crisp at every size and inherits the
- * UI font; the streak is the only drawn element, and it is an SVG so the
- * fade is a real gradient rather than a stack of divs.
- */
-function Wordmark(): React.JSX.Element {
-  return (
-    <span className="brand-word" aria-hidden>
-      <span className="brand-i">I</span>
-      <span className="brand-2">2</span>
-      <span className="brand-t">T</span>
-      <svg className="brand-streak" viewBox="0 0 48 12" preserveAspectRatio="none" focusable="false">
-        <defs>
-          <linearGradient id="i2t-streak" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor="currentColor" stopOpacity="0.55" />
-            <stop offset="55%" stopColor="currentColor" stopOpacity="0.14" />
-            <stop offset="100%" stopColor="currentColor" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        {/* Three unequal rules: a frame, its echo, and the trailing edge. */}
-        <rect x="0" y="2.6" width="48" height="1.1" fill="url(#i2t-streak)" />
-        <rect x="0" y="5.6" width="34" height="1.1" fill="url(#i2t-streak)" />
-        <rect x="0" y="8.6" width="20" height="1.1" fill="url(#i2t-streak)" />
-      </svg>
+      <img
+        className={isMark ? 'brand-img brand-img-mark' : 'brand-img brand-img-lockup'}
+        src={isMark ? logoMark : logoLockup}
+        // The visible name lives in the artwork, so the accessible name
+        // has to be supplied here — an empty alt would leave the app
+        // shell with no readable identity at all.
+        alt={isMark ? 'I2T' : 'I2T — Image2Transition.com'}
+        draggable={false}
+      />
+      {variant === 'full' && <span className="brand-tagline">Images into motion</span>}
     </span>
   )
 }

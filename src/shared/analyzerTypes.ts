@@ -73,6 +73,21 @@ export interface AnalyzerRequest {
   /** Free-text context from the operator ("the balcony is off the kitchen"). */
   notes: string
   capabilities: AnalysisCapability[]
+  /**
+   * DECISIONS vs EVIDENCE.
+   *
+   * When present, this is the operator's chosen ordered feed, and the
+   * ONLY transitions being decided are its adjacent pairs. `images` still
+   * carries the whole imported library, because a photograph that will
+   * never appear in the video can still prove two that will belong to the
+   * same room.
+   *
+   * The distinction is the entire point of the Analyse Feed workflow: the
+   * operator already chose the story, so the analyzer may explain that
+   * story but never rewrite it. Absent means the older whole-library
+   * analysis, which IS allowed to propose an ordering.
+   */
+  feedImageIds?: string[]
 }
 
 export interface AnalyzerCapabilities {

@@ -63,6 +63,11 @@ export const GEMINI_RESPONSE_SCHEMA = {
           imageIds: { type: 'array', items: { type: 'string' } },
           landmarks: { type: 'array', items: { type: 'string' } },
           confidence: { type: 'string', enum: ['confirmed', 'probable', 'unknown'] },
+          // STRUCTURED OUTPUT ONLY RETURNS DECLARED FIELDS. The prose
+          // prompt asked for a marketing score and Gemini could never
+          // answer, because this schema did not name it — so every room
+          // arrived unscored and the feed proposal selected nothing.
+          marketingImportance: { type: 'number' },
           notes: { type: 'string' }
         },
         required: ['label', 'imageIds', 'confidence']
@@ -83,6 +88,8 @@ export const GEMINI_RESPONSE_SCHEMA = {
           landmarks: { type: 'array', items: { type: 'string' } },
           openings: { type: 'array', items: { type: 'string' } },
           overlapWith: { type: 'array', items: { type: 'string' } },
+          marketingImportance: { type: 'number' },
+          isHero: { type: 'boolean' },
           notes: { type: 'string' }
         },
         required: ['imageId', 'roomLabel', 'roomConfidence', 'orientation']
@@ -101,6 +108,25 @@ export const GEMINI_RESPONSE_SCHEMA = {
           notes: { type: 'string' }
         },
         required: ['fromRoomLabel', 'toRoomLabel', 'confidence', 'supportingImageIds']
+      }
+    },
+    // PAIR-SPECIFIC SAFETY NOTES. The prose prompt has always asked for
+    // these; the schema never declared them, so structured output could
+    // not return them and the parser hardcoded an empty list. Every pair
+    // therefore reported "no analyzer detail" no matter what Gemini saw.
+    transitionHints: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          fromImageId: { type: 'string' },
+          toImageId: { type: 'string' },
+          safetyLevel: { type: 'string', enum: ['safe', 'uncertain', 'unsafe'] },
+          suggestedMotion: { type: 'string' },
+          anchorLandmark: { type: 'string' },
+          notes: { type: 'string' }
+        },
+        required: ['fromImageId', 'toImageId']
       }
     }
   },
@@ -143,6 +169,7 @@ export function mapGeminiResponse(
     rooms?: unknown
     images?: unknown
     connections?: unknown
+    transitionHints?: unknown
   }
   if (!Array.isArray(body.rooms) || !Array.isArray(body.images) || !Array.isArray(body.connections)) {
     return {
@@ -190,6 +217,7 @@ export function mapGeminiResponse(
       imageIds: asStringArray(entry.imageIds).map(resolve).filter((v): v is string => v !== null),
       landmarks: asStringArray(entry.landmarks),
       confidence,
+      marketingImportance: asScore(entry.marketingImportance),
       notes: typeof entry.notes === 'string' ? entry.notes : undefined
     })
   }
@@ -223,6 +251,8 @@ export function mapGeminiResponse(
       overlapWith: asStringArray(entry.overlapWith)
         .map(resolve)
         .filter((v): v is string => v !== null),
+      marketingImportance: asScore(entry.marketingImportance),
+      isHero: entry.isHero === true,
       notes: typeof entry.notes === 'string' ? entry.notes : undefined
     })
   }
@@ -261,6 +291,46 @@ export function mapGeminiResponse(
     })
   }
 
+  // ── Transition hints ─────────────────────────────────────────────────
+  //
+  // ADVISORY ONLY, and recorded in BOTH directions.
+  //
+  // These never decide anything: `evaluateTransitionSafety` owns the
+  // AI/CUT verdict, and a hint can only ever restrict it. They exist so
+  // the review dialog can quote the analyzer's own words about a pair
+  // alongside the rule that decided it.
+  //
+  // Stored for A→B and B→A because the analyzer writes one entry for a
+  // pair it looked at, while a feed can traverse that pair in either
+  // order — and a hint found in one direction but not the other would
+  // silently veto only half the time.
+  const transitionHints: NonNullable<PropertyAnalysis['transitionHints']> = []
+  for (const entry of (body.transitionHints as Array<Record<string, unknown>> | undefined) ?? []) {
+    const fromImageId = resolve(entry.fromImageId)
+    const toImageId = resolve(entry.toImageId)
+    if (!fromImageId || !toImageId || fromImageId === toImageId) continue
+
+    const level =
+      entry.safetyLevel === 'safe' ||
+      entry.safetyLevel === 'uncertain' ||
+      entry.safetyLevel === 'unsafe'
+        ? entry.safetyLevel
+        : undefined
+    const shared: Omit<
+      NonNullable<PropertyAnalysis['transitionHints']>[number],
+      'fromImageId' | 'toImageId'
+    > = {
+      safetyLevel: level,
+      suggestedMotion:
+        typeof entry.suggestedMotion === 'string' ? entry.suggestedMotion : undefined,
+      anchorLandmark:
+        typeof entry.anchorLandmark === 'string' ? entry.anchorLandmark : undefined,
+      notes: typeof entry.notes === 'string' ? entry.notes : undefined
+    }
+    transitionHints.push({ fromImageId, toImageId, ...shared })
+    transitionHints.push({ fromImageId: toImageId, toImageId: fromImageId, ...shared })
+  }
+
   // A confirmed connection with NO supporting image is not confirmed. The
   // instruction requires evidence to be cited; a claim without it is
   // downgraded rather than trusted.
@@ -285,9 +355,21 @@ export function mapGeminiResponse(
       rooms,
       images,
       edges,
-      transitionHints: []
+      transitionHints
     }
   }
+}
+
+/**
+ * A 0–10 marketing score, or absent.
+ *
+ * Absent stays ABSENT rather than becoming 0. "We were not told" and
+ * "this is worthless" are different facts, and collapsing them is what
+ * let a whole library score zero and select nothing.
+ */
+function asScore(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return Math.min(10, Math.max(0, value))
 }
 
 function asStringArray(value: unknown): string[] {

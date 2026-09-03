@@ -31,6 +31,7 @@ import {
   type AnalyzerStatus
 } from '../../../../shared/analysisWorkflow'
 import { sanitizeReason } from '../../../../shared/transitionRecovery'
+import { getFeedSequenceIds } from '../../../../shared/feedSequence'
 import { motionDiversity, planningQuality } from '../../../../shared/planningQuality'
 import type { TransitionPlan } from '../../../../shared/transitionPlan'
 import type { AnalysisConfirmationPayload } from '../../../../preload/index'
@@ -136,7 +137,11 @@ export function PropertyAnalysisPanel({
     analysis,
     project.images.map((i) => i.id)
   )
-  const logicalCount = Math.max(0, project.images.length - 1)
+  // Transitions belong to the FEED — that is how many the video has.
+  // Counted from the library this reported transitions the project does
+  // not contain, and the coverage percentage beside it was measured
+  // against the wrong denominator.
+  const logicalCount = Math.max(0, getFeedSequenceIds(project).length - 1)
   const acceptedIsMock = summary.phase === 'analyzed' && analysis?.provenance?.mode === 'mock'
 
   // The planner's own output, measured. Read here rather than recomputed

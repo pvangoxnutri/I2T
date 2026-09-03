@@ -2,6 +2,7 @@ import type { Project } from './types'
 import type { AnalysisSummary } from './analysisSummary'
 import { pairKeysFor } from './editorSelection'
 import type { ModeTally } from './transitionMode'
+import { getFeedImages } from './feedSequence'
 
 /**
  * WHAT MATTERS NEXT — and nothing else.
@@ -67,34 +68,44 @@ export function editorReadiness(
    */
   tally?: ModeTally
 ): EditorReadiness {
-  const imageIds = project.images.map((i) => i.id)
-  const pairs = pairKeysFor(imageIds)
+  // Distinguish between library (all imported) and sequence (video feed)
+  const libraryCount = project.images.length
+  const feedImages = getFeedImages(project)
+  const feedImageIds = feedImages.map((i) => i.id)
+  const pairs = pairKeysFor(feedImageIds)
   const withClips = tally ? tally.aiReady : pairs.filter((k) => project.transitions[k]?.clip).length
   // ONLY missing AI clips block a complete video. A cut is finished the
   // moment it is chosen; a crossfade is rendered locally by FFmpeg.
-  const missingClips = tally ? tally.aiMissing : pairs.length - withClips
+  //
+  // WITHOUT THE TALLY WE DO NOT KNOW THE MODES, so we may not claim
+  // anything is missing. The old fallback was `pairs.length - withClips`,
+  // which counts every clipless pair — every cut included — as missing.
+  // That is the same rule that made a finished feed look permanently
+  // incomplete; guessing pessimistically is not better than waiting for
+  // the real answer.
+  const missingClips = tally ? tally.aiMissing : 0
   const warnings = summary.issues.filter((i) => i.severity === 'warning').length
 
   const steps: ReadinessStep[] = [
     {
       id: 'images',
-      state: project.images.length > 0 ? 'done' : 'todo',
+      state: libraryCount > 0 ? 'done' : 'todo',
       label:
-        project.images.length > 0
-          ? `${project.images.length} image${project.images.length === 1 ? '' : 's'} added`
+        libraryCount > 0
+          ? `${libraryCount} image${libraryCount === 1 ? '' : 's'} imported`
           : 'Add images',
       hint: 'Drop property photos into the Media panel.'
     },
     {
-      // The sequence is arranged the moment there is one to arrange —
+      // The sequence is arranged the moment there is one in the feed —
       // there is no "correct" order to check against, only the operator's.
       id: 'sequence',
-      state: pairs.length > 0 ? 'done' : 'todo',
+      state: feedImages.length > 0 ? 'done' : 'todo',
       label:
-        pairs.length > 0
-          ? `Sequence arranged · ${pairs.length} transition${pairs.length === 1 ? '' : 's'}`
+        feedImages.length > 0
+          ? `${feedImages.length} image${feedImages.length === 1 ? '' : 's'} in sequence · ${pairs.length} transition${pairs.length === 1 ? '' : 's'}`
           : 'Arrange the sequence',
-      hint: 'Drag photos in the timeline. The order is the video.'
+      hint: 'Drag photos from Imported Images to the Transition Feed.'
     },
     {
       id: 'analysis',

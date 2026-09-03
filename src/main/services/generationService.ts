@@ -2,6 +2,8 @@ import { join } from 'node:path'
 import type {
   AiProviderConfig,
   AppSettings,
+  Project,
+  ProjectImage,
   ProviderJobState,
   QueueJob,
   TransitionSettings
@@ -9,9 +11,20 @@ import type {
 import { NATIVE_AUDIO_DEFAULT, transitionKey } from '../../shared/types'
 import { DEFAULT_PRICING, priceSnapshot } from '../../shared/pricing'
 import { promptForTransition } from '../../shared/prompts'
+import { getFeedImages, getFeedSequenceIds } from '../../shared/feedSequence'
+import { assessAiGenerationReadiness } from '../../shared/aiGenerationReadiness'
+import { readAnalysis } from '../db/analysisRepo'
+import { listOverrides } from '../db/overrideRepo'
+import { applyImageOverrides } from '../../shared/imageFacts'
+import type { PropertyAnalysis } from '../../shared/propertyAnalysis'
+import {
+  FALLBACK_DURATION_SEC,
+  resolveTransitionDuration
+} from '../../shared/transitionDuration'
 import { getSettingsJson, listProjects, saveProject } from '../db/projectsRepo'
 import { broadcastProjectUpdated } from '../events'
 import { listCostEntries, recordGenerationSpend, settleGenerationSpend } from '../db/costRepo'
+import { recordGeneration, archivePreviousGenerations } from '../db/generationCatalogueRepo'
 import {
   countsAsSpend,
   entryAmount,
@@ -23,7 +36,12 @@ import { projectImagesDir } from '../paths'
 import { randomUUID } from 'node:crypto'
 import { existsSync, rmSync, statSync } from 'node:fs'
 import { createProvider } from '../providers/registry'
-import type { GenerationRequest, SanitizedRequestPreview, VideoProvider } from '../providers/types'
+import type {
+  GenerationRequest,
+  ProviderError,
+  SanitizedRequestPreview,
+  VideoProvider
+} from '../providers/types'
 import { clipUrl, projectTransitionsDir as transitionsDir } from '../files'
 import { ensureDir, safeManagedPath } from '../paths'
 import { probeDurationSec } from './ffmpegService'
@@ -61,6 +79,7 @@ export {
   type GenerationAction
 } from '../../shared/generationState'
 import {
+  isTerminalProviderErrorCode,
   resolveGenerationAction,
   STATUS_ENDPOINT_UNVERIFIED,
   STATUS_ENDPOINT_UNVERIFIED_MESSAGE
@@ -76,6 +95,38 @@ function readSettings(): AppSettings | null {
  * settings saved before fal existed have no such field and fall back to the
  * first entry — the exact pre-fal behaviour.
  */
+/**
+ * The ACCEPTED analysis with manual corrections folded in — the same
+ * document the planner and the inspectors read, so a generation is judged
+ * against exactly what the operator was shown.
+ */
+/**
+ * Store WHY a provider call failed, classified, on the job.
+ *
+ * The distinction being preserved is the one the recovery UI depends on:
+ * a refusal kills the remote task id, losing contact does not. Both look
+ * identical once the queue has reduced them to a message string.
+ */
+function recordProviderFailure(jobId: string, error: ProviderError): void {
+  try {
+    updateJobProvider(jobId, {
+      providerFailure: {
+        code: error.code,
+        message: error.message,
+        httpStatus: error.httpStatus,
+        terminal: isTerminalProviderErrorCode(error.code)
+      }
+    })
+  } catch (err) {
+    // Never let bookkeeping mask the failure it is describing.
+    console.error('[generation] could not record the provider failure', err)
+  }
+}
+
+function acceptedAnalysisFor(projectId: string): PropertyAnalysis {
+  return applyImageOverrides(readAnalysis(projectId), listOverrides(projectId))
+}
+
 function activeProviderConfig(settings: AppSettings | null): AiProviderConfig | undefined {
   const providers = settings?.providers ?? []
   if (settings?.activeProviderId) {
@@ -86,6 +137,36 @@ function activeProviderConfig(settings: AppSettings | null): AiProviderConfig | 
 }
 
 /** Builds the provider-neutral request for one transition pair. */
+/**
+ * THE PAIR, LOCATED IN THE VIDEO — NOT IN THE LIBRARY.
+ *
+ * ── THE BUG THIS EXISTS FOR ──────────────────────────────────────────
+ *
+ * Every pair lookup in this file walked `project.images`, which is the
+ * imported LIBRARY, not the Transition Feed. The moment a feed stops
+ * matching library order — which is what accepting a proposal does, and
+ * what dragging one photo does — a pair that is perfectly adjacent in the
+ * video is not adjacent in that list. Generation then reported
+ * "Transition … is not in the image sequence" about a transition sitting
+ * in the sequence, and refused to build a request for it.
+ *
+ * The feed is what becomes the video, so the feed is where a transition
+ * lives. Position also decides START vs END, so reading the wrong list
+ * could not merely fail — it could have paired the wrong two frames.
+ */
+function feedPairAt(
+  project: Project,
+  pairKey: string
+): { index: number; start: ProjectImage; end: ProjectImage } | null {
+  const feed = getFeedImages(project)
+  for (let i = 0; i < feed.length - 1; i++) {
+    if (transitionKey(feed[i].id, feed[i + 1].id) === pairKey) {
+      return { index: i, start: feed[i], end: feed[i + 1] }
+    }
+  }
+  return null
+}
+
 export function buildGenerationRequest(
   projectId: string,
   pairKey: string,
@@ -94,18 +175,19 @@ export function buildGenerationRequest(
   const project = listProjects().find((p) => p.id === projectId)
   if (!project) return { ok: false, reason: 'Project no longer exists' }
 
-  // Locate the pair in image order so START/END can never be swapped.
-  let startIndex = -1
-  for (let i = 0; i < project.images.length - 1; i++) {
-    if (transitionKey(project.images[i].id, project.images[i + 1].id) === pairKey) {
-      startIndex = i
-      break
+  // Located in FEED order, so START/END can never be swapped.
+  const pair = feedPairAt(project, pairKey)
+  if (!pair) {
+    return {
+      ok: false,
+      reason:
+        'This transition is no longer part of the current Transition Feed. ' +
+        'Select an active transition to generate.'
     }
   }
-  if (startIndex === -1) return { ok: false, reason: `Transition ${pairKey} is not in the image sequence` }
 
-  const startImage = project.images[startIndex]
-  const endImage = project.images[startIndex + 1]
+  const startImage = pair.start
+  const endImage = pair.end
   const transition: TransitionSettings | undefined = project.transitions[pairKey]
   const config = activeProviderConfig(settings)
 
@@ -120,8 +202,13 @@ export function buildGenerationRequest(
       startImageName: startImage.fileName,
       endImageName: endImage.fileName,
       prompt: promptForTransition(transition?.prompt),
+      // The SAME resolver the inspector and the timeline display, so the
+      // number the operator was shown is the number that gets submitted.
       // Legacy/partial settings rows may lack whole sections — never assume.
-      durationSec: transition?.durationSec ?? settings?.exportDefaults?.defaultTransitionDurationSec ?? 5,
+      durationSec: resolveTransitionDuration(
+        transition,
+        settings?.exportDefaults?.defaultTransitionDurationSec
+      ),
       resolution: settings?.exportDefaults?.resolution ?? '1080p',
       // Audio is never enabled implicitly — see NATIVE_AUDIO_DEFAULT.
       nativeAudio: NATIVE_AUDIO_DEFAULT,
@@ -297,6 +384,21 @@ export interface LiveConfirmation {
   additionalCostLabel: string
   /** Production spend on this project so far, in the provider's currency. */
   spentSoFarLabel: string
+  /**
+   * What is guiding this generation.
+   *
+   *   analysis — the accepted map supports the move and supplies anchors
+   *   none     — an operator override; no spatial guidance at all
+   *   blocked  — cannot be generated, see `reasons`
+   *
+   * `none` must never be presented as a safe or analysis-based
+   * transition; it is the state that produced a moved sofa.
+   */
+  spatialGuidance: 'analysis' | 'none' | 'blocked'
+  /** Present only for an override: what the operator is agreeing to. */
+  overrideWarning: string | null
+  /** Why the evidence is missing, for the same dialog. */
+  overrideReason: string | null
   /** Spend after this generation, or 'unavailable' with no verified rate. */
   projectedAfterLabel: string
 }
@@ -312,18 +414,13 @@ export function liveConfirmation(projectId: string, pairKey: string): LiveConfir
   const meta = provider.metadata()
   const model = meta.models.find((m) => m.id === (activeProviderConfig(settings)?.model ?? ''))
 
-  // Human "Image X → Image Y" label + the exact frames, from image order.
-  let label = pairKey
-  let startImage: { name: string; src: string } | null = null
-  let endImage: { name: string; src: string } | null = null
-  for (let i = 0; i < project.images.length - 1; i++) {
-    if (transitionKey(project.images[i].id, project.images[i + 1].id) === pairKey) {
-      label = `Image ${i + 1} → Image ${i + 2}`
-      startImage = { name: project.images[i].fileName, src: project.images[i].src }
-      endImage = { name: project.images[i + 1].fileName, src: project.images[i + 1].src }
-      break
-    }
-  }
+  // Human "Image X → Image Y" label + the exact frames, in FEED order —
+  // the same list the request is built from, so the dialog cannot describe
+  // one pair while the payload carries another.
+  const pair = feedPairAt(project, pairKey)
+  const label = pair ? `Image ${pair.index + 1} → Image ${pair.index + 2}` : pairKey
+  const startImage = pair ? { name: pair.start.fileName, src: pair.start.src } : null
+  const endImage = pair ? { name: pair.end.fileName, src: pair.end.src } : null
 
   const price = priceSnapshot(project.images.length, settings?.pricing ?? DEFAULT_PRICING)
   // Providers bill in their own unit (fal.ai in dollars, Kling in credits);
@@ -331,15 +428,55 @@ export function liveConfirmation(projectId: string, pairKey: string): LiveConfir
   // customer's project price.
   const usage = built.ok ? provider.estimateUsage(built.request) : null
 
+  // THE SAME GATE THE SUBMIT PATH USES, ASKED BEFORE THE BUTTON LIGHTS UP.
+  //
+  // A confirmation that says "ok" for a pair the submit path will refuse
+  // is a confirmation that teaches the operator to distrust the dialog.
+  const readiness = assessAiGenerationReadiness(
+    acceptedAnalysisFor(projectId),
+    getFeedSequenceIds(project),
+    pairKey,
+    project.transitions[pairKey]?.modeProvenance
+  )
+  const override = readiness.ok && readiness.kind === 'manual-override' ? readiness : null
+
   return {
-    ok: eligibility.allowed && built.ok,
-    reasons: built.ok ? eligibility.reasons : [...eligibility.reasons, built.reason],
+    ok: eligibility.allowed && built.ok && readiness.ok,
+    reasons: [
+      ...eligibility.reasons,
+      ...(built.ok ? [] : [built.reason]),
+      ...(readiness.ok ? [] : [readiness.reason])
+    ],
+    // WHAT IS GUIDING THIS GENERATION. Stated plainly so an override can
+    // never be mistaken for a supported transition: the dialog shows the
+    // risk, and the operator agrees to it explicitly or cancels.
+    spatialGuidance: readiness.ok
+      ? readiness.kind === 'analysis-backed'
+        ? 'analysis'
+        : 'none'
+      : 'blocked',
+    overrideWarning: override ? override.warning : null,
+    overrideReason: override ? override.reason : null,
     projectName: project.name,
     transitionLabel: label,
     provider: meta.label,
     model: model?.label ?? activeProviderConfig(settings)?.model ?? 'unknown',
     // What will actually be sent, after the provider's own mapping.
-    durationSec: usage?.seconds ?? (built.ok ? built.request.durationSec : 0),
+    //
+    // NEVER ZERO. This fell back to a literal 0 whenever the request could
+    // not be built, so a blocked confirmation announced "Duration: 0s" —
+    // a length no provider offers and nothing would ever have been sent
+    // at. The resolver answers the same question the request would ask,
+    // so a dialog that cannot submit still states the truth about what it
+    // would submit.
+    durationSec:
+      usage?.seconds ??
+      (built.ok
+        ? built.request.durationSec
+        : resolveTransitionDuration(
+            project.transitions[pairKey],
+            settings?.exportDefaults?.defaultTransitionDurationSec
+          )),
     resolution: usage?.resolution ?? (built.ok ? built.request.resolution : '—'),
     nativeAudio: built.ok ? built.request.nativeAudio : false,
     prompt: built.ok ? built.request.prompt : '',
@@ -427,6 +564,58 @@ export function queueLiveGeneration(
   const eligibility = liveEligibility(settings, pairKeys.length)
   if (!eligibility.allowed) return { ok: false, reasons: eligibility.reasons }
 
+  // ── PREFLIGHT: NOTHING STALE IS EVER PAID FOR ──────────────────────
+  //
+  // The dialog already disables Generate for a pair the feed no longer
+  // contains, but this is the door money actually goes through and it
+  // must not take the renderer's word for what is current. A feed can
+  // also change between the dialog opening and Generate being pressed.
+  //
+  // Checked for EVERY pair before any job exists: a batch containing one
+  // stale transition is refused whole rather than partly submitted.
+  const project = listProjects().find((p) => p.id === projectId)
+  if (!project) return { ok: false, reasons: ['Project no longer exists.'] }
+
+  const stale = pairKeys.filter((key) => feedPairAt(project, key) === null)
+  if (stale.length > 0) {
+    return {
+      ok: false,
+      reasons: [
+        stale.length === 1
+          ? 'This transition is no longer part of the current Transition Feed. Select an active transition to generate.'
+          : `${stale.length} of these transitions are no longer part of the current Transition Feed.`
+      ]
+    }
+  }
+
+  // ── EVIDENCE, RE-ASKED AT THE MOMENT OF SPENDING ───────────────────
+  //
+  // A stored `mode: 'ai'` is not enough. The accepted analysis must be
+  // able to justify the move NOW and yield an anchored instruction; the
+  // alternative is a paid request carrying only the generic prompt, which
+  // is what produced a moved sofa and a duplicated television.
+  const accepted = acceptedAnalysisFor(projectId)
+  const feedIds = getFeedSequenceIds(project)
+  const readiness = pairKeys.map((key) => ({
+    key,
+    result: assessAiGenerationReadiness(
+      accepted,
+      feedIds,
+      key,
+      // An operator's own AI choice may proceed on their acknowledged
+      // risk; one the analyzer made may not, without the map behind it.
+      project.transitions[key]?.modeProvenance
+    )
+  }))
+  const unsupported = readiness.filter((r) => !r.result.ok)
+  if (unsupported.length > 0) {
+    const first = unsupported[0].result
+    return {
+      ok: false,
+      reasons: [first.ok ? '' : first.reason]
+    }
+  }
+
   const job = queueGeneration(projectId, pairKeys, null)
   if (!job) return { ok: false, reasons: ['Could not queue the generation.'] }
   return { ok: true, job }
@@ -457,7 +646,8 @@ export async function downloadAndAttachResult(
   provider: VideoProvider,
   projectId: string,
   pairKey: string,
-  resultUrl: string
+  resultUrl: string,
+  queueJobId: string
 ): Promise<{ ok: true; storedName: string } | { ok: false; reason: string }> {
   const dir = transitionsDir(projectId)
   ensureDir(dir)
@@ -486,17 +676,40 @@ export async function downloadAndAttachResult(
   const providerId = provider.metadata().id
   const source: 'kling' | 'fal' = providerId === 'fal' ? 'fal' : 'kling'
   const current = project.transitions[pairKey]
+  const newClip = {
+    storedName,
+    originalName: `${source}-generation.mp4`,
+    source,
+    src: clipUrl(projectId, storedName)
+  }
   project.transitions[pairKey] = {
-    ...(current ?? { prompt: '', durationSec: 5, status: 'not-generated', clip: null }),
+    ...(current ?? {
+      prompt: '',
+      durationSec: FALLBACK_DURATION_SEC,
+      status: 'not-generated',
+      clip: null
+    }),
     status: 'completed',
-    clip: {
-      storedName,
-      originalName: `${source}-generation.mp4`,
-      source,
-      src: clipUrl(projectId, storedName)
-    }
+    clip: newClip
   }
   project.updatedAt = Date.now()
+
+  // CATALOGUE: Record this generation in the immutable history before saving.
+  // Parse pairKey to extract image IDs (format: "fromId->toId").
+  const [fromImageId, toImageId] = pairKey.split('->') as [string, string]
+  recordGeneration({
+    queueJobId, // IDEMPOTENCY: Same job = same catalogue row, even if called multiple times
+    projectId,
+    fromImageId,
+    toImageId,
+    provider: source,
+    model: null, // Model ID would require passing through from job context; persisting source is sufficient
+    clip: newClip,
+    prompt: current?.prompt ?? ''
+  })
+  // Archive previous generations of this pair so only newest shows as "active".
+  archivePreviousGenerations(projectId, fromImageId, toImageId)
+
   saveProject(project)
   // THE fix for "the clip generated but never showed up". The write above
   // was always correct; nothing told the renderer. This re-reads the stored
@@ -550,12 +763,8 @@ function markStatusEndpointUnverified(
 export function pairLabel(projectId: string, pairKey: string): string {
   const project = listProjects().find((p) => p.id === projectId)
   if (!project) return pairKey
-  for (let i = 0; i < project.images.length - 1; i++) {
-    if (transitionKey(project.images[i].id, project.images[i + 1].id) === pairKey) {
-      return `Image ${i + 1} → Image ${i + 2}`
-    }
-  }
-  return pairKey
+  const pair = feedPairAt(project, pairKey)
+  return pair ? `Image ${pair.index + 1} → Image ${pair.index + 2}` : pairKey
 }
 
 /**
@@ -575,10 +784,21 @@ export function perGenerationEstimate(
 ): { amount: number; currency: string } {
   const project = listProjects().find((p) => p.id === projectId)
   const config = activeProviderConfig(settings)
-  if (!project || !config || project.images.length < 2) return { amount: 0, currency: 'USD' }
+  if (!project || !config) return { amount: 0, currency: 'USD' }
+
+  // A REPRESENTATIVE PAIR FROM THE FEED.
+  //
+  // This took the first two LIBRARY images, which are not necessarily a
+  // transition at all. Now that a request can only be built for a pair
+  // the feed actually contains, that would have made the estimate read
+  // 0.00 for every project whose feed differs from library order — a
+  // silent zero standing in for "we did not look in the right place".
+  const feed = getFeedImages(project)
+  if (feed.length < 2) return { amount: 0, currency: 'USD' }
+
   try {
     const provider = createProvider(config, settings)
-    const key = transitionKey(project.images[0].id, project.images[1].id)
+    const key = transitionKey(feed[0].id, feed[1].id)
     const built = buildGenerationRequest(projectId, key, settings)
     if (!built.ok) return { amount: 0, currency: 'USD' }
     const usage = provider.estimateUsage(built.request)
@@ -627,13 +847,24 @@ async function runLiveTransition(
   request: GenerationRequest,
   ctx: { onProgress: (pct: number) => void }
 ): Promise<{ ok: true } | { ok: false; endpointUnverified?: true; reason: string }> {
-  const action = resolveGenerationAction(job.provider)
+  const action = resolveGenerationAction(job.provider, job.note)
   const label = provider.metadata().label
   let taskId = job.provider?.providerTaskId ?? null
 
   if (action === 'submit') {
     const submitted = await provider.submitGeneration(request)
-    if (!submitted.ok) return { ok: false, reason: submitted.error.message }
+    if (!submitted.ok) {
+      // CLASSIFY THE REFUSAL, DON'T JUST DESCRIBE IT.
+      //
+      // The queue's catch block keeps only a message string, so the
+      // provider's own error CODE was lost the moment it was thrown —
+      // and with it the difference between "the provider rejected this
+      // request" and "we could not reach the provider". Recorded here,
+      // while it still exists, so `canResumeProviderTask` can answer
+      // from stored state instead of guessing from a status word.
+      recordProviderFailure(job.id, submitted.error)
+      return { ok: false, reason: submitted.error.message }
+    }
 
     // ── PERSIST THE REMOTE TASK ID BEFORE ANYTHING ELSE ────────────────
     // From here on a paid task exists. If this write fails we must NOT
@@ -762,7 +993,7 @@ async function runLiveTransition(
 
   // ── Download → validate → attach ───────────────────────────────────────
   ctx.onProgress(85)
-  const attached = await downloadAndAttachResult(provider, job.projectId, pairKey, resultUrl)
+  const attached = await downloadAndAttachResult(provider, job.projectId, pairKey, resultUrl, job.id)
   if (!attached.ok) {
     // The remote task metadata is intentionally preserved so the DOWNLOAD
     // can be retried without paying for a new generation.
@@ -803,7 +1034,9 @@ registerRunner('ai-generation', async (job, ctx) => {
   if (!project) throw new Error('Project no longer exists')
 
   // Idempotency gate — see the state machine at the top of this file.
-  const action = resolveGenerationAction(job.provider)
+  // The recorded note is read too, so a job that failed before the
+  // structured provider code existed is still recognised as terminal.
+  const action = resolveGenerationAction(job.provider, job.note)
   // In DRY RUN we cannot poll a remote task — and we must never resubmit
   // one either. Live resume-poll is handled inside runLiveTransition.
   if (action === 'resume-poll' && dryRun) {

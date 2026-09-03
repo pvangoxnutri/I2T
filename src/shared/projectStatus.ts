@@ -1,3 +1,4 @@
+import { getFeedImages } from './feedSequence'
 import {
   transitionKey,
   type Project,
@@ -60,8 +61,12 @@ export function orderedTransitions(
   defaultDurationSec: number
 ): { pairKey: string; label: string; settings: TransitionSettings }[] {
   const out: { pairKey: string; label: string; settings: TransitionSettings }[] = []
-  for (let i = 0; i < project.images.length - 1; i++) {
-    const pairKey = transitionKey(project.images[i].id, project.images[i + 1].id)
+  // THE FEED IS THE SEQUENCE. A transition exists between two images that
+  // are adjacent in the VIDEO, not in the imported library — built from
+  // library order this enumerated pairs the project does not contain.
+  const feedImages = getFeedImages(project)
+  for (let i = 0; i < feedImages.length - 1; i++) {
+    const pairKey = transitionKey(feedImages[i].id, feedImages[i + 1].id)
     out.push({
       pairKey,
       label: `${i + 1} → ${i + 2}`,

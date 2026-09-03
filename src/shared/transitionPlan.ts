@@ -1,5 +1,9 @@
 import { DEFAULT_TRANSITION_PROMPT } from './prompts'
 import {
+  evaluateTransitionSafety,
+  type TransitionSafetyVerdict
+} from './transitionSafety'
+import {
   relateImages,
   type CameraOrientation,
   type PropertyAnalysis,
@@ -128,6 +132,16 @@ export interface TransitionPlan {
   continuity: ContinuityHints
   /** Plain-language reason, for the plan review list. */
   rationale: string
+  /**
+   * WHETHER A GENERATED MOVE IS ALLOWED, and why — from the single
+   * evaluator shared with the feed proposal.
+   *
+   * Kept as its own field rather than folded into the evidence above
+   * because the rest of this plan answers "how should the camera move",
+   * while this answers "may it move at all". Those were once decided by
+   * two different rule sets that disagreed; see `shared/transitionSafety`.
+   */
+  safetyVerdict: TransitionSafetyVerdict
 }
 
 /**
@@ -185,7 +199,9 @@ function planFromRelation(
   evidence: PairEvidence,
   previous: TransitionPlan | null,
   reviewBlock: string | null
-): Omit<TransitionPlan, 'fromImageId' | 'toImageId'> {
+  // The AI/CUT verdict is deliberately NOT this function's business — it
+  // describes motion, not permission — so it is not part of what it returns.
+): Omit<TransitionPlan, 'fromImageId' | 'toImageId' | 'safetyVerdict'> {
   const incomingRotation: RotationDirection = previous?.continuity.outgoingRotation ?? 'none'
   // Derived from the two recorded headings, or `unknown`. There is no
   // longer any path that manufactures one.
@@ -348,7 +364,13 @@ export function planSequence(
         gatherPairEvidence(analysis, from, to),
         plans[i - 1] ?? null,
         reviewBlock
-      )
+      ),
+      // THE AI/CUT DECISION IS NOT MADE HERE. It comes from the one
+      // evaluator the feed proposal also uses, so the two cannot reach
+      // different conclusions about the same pair. Everything above
+      // describes how the camera should MOVE when a move is allowed,
+      // which is a separate question.
+      safetyVerdict: evaluateTransitionSafety(analysis, from, to, reviews)
     })
   }
   return plans

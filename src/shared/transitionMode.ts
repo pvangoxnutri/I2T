@@ -51,40 +51,46 @@ export const DEFAULT_TRANSITION_MODE: TransitionMode = 'auto'
  * Whether the evidence supports a generated camera move between these two
  * frames.
  *
- * ── CONSERVATIVE ON PURPOSE ──────────────────────────────────────────
+ * ── THE ANSWER IS NOT COMPUTED HERE ──────────────────────────────────
  *
- * Two cases only, and both come from the planner rather than from a
- * second opinion:
+ * It is read from `plan.safetyVerdict`, produced by
+ * `shared/transitionSafety` — the one evaluator the feed proposal also
+ * uses. The rules themselves, and why they are what they are, live there.
  *
- *   same space, with pair-specific evidence — the camera repositions
- *     within one room, which needs no architecture to exist;
- *   different spaces where `physicalNavigationAllowed` is already true —
- *     which means a confirmed connection, an opening visible in the start
- *     frame, and a review state that permits it.
+ * Two cases pass, both conservative on purpose:
  *
- * Everything else is a cut. Including — deliberately — a same-room pair
- * with no pair-specific evidence: generating a camera move from nothing is
- * how twenty-nine identical invented pans happened.
+ *   same space, where a landmark is visible in BOTH frames — the camera
+ *     repositions around something it can hold on to;
+ *   different spaces, where the adjacency is confirmed AND the start
+ *     frame shows a genuine way THROUGH — a door or archway, not a window
+ *     onto the next room — and no reviewer has vetoed it.
+ *
+ * Everything else is a cut, including a same-room pair with nothing in
+ * common: generating a camera move from nothing is how twenty-nine
+ * identical invented pans happened.
  */
 export function evidenceSupportsAi(plan: TransitionPlan): boolean {
-  if (plan.relationType === 'SAME_ROOM') return plan.hasEvidence
-  if (plan.relationType === 'ADJACENT_ROOM') return plan.physicalNavigationAllowed
-  return false
+  // READ, DO NOT RE-DERIVE. This used to apply its own rules —
+  // `hasEvidence` for same-room, `physicalNavigationAllowed` for
+  // adjacent — and both were looser than the ones the feed proposal
+  // applied to the identical pair. Same-room passed on a single leaving
+  // landmark or a derived rotation; adjacent-room passed on ANY recorded
+  // opening, including a fixed window, which licensed a generated move
+  // through solid glazing. The verdict now comes from the one evaluator
+  // both paths share.
+  return plan.safetyVerdict.mode === 'ai'
 }
 
-/** The reason a cut was chosen, specific enough to argue with. */
+/**
+ * The reason a cut was chosen, specific enough to argue with.
+ *
+ * Taken from the evaluator that made the decision, so the explanation can
+ * never describe different reasoning from the one actually applied. This
+ * function used to reconstruct a reason from the plan's fields, which is
+ * how a pair could be cut for one reason and told about another.
+ */
 function cutReason(plan: TransitionPlan): string {
-  if (plan.relationType === 'UNKNOWN') {
-    return 'No evidenced spatial relationship between these images — a generated move would have to invent the route.'
-  }
-  if (plan.relationType === 'ADJACENT_ROOM') {
-    if (plan.reviewBlock) return plan.reviewBlock
-    if (plan.visibleOpenings.length === 0) {
-      return 'No opening or path between these spaces is visible in the start frame, so no evidenced physical route exists.'
-    }
-    return `The connection between these spaces is only ${plan.confidence}, which is not enough to stage a walk-through.`
-  }
-  return 'Both images are in the same space, but nothing pair-specific was recorded to base a camera move on.'
+  return plan.safetyVerdict.reason
 }
 
 /**
@@ -194,7 +200,7 @@ export function recommendedMode(plan: TransitionPlan | null): {
 } {
   if (!plan) return { mode: 'cut', reason: 'No analysis covers these images.' }
   return evidenceSupportsAi(plan)
-    ? { mode: 'ai', reason: 'Spatial evidence supports a generated camera move.' }
+    ? { mode: 'ai', reason: plan.safetyVerdict.reason }
     : { mode: 'cut', reason: cutReason(plan) }
 }
 

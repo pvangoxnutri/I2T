@@ -105,9 +105,17 @@ export function ProjectsPage({
 }): React.JSX.Element {
   const { projects, queue, settings, createProject, deleteProject } = useAppState()
   const [filter, setFilter] = useState<Filter>('all')
+  const [deleteConfirm, setDeleteConfirm] = useState<{ projectId: string; projectName: string } | null>(null)
 
   const handleNew = (): void => {
     void createProject().then((project) => onOpenProject(project.id))
+  }
+
+  const handleConfirmDelete = (): void => {
+    if (deleteConfirm) {
+      deleteProject(deleteConfirm.projectId)
+      setDeleteConfirm(null)
+    }
   }
 
   /** Soonest upcoming scheduled job for a project, if any. */
@@ -187,10 +195,38 @@ export function ProjectsPage({
                 priceLabel={formatPrice(price.totalPrice, price.currency)}
                 scheduledFor={scheduledFor}
                 onOpen={() => onOpenProject(project.id)}
-                onDelete={() => deleteProject(project.id)}
+                onDelete={() => setDeleteConfirm({ projectId: project.id, projectName: project.name })}
               />
             )
           })}
+        </div>
+      )}
+
+      {deleteConfirm && (
+        <div className="dialog-overlay" onClick={() => setDeleteConfirm(null)}>
+          <div className="dialog-box" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-header">
+              <h2>Delete project?</h2>
+            </div>
+
+            <div className="dialog-body">
+              <p>
+                Are you sure you want to delete <strong>{deleteConfirm.projectName}</strong>? This action cannot be undone.
+              </p>
+              <p className="dialog-note">
+                All imported images, generated transitions, and project data will be permanently removed.
+              </p>
+            </div>
+
+            <div className="dialog-actions">
+              <button type="button" className="btn btn-secondary" onClick={() => setDeleteConfirm(null)}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-destructive" onClick={handleConfirmDelete}>
+                Delete project
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

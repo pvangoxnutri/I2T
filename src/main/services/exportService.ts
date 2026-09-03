@@ -1,3 +1,9 @@
+import {
+  applyExportFormat,
+  DEFAULT_EXPORT_FORMAT,
+  type ExportFormatId
+} from '../../shared/exportFormat'
+import { getFeedImages } from '../../shared/feedSequence'
 import { app, BrowserWindow, dialog } from 'electron'
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -93,7 +99,28 @@ export function projectAssembly(project: Project): {
 } {
   const { exportDefaults } = readSettings()
   const analysis = applyImageOverrides(readAnalysis(project.id), listOverrides(project.id))
-  const imageIds = project.images.map((i) => i.id)
+  /**
+   * THE VIDEO IS THE FEED.
+   *
+   * ── THE BUG THIS FIXES ─────────────────────────────────────────────
+   *
+   * This enumerated `project.images` — the imported LIBRARY — and
+   * therefore planned an export out of pairs the video does not contain.
+   * A library-adjacent pair has no stored transition row, so it read as
+   * `auto`; where the analysis happened to support a move it then
+   * resolved to AI; and having never been generated (it is not in the
+   * film) it was reported as a MISSING CLIP.
+   *
+   * That is what produced "Missing transition clips: 5 → 6, 7 → 8,
+   * 9 → 10, …" on a feed the operator had finished: every other library
+   * pair that happened to look navigable. The positions in that message
+   * were library positions, so they did not even name transitions the
+   * video has.
+   *
+   * Readiness and the assembler both come through this one function, so
+   * fixing it here fixes both — and keeps them incapable of disagreeing.
+   */
+  const imageIds = getFeedImages(project).map((i) => i.id)
   const plans = planSequence(analysis, imageIds, reviewMap(project.id, 'accepted'))
 
   const modes: EffectiveTransitionMode[] = []
@@ -112,7 +139,11 @@ export function projectAssembly(project: Project): {
     imageIds,
     modes,
     clipPaths,
-    imagePaths: project.images.map((img) => imagePath(project.id, img.storedName) ?? ''),
+    // MUST be the same list, in the same order, as `imageIds` — the
+    // planner indexes both by position. Built from the library while
+    // `imageIds` came from the feed, position N would have named one
+    // photograph and shown another.
+    imagePaths: getFeedImages(project).map((img) => imagePath(project.id, img.storedName) ?? ''),
     seamBlend: exportDefaults.seamBlend ?? 'subtle'
   })
 
@@ -136,6 +167,66 @@ export function projectAssembly(project: Project): {
  */
 export function missingClipPairs(project: Project): string[] {
   return projectAssembly(project).plan.missingClipPairs
+}
+
+export interface ExportReadiness {
+  ready: boolean
+  /** Feed positions of AI pairs whose clip is missing. Empty when ready. */
+  missingAiClips: string[]
+  /** Pairs that need no clip at all, for an honest "N of M" readout. */
+  cutPairs: string[]
+  crossfadePairs: string[]
+  /** Images in the FEED — what will actually be exported. */
+  sequenceLength: number
+  reason: string | null
+}
+
+/**
+ * THE ONE ANSWER TO "CAN THIS PROJECT BE EXPORTED?"
+ *
+ * ── THE BUG THIS EXISTS FOR ──────────────────────────────────────────
+ *
+ * The export panel computed its own answer:
+ *
+ *   for each feed pair: if (!transitions[key]?.clip) missing.push(...)
+ *
+ * — demanding a generated clip for EVERY pair, never asking what the
+ * transition actually is. A cut generates nothing by definition, so on a
+ * finished feed every cut was reported as a missing clip and Export
+ * stayed disabled. On the real project that produced exactly
+ * "5 → 6, 7 → 8, 9 → 10, 11 → 12, 13 → 14": the five pairs that are
+ * `auto` with no clip, which is precisely what a cut looks like.
+ *
+ * Fixing `projectAssembly` did nothing for that message, because the
+ * panel never called it. So readiness is published from here, backed by
+ * the same `projectAssembly` the exporter runs on — the two cannot
+ * disagree, because there is only one of them.
+ */
+export function exportReadiness(project: Project): ExportReadiness {
+  const feedLength = getFeedImages(project).length
+  if (feedLength < 2) {
+    return {
+      ready: false,
+      missingAiClips: [],
+      cutPairs: [],
+      crossfadePairs: [],
+      sequenceLength: feedLength,
+      reason: 'Add at least two images to the Transition Feed before exporting.'
+    }
+  }
+
+  const { plan } = projectAssembly(project)
+  return {
+    ready: plan.ok && plan.missingClipPairs.length === 0,
+    missingAiClips: plan.missingClipPairs,
+    cutPairs: plan.cutPairs,
+    crossfadePairs: plan.crossfadePairs,
+    sequenceLength: feedLength,
+    reason:
+      plan.missingClipPairs.length > 0
+        ? `Missing transition clips: ${plan.missingClipPairs.join(', ')}`
+        : (plan.reason ?? null)
+  }
 }
 
 /**
@@ -331,12 +422,22 @@ const runExportJob = async (
     .map((name) => safeManagedPath(exportsDir(project.id), name))
     .filter((p) => existsSync(p))
 
+  // THE FORMAT IS THE JOB'S, NOT THE PROJECT'S. Chosen when the export
+  // was started and carried on the job, so a queued export renders the
+  // shape it was queued for even if the setting changes meanwhile — the
+  // same reason its price is snapshotted.
+  const { defaults: formatDefaults, fit } = applyExportFormat(
+    readSettings().exportDefaults,
+    job.metadata.exportFormat as ExportFormatId | undefined
+  )
+
   try {
     const handle = assemble({
       clipPaths: [],
       segments,
       seamOverrideSec: plan.seamSeconds,
-      defaults: readSettings().exportDefaults,
+      defaults: formatDefaults,
+      fit,
       overlayPngPaths,
       outputPath,
       onProgress: ctx.onProgress
@@ -364,12 +465,18 @@ export async function startExport(
   projectId: string,
   kind: ExportKind,
   overlays: ExportOverlays,
-  scheduledFor?: number | null
+  scheduledFor?: number | null,
+  format?: ExportFormatId
 ): Promise<ExportStartResult> {
   const project = listProjects().find((p) => p.id === projectId)
   if (!project) return { ok: false, missing: [], reason: 'Project not found' }
-  if (project.images.length < 2) {
-    return { ok: false, missing: [], reason: 'At least two images are required' }
+  // The FEED is what gets exported, so it is the feed that must have two.
+  if (getFeedImages(project).length < 2) {
+    return {
+      ok: false,
+      missing: [],
+      reason: 'Add at least two images to the Transition Feed before exporting.'
+    }
   }
 
   // Sequence validation — assembly must never silently skip a gap.
@@ -411,7 +518,10 @@ export async function startExport(
     projectId: project.id,
     projectName: project.name,
     kind: kind === 'preview' ? 'preview-export' : 'final-export',
-    transitionCount: Math.max(0, project.images.length - 1),
+    // Transitions come from the FEED — that is how many the video has.
+    transitionCount: Math.max(0, getFeedImages(project).length - 1),
+    // The CUSTOMER price is per IMPORTED image and is deliberately
+    // unrelated to how many made the final cut.
     price: priceSnapshot(project.images.length, readSettings().pricing),
     scheduledFor,
     metadata: { exportKind: kind, outputPath: save.filePath, overlayFiles }
