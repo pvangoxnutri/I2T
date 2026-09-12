@@ -1,0 +1,20 @@
+node_modules/
+dist/
+scratch/
+.cache/
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.log
+
+# Public website demos must be included despite the root media ignore rule.
+!/assets/videos/demo-standard.mp4
+!/assets/videos/demo-instagram.mp4
+
+# Local tooling and verification output.
+.wrangler/
+coverage/
+test-results/
+playwright-report/

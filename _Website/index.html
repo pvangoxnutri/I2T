@@ -1,481 +1,1187 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
-  <meta
-    name="description"
-    content="Image2Transition - AI-powered image transitions. Website currently under development."
-  />
-
-  <title>Image2Transition</title>
-
-  <!-- The standalone symbol, as the tab icon. -->
-  <link rel="icon" type="image/png" href="assets/logo.png" />
-  <meta name="theme-color" content="#030303" />
-
-  <style>
-    :root {
-      --background: #030303;
-      --surface: #0b0b0d;
-      --surface-hover: #111116;
-      --text: #ffffff;
-      --muted: #8d8d95;
-      --blue: #43b5fc;
-      --border: rgba(255, 255, 255, 0.09);
-    }
-
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
-    html {
-      scroll-behavior: smooth;
-    }
-
-    body {
-      min-height: 100vh;
-      background:
-        radial-gradient(
-          circle at 50% 15%,
-          rgba(67, 181, 252, 0.08),
-          transparent 30%
-        ),
-        var(--background);
-
-      color: var(--text);
-
-      font-family:
-        Inter,
-        -apple-system,
-        BlinkMacSystemFont,
-        "Segoe UI",
-        Roboto,
-        Helvetica,
-        Arial,
-        sans-serif;
-
-      display: flex;
-      align-items: center;
-      justify-content: center;
-
-      padding: 40px 22px;
-    }
-
-    .page {
-      width: 100%;
-      max-width: 850px;
-
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-
-      text-align: center;
-    }
-
-    /* -------------------------
-       LOGO
-    -------------------------- */
-
-    /* Sized against the trimmed artwork. The supplied file carried about
-       a third of its width and half its height as transparent margin, so
-       the old 620px box drew a much smaller logo than it looked like it
-       would and the spacing below it was mostly empty pixels. Trimmed,
-       the width is the logo, and the gap underneath is real. */
-    .logo {
-      width: min(545px, 88vw);
-      height: auto;
-
-      display: block;
-
-      margin-bottom: 62px;
-
-      filter:
-        drop-shadow(0 0 18px rgba(67, 181, 252, 0.12))
-        drop-shadow(0 0 45px rgba(67, 181, 252, 0.06));
-    }
-
-    /* -------------------------
-       STATUS
-    -------------------------- */
-
-    .status {
-      display: inline-flex;
-      align-items: center;
-      gap: 9px;
-
-      margin-bottom: 23px;
-
-      padding: 8px 14px;
-
-      border: 1px solid var(--border);
-      border-radius: 100px;
-
-      background: rgba(255, 255, 255, 0.025);
-
-      color: #b4b4bc;
-
-      font-size: 12px;
-      font-weight: 500;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-    }
-
-    .status-dot {
-      width: 7px;
-      height: 7px;
-
-      background: var(--blue);
-      border-radius: 50%;
-
-      /* Enough to read as lit, short of the neon halo the brief rules out. */
-      box-shadow: 0 0 8px rgba(67, 181, 252, 0.55);
-    }
-
-    /* -------------------------
-       TEXT
-    -------------------------- */
-
-    h1 {
-      max-width: 750px;
-
-      font-size: clamp(40px, 7vw, 72px);
-      line-height: 1.02;
-
-      font-weight: 600;
-      letter-spacing: -0.045em;
-
-      margin-bottom: 25px;
-    }
-
-    .intro {
-      max-width: 610px;
-
-      color: var(--muted);
-
-      font-size: clamp(16px, 2vw, 19px);
-      line-height: 1.7;
-
-      margin-bottom: 45px;
-    }
-
-    /* -------------------------
-       CONTACT
-    -------------------------- */
-
-    .contact-title {
-      font-size: 13px;
-      color: #62626a;
-
-      letter-spacing: 0.15em;
-      text-transform: uppercase;
-
-      margin-bottom: 16px;
-    }
-
-    .contacts {
-      width: 100%;
-      max-width: 560px;
-
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    .contact-card {
-      width: 100%;
-
-      display: flex;
-      align-items: center;
-
-      padding: 16px 18px;
-
-      background: var(--surface);
-
-      border: 1px solid var(--border);
-      border-radius: 14px;
-
-      color: var(--text);
-      text-decoration: none;
-
-      transition:
-        transform 160ms ease,
-        background 160ms ease,
-        border-color 160ms ease;
-    }
-
-    .contact-card:hover {
-      transform: translateY(-2px);
-
-      background: var(--surface-hover);
-
-      border-color: rgba(67, 181, 252, 0.32);
-    }
-
-    .icon-container {
-      width: 42px;
-      height: 42px;
-
-      flex: 0 0 42px;
-
-      display: flex;
-      align-items: center;
-      justify-content: center;
-
-      margin-right: 15px;
-
-      border-radius: 10px;
-
-      background: rgba(67, 181, 252, 0.08);
-      border: 1px solid rgba(67, 181, 252, 0.12);
-    }
-
-    .icon-container svg {
-      width: 21px;
-      height: 21px;
-    }
-
-    .contact-info {
-      text-align: left;
-
-      display: flex;
-      flex-direction: column;
-
-      min-width: 0;
-    }
-
-    .contact-label {
-      color: #777780;
-
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-
-      margin-bottom: 3px;
-    }
-
-    .contact-value {
-      color: #f4f4f5;
-
-      font-size: 15px;
-      font-weight: 500;
-
-      overflow-wrap: anywhere;
-    }
-
-    .arrow {
-      margin-left: auto;
-
-      color: #4d4d55;
-
-      font-size: 18px;
-
-      padding-left: 15px;
-
-      transition:
-        transform 160ms ease,
-        color 160ms ease;
-    }
-
-    .contact-card:hover .arrow {
-      transform: translateX(3px);
-      color: var(--blue);
-    }
-
-    /* -------------------------
-       THANK YOU
-    -------------------------- */
-
-    .thanks {
-      margin-top: 52px;
-
-      color: #55555c;
-
-      font-size: 13px;
-      line-height: 1.6;
-    }
-
-    .thanks strong {
-      color: #8b8b92;
-      font-weight: 500;
-    }
-
-    /* -------------------------
-       MOBILE
-    -------------------------- */
-
-    @media (max-width: 600px) {
-      body {
-        padding: 32px 18px;
-      }
-
-      .logo {
-        width: min(430px, 100%);
-        margin-bottom: 42px;
-      }
-
-      h1 {
-        font-size: 44px;
-      }
-
-      .intro {
-        font-size: 16px;
-        margin-bottom: 38px;
-      }
-
-      .contact-card {
-        padding: 14px;
-      }
-
-      .icon-container {
-        width: 40px;
-        height: 40px;
-        flex-basis: 40px;
-      }
-    }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="theme-color" content="#111c33" />
+<meta name="description" content="Turn property photos into cinematic video with Image2Transition. €5 per transition, plus €10 for full video assembly. Standard and Instagram formats, agency software access and partnerships." />
+<title>Image2Transition — Property photos. Cinematic video.</title>
+<link rel="icon" type="image/png" href="assets/logos/i2t-logo-small-navy.png" />
+<style>
+:root {
+  color-scheme:light;
+  --paper:#f5f3ee;
+  --white:#fffefa;
+  --navy:#111c33;
+  --blue:#263f60;
+  --ink:#19253a;
+  --muted:#646b73;
+  --line:#d9d9d3;
+  --serif:Georgia,"Times New Roman",serif;
+  /* Mirrors .shell's width. The demo row reads it to know how wide the
+     page column is before deciding how tall the videos may be. */
+  --shell-w:min(1160px,calc(100vw - 96px))
+}
+
+*,*::before,*::after {
+  box-sizing:border-box
+}
+
+html {
+  scroll-behavior:smooth;
+  scroll-padding-top:30px
+}
+
+body {
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  -webkit-font-smoothing:antialiased
+}
+
+h1,h2,h3,p,figure {
+  margin:0
+}
+
+a {
+  color:inherit;
+  text-decoration:none
+}
+
+button,input,select,textarea {
+  font:inherit
+}
+
+button,a,input,select,textarea {
+  -webkit-tap-highlight-color:transparent
+}
+
+button {
+  cursor:pointer
+}
+
+img,video {
+  display:block;
+  max-width:100%
+}
+
+svg {
+  width:20px;
+  height:20px;
+  flex:none
+}
+
+[hidden] {
+  display:none!important
+}
+
+a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,video:focus-visible {
+  outline:3px solid #5c87b0;
+  outline-offset:5px
+}
+
+::selection {
+  background:#c7d6e3;
+  color:var(--navy)
+}
+
+.shell {
+  width:min(1160px,calc(100% - 96px));
+  margin-inline:auto
+}
+
+.section {
+  padding-block:78px
+}
+
+.eyebrow {
+  display:block;
+  margin-bottom:16px;
+  font-size:10px;
+  font-weight:650;
+  letter-spacing:.19em;
+  text-transform:uppercase
+}
+
+.serif {
+  font-family:var(--serif);
+  font-weight:400;
+  font-style:italic
+}
+
+.skip-link {
+  position:absolute;
+  z-index:10;
+  left:12px;
+  top:12px;
+  padding:12px 18px;
+  background:var(--navy);
+  color:white;
+  transform:translateY(-180%)
+}
+
+.skip-link:focus {
+  transform:translateY(0)
+}
+
+.site-header {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:28px;
+  min-height:62px;
+  border-bottom:1px solid var(--line)
+}
+
+/* The mark is the supplied square asset, shown whole. The name beside it
+   is type, never a redrawn logo. */
+.brand {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex:none
+}
+
+.brand img {
+  width:38px;
+  height:38px;
+  object-fit:contain
+}
+
+.brand-name {
+  font-size:15px;
+  font-weight:600;
+  letter-spacing:-.025em;
+  color:var(--navy)
+}
+
+.nav-links {
+  display:flex;
+  align-items:center;
+  gap:30px;
+  font-size:12px
+}
+
+.nav-links a {
+  display:inline-flex;
+  align-items:center;
+  min-height:44px
+}
+
+.nav-links a:hover {
+  color:#496782
+}
+
+.nav-links .nav-cta {
+  padding:10px 18px;
+  background:var(--navy);
+  color:white;
+  border-radius:4px
+}
+
+.nav-links .nav-cta:hover {
+  background:var(--blue)
+}
+
+.menu-toggle {
+  display:none;
+  align-items:center;
+  gap:8px;
+  min-height:44px;
+  padding:8px 12px;
+  border:1px solid var(--line);
+  border-radius:4px;
+  background:transparent;
+  color:var(--navy)
+}
+
+/* ABOVE THE FOLD IS THE PRODUCT, NOT THE HEADLINE. The hero states the
+   promise and hands the screen to the demos directly beneath it. */
+.hero {
+  padding:26px 0 20px
+}
+
+.hero-grid {
+  display:grid;
+  grid-template-columns:1.5fr 1fr;
+  gap:44px;
+  align-items:center
+}
+
+h1 {
+  font-size:clamp(33px,3.5vw,50px);
+  line-height:1.06;
+  letter-spacing:-.05em;
+  font-weight:500
+}
+
+h1 .serif {
+  display:block;
+  letter-spacing:-.06em;
+  color:var(--blue)
+}
+
+.hero .eyebrow {
+  margin-bottom:8px
+}
+
+.actions {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:18px;
+  margin-top:18px
+}
+
+/* The hero is the headline and the buttons. Nothing sits above them to
+   push the demos off the first screen. */
+.hero-copy .actions {
+  margin-top:0
+}
+
+.button {
+  display:inline-flex;
+  justify-content:center;
+  align-items:center;
+  gap:24px;
+  min-height:49px;
+  padding:13px 20px;
+  border:1px solid var(--navy);
+  border-radius:4px;
+  color:white;
+  background:var(--navy);
+  font-size:12px;
+  font-weight:550;
+  transition:background .18s,border-color .18s
+}
+
+.button:hover {
+  background:var(--blue);
+  border-color:var(--blue)
+}
+
+.button.light {
+  background:var(--white);
+  color:var(--navy);
+  border-color:var(--white)
+}
+
+.button.light:hover {
+  background:#e4e9ee;
+  border-color:#e4e9ee
+}
+
+.button.secondary {
+  background:transparent;
+  color:var(--navy);
+  border-color:var(--line)
+}
+
+.button.secondary:hover {
+  background:#e8e9e5
+}
+
+.text-link {
+  display:inline-flex;
+  align-items:center;
+  gap:12px;
+  min-height:44px;
+  font-size:12px;
+  border-bottom:1px solid currentColor
+}
+
+.showcase {
+  padding-top:10px;
+  padding-bottom:46px
+}
+
+.section-head {
+  display:flex;
+  justify-content:space-between;
+  gap:32px;
+  align-items:end;
+  margin-bottom:14px
+}
+
+h2 {
+  font-size:clamp(34px,3.6vw,48px);
+  font-weight:500;
+  line-height:1.12;
+  letter-spacing:-.045em
+}
+
+.section-head p {
+  max-width:310px;
+  color:var(--muted);
+  font-size:13px
+}
+
+/* ── THE DEMO ROW IS SIZED BY WHICHEVER RUNS OUT FIRST ─────────────
+   Both frames share one height, and each derives its width from that
+   height and its own aspect ratio, so the pair keeps true proportions:
+   16/9 beside 9/16 makes the row 2.3403 times its own height, split 76%
+   to 24%. The height is the smaller of what the viewport has left under
+   the hero and what the page column can hold, so the complete frames
+   always fit the first screen. */
+.video-row {
+  --demo-h:clamp(200px,min(calc(100vh - 285px),calc((var(--shell-w) - 22px) / 2.3403)),486px);
+  display:flex;
+  justify-content:center;
+  align-items:flex-start;
+  gap:22px
+}
+
+figure {
+  min-width:0
+}
+
+/* Intentional 16:9 and 9:16 stages. Contain preserves the full source;
+   it never hides a mismatched or pre-padded MP4 through arbitrary cropping. */
+.video-frame {
+  height:var(--demo-h);
+  overflow:hidden;
+  background:#080c13;
+  border:1px solid #283343
+}
+
+.standard-frame {
+  aspect-ratio:16/9;
+  border-radius:8px
+}
+
+.instagram-frame {
+  aspect-ratio:9/16;
+  border-radius:16px
+}
+
+.video-frame video {
+  width:100%;
+  height:100%;
+  object-fit:cover
+}
+
+.video-frame a {
+  color:white;
+  text-decoration:underline
+}
+
+figcaption {
+  display:flex;
+  justify-content:space-between;
+  flex-wrap:wrap;
+  gap:8px;
+  padding-top:13px;
+  font-size:12px
+}
+
+figcaption span {
+  font-size:10px;
+  color:var(--muted)
+}
+
+.video-status {
+  margin-top:12px;
+  font-size:12px;
+  color:var(--muted)
+}
+
+.how {
+  border-top:1px solid var(--line)
+}
+
+.steps {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:42px;
+  margin-top:45px
+}
+
+.step {
+  border-top:1px solid var(--line);
+  padding-top:23px
+}
+
+.step-number {
+  font:italic 26px var(--serif);
+  color:#667b91
+}
+
+.step h3 {
+  margin:24px 0 12px;
+  font-size:20px;
+  font-weight:550;
+  letter-spacing:-.025em
+}
+
+.step p {
+  color:var(--muted);
+  font-size:13px;
+  max-width:290px
+}
+
+.pricing {
+  background:#eaece8
+}
+
+.pricing-grid {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:100px;
+  align-items:center
+}
+
+.pricing-copy>p {
+  margin-top:23px;
+  max-width:370px;
+  color:var(--muted);
+  font-size:14px
+}
+
+.price-list {
+  margin-top:35px
+}
+
+.price-row {
+  display:flex;
+  align-items:baseline;
+  gap:18px;
+  padding:20px 0;
+  border-top:1px solid #cbd0cc
+}
+
+.price-row strong {
+  min-width:92px;
+  font-size:38px;
+  letter-spacing:-.06em;
+  font-weight:500;
+  line-height:1
+}
+
+.price-row span {
+  font-size:13px
+}
+
+.calculator {
+  padding:34px;
+  border:1px solid #d5d9d4;
+  border-radius:10px;
+  background:var(--white)
+}
+
+.calculator h3 {
+  font-size:20px;
+  font-weight:550;
+  letter-spacing:-.025em
+}
+
+.calculator>p {
+  margin:7px 0 26px;
+  color:var(--muted);
+  font-size:12px
+}
+
+label {
+  display:block;
+  color:var(--ink);
+  font-size:12px;
+  font-weight:550
+}
+
+.stepper {
+  display:grid;
+  grid-template-columns:46px minmax(0,1fr) 46px;
+  margin-top:10px;
+  border:1px solid #c8cdd1;
+  border-radius:5px;
+  overflow:hidden
+}
+
+.stepper button {
+  min-height:48px;
+  border:0;
+  background:#f1f2ee;
+  color:var(--navy);
+  font-size:21px
+}
+
+.stepper button:hover {
+  background:#e1e6e8
+}
+
+.stepper button:disabled {
+  opacity:.4;
+  cursor:default
+}
+
+.stepper input {
+  border:0!important;
+  border-radius:0!important;
+  text-align:center;
+  font-size:17px!important;
+  padding:8px!important
+}
+
+.stepper input::-webkit-inner-spin-button {
+  -webkit-appearance:none
+}
+
+.assembly-option {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:18px;
+  padding:23px 0;
+  margin-top:5px;
+  cursor:pointer
+}
+
+.assembly-option span small {
+  display:block;
+  color:var(--muted);
+  font-size:11px;
+  font-weight:400;
+  margin-top:3px
+}
+
+input[type="checkbox"] {
+  width:19px;
+  height:19px;
+  flex:none;
+  accent-color:var(--navy);
+  cursor:pointer
+}
+
+.estimate {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:18px;
+  padding:22px 0;
+  border-top:1px solid var(--line)
+}
+
+.estimate span {
+  color:var(--muted);
+  font-size:12px
+}
+
+.estimate output {
+  font-size:43px;
+  line-height:1;
+  letter-spacing:-.06em
+}
+
+.calculator .button {
+  width:100%
+}
+
+.calculator .estimate-note {
+  margin:13px 0 0;
+  font-size:10px
+}
+
+.field-error {
+  margin-top:8px;
+  color:#943b2f;
+  font-size:12px
+}
+
+.agencies {
+  background:var(--navy);
+  color:#f4f3ef
+}
+
+.agency-grid {
+  display:grid;
+  grid-template-columns:1.15fr 1fr;
+  gap:100px;
+  align-items:center
+}
+
+.agencies .eyebrow {
+  color:#a9b9cb
+}
+
+.agencies h2 {
+  max-width:540px;
+  font-size:clamp(38px,4.4vw,60px)
+}
+
+.agencies .serif {
+  color:#b7c8d8
+}
+
+.agency-copy>p {
+  max-width:375px;
+  color:#b8c2cf;
+  font-size:14px
+}
+
+.agency-list {
+  list-style:none;
+  padding:0;
+  margin:27px 0
+}
+
+.agency-list li {
+  display:flex;
+  gap:12px;
+  align-items:baseline;
+  padding:11px 0;
+  border-bottom:1px solid #344058;
+  font-size:12px
+}
+
+.agency-list li::before {
+  content:"↗";
+  color:#a8bdd0
+}
+
+.partnership-grid {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:90px;
+  align-items:center
+}
+
+.partnership-copy>p {
+  color:var(--muted);
+  max-width:430px;
+  margin-top:23px;
+  font-size:14px
+}
+
+.partner-types {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  border-top:1px solid var(--line);
+  border-left:1px solid var(--line)
+}
+
+.partner-types div {
+  padding:27px;
+  border-right:1px solid var(--line);
+  border-bottom:1px solid var(--line)
+}
+
+.partner-types span {
+  color:#718299;
+  font-size:11px
+}
+
+.partner-types h3 {
+  margin-top:22px;
+  font-size:17px;
+  font-weight:500;
+  letter-spacing:-.02em
+}
+
+.request-section {
+  background:#eaece8;
+  border-top:1px solid #dce0da
+}
+
+.request-grid {
+  display:grid;
+  grid-template-columns:.8fr 1.2fr;
+  gap:90px;
+  align-items:start
+}
+
+.request-intro>p {
+  max-width:315px;
+  margin-top:23px;
+  color:var(--muted);
+  font-size:14px
+}
+
+.direct-contact {
+  margin-top:35px
+}
+
+.direct-contact a {
+  display:flex;
+  align-items:center;
+  gap:12px;
+  width:fit-content;
+  max-width:100%;
+  min-height:44px;
+  font-size:12px;
+  overflow-wrap:anywhere
+}
+
+.direct-contact a:hover {
+  text-decoration:underline
+}
+
+.request-form {
+  min-width:0;
+  padding:32px;
+  background:var(--white);
+  border:1px solid #d5d9d4;
+  border-radius:10px
+}
+
+.field {
+  min-width:0
+}
+
+.field+.field,.form-grid,.conditional-fields,.message-field {
+  margin-top:20px
+}
+
+.form-grid {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:18px
+}
+
+.form-grid .field {
+  margin:0
+}
+
+input:not([type="checkbox"]),select,textarea {
+  display:block;
+  width:100%;
+  min-width:0;
+  min-height:46px;
+  padding:11px 12px;
+  border:1px solid #c8cdd1;
+  border-radius:4px;
+  background:#fffefa;
+  color:var(--ink);
+  font-size:13px
+}
+
+label+input,label+select,label+textarea {
+  margin-top:7px
+}
+
+input::placeholder,textarea::placeholder {
+  color:#7b8187
+}
+
+textarea {
+  resize:vertical;
+  min-height:114px
+}
+
+select {
+  padding-right:25px
+}
+
+.field-help {
+  margin-top:7px;
+  color:var(--muted);
+  font-size:11px
+}
+
+fieldset {
+  min-width:0;
+  margin:0;
+  padding:0;
+  border:0
+}
+
+legend {
+  padding:0;
+  margin-bottom:2px;
+  font-size:12px;
+  font-weight:600
+}
+
+.conditional-fields {
+  padding-top:22px;
+  border-top:1px solid var(--line)
+}
+
+.request-estimate {
+  display:flex;
+  justify-content:space-between;
+  gap:15px;
+  padding:14px 16px;
+  margin-top:18px;
+  background:#eef1ee;
+  border-radius:4px;
+  font-size:12px
+}
+
+.request-estimate output {
+  font-weight:650
+}
+
+.form-footer {
+  margin-top:24px
+}
+
+.form-footer .button {
+  width:100%
+}
+
+.form-note {
+  margin-top:12px;
+  color:var(--muted);
+  font-size:11px
+}
+
+.request-review {
+  margin-top:24px;
+  padding-top:24px;
+  border-top:1px solid var(--line)
+}
+
+.request-review h3 {
+  font-size:20px;
+  font-weight:550
+}
+
+.request-review>p {
+  margin-top:9px;
+  font-size:12px;
+  color:var(--muted)
+}
+
+.request-review label {
+  margin-top:18px
+}
+
+.request-review textarea {
+  min-height:220px;
+  font:12px/1.65 ui-monospace,monospace
+}
+
+.request-review .actions {
+  margin-top:16px;
+  gap:10px
+}
+
+.site-footer {
+  padding-block:40px
+}
+
+.footer-grid {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:32px
+}
+
+.footer-brand {
+  display:flex;
+  align-items:center;
+  gap:12px
+}
+
+.footer-brand img {
+  width:40px;
+  height:40px;
+  object-fit:contain
+}
+
+.footer-brand p {
+  font-size:12px
+}
+
+.footer-brand p span {
+  display:block;
+  margin-top:3px;
+  color:var(--muted);
+  font-size:10px
+}
+
+.footer-links {
+  display:flex;
+  flex-wrap:wrap;
+  gap:24px;
+  color:var(--muted);
+  font-size:11px
+}
+
+.footer-links a {
+  display:inline-flex;
+  align-items:center;
+  min-height:44px
+}
+
+.footer-links a:hover {
+  color:var(--navy)
+}
+
+
+
+@media(max-width:1000px) {
+  :root {
+    --shell-w:calc(100vw - 64px)
+  }
+  .shell {
+    width:calc(100% - 64px)
+  }
+  .nav-links {
+    gap:19px
+  }
+  .hero-grid {
+    gap:32px;
+    grid-template-columns:1.35fr 1fr
+  }
+  .pricing-grid,.agency-grid,.partnership-grid,.request-grid {
+    gap:45px
+  }
+  .calculator,.request-form {
+    padding:25px
+  }
+  .request-grid {
+    grid-template-columns:.75fr 1.25fr
+  }
+}
+
+@media(max-width:800px) {
+  .site-header {
+    flex-wrap:wrap;
+    gap:0 16px;
+    padding-block:10px;
+    min-height:60px
+  }
+  .menu-toggle {
+    display:inline-flex
+  }
+  .nav-links {
+    width:100%;
+    justify-content:space-between;
+    gap:10px;
+    flex-wrap:wrap;
+    padding:12px 0 4px
+  }
+  .js .nav-links {
+    display:none
+  }
+  .js .nav-links.is-open {
+    display:flex
+  }
+  .hero {
+    padding:26px 0 20px
+  }
+  .hero-grid {
+    grid-template-columns:1fr;
+    gap:20px
+  }
+  h1 {
+    max-width:640px;
+    font-size:clamp(31px,5.4vw,44px)
+  }
+  .section {
+    padding-block:70px
+  }
+  .showcase {
+    padding-bottom:46px
+  }
+  /* STACKED, STANDARD FIRST. Two demos side by side on a phone makes
+     both too small to read as proof. */
+  .video-row {
+    flex-direction:column;
+    align-items:center;
+    gap:24px
+  }
+  .video-row .video-frame {
+    height:auto;
+    width:100%
+  }
+  .standard-demo {
+    width:100%
+  }
+  .instagram-demo {
+    width:min(300px,76%)
+  }
+  .steps {
+    gap:24px
+  }
+  .pricing-grid,.agency-grid,.partnership-grid,.request-grid {
+    grid-template-columns:1fr;
+    gap:40px
+  }
+  .pricing-copy>p,.agency-copy>p,.request-intro>p {
+    max-width:540px
+  }
+  .calculator {
+    max-width:570px;
+    width:100%
+  }
+  .request-form {
+    width:100%
+  }
+  .agency-list {
+    max-width:540px
+  }
+  .partner-types {
+    max-width:570px
+  }
+  .direct-contact {
+    margin-top:20px
+  }
+}
+
+@media(max-width:520px) {
+  .shell {
+    width:calc(100% - 40px)
+  }
+  .brand img {
+    width:32px;
+    height:32px
+  }
+  .brand-name {
+    font-size:14px
+  }
+  .hero {
+    padding-top:22px
+  }
+  .eyebrow {
+    font-size:9px;
+    margin-bottom:13px
+  }
+  h1 {
+    font-size:clamp(28px,7.6vw,38px)
+  }
+  .actions {
+    gap:14px
+  }
+  .section-head {
+    display:block
+  }
+  .section-head p {
+    margin-top:16px
+  }
+  .video-row {
+    gap:22px
+  }
+  .instagram-demo {
+    width:min(250px,84%)
+  }
+  .section {
+    padding-block:56px
+  }
+  .steps {
+    grid-template-columns:1fr;
+    gap:29px;
+    margin-top:30px
+  }
+  .step h3 {
+    margin-top:14px
+  }
+  .step p {
+    max-width:100%
+  }
+  .calculator,.request-form {
+    padding:22px 18px
+  }
+  .price-row strong {
+    font-size:34px
+  }
+  .form-grid {
+    grid-template-columns:1fr;
+    gap:18px
+  }
+  .partner-types div {
+    padding:20px
+  }
+  .partner-types h3 {
+    font-size:15px
+  }
+  .footer-grid {
+    align-items:start;
+    flex-direction:column;
+    gap:20px
+  }
+  .footer-links {
+    gap:20px
+  }
+}
+
+@media(prefers-reduced-motion:reduce) {
+  html {
+    scroll-behavior:auto
+  }
+  .button {
+    transition:none
+  }
+}
+.request-section { padding-block:58px; }
+.request-form { position:relative; }
+.request-form .form-grid { margin-block:18px; }
+.inquiry-trap { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+.inquiry-status { margin-top:18px; padding:12px 14px; font-size:13px; border-radius:4px; background:#edf2ed; color:#244c32; }
+.inquiry-status[data-state="error"] { background:#f7edeb; color:#823b31; }
+.button:disabled { cursor:wait; opacity:.65; }
+</style>
 </head>
-
-<body>
-
-  <main class="page">
-
-    <!--
-      The supplied artwork, trimmed to its own edges. Intrinsic size is
-      given so the page reserves the right box before the file arrives
-      and nothing below it jumps as it loads.
-    -->
-    <img
-      src="assets/logo-full.png"
-      alt="Image2Transition"
-      class="logo"
-      width="1467"
-      height="484"
-    />
-
-    <div class="status">
-      <span class="status-dot"></span>
-      Currently in development
+<body id="top">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header shell">
+  <a class="brand" href="#top" aria-label="Image2Transition home"><img src="assets/logos/i2t-logo-small-navy.png" width="1024" height="1024" alt="Image2Transition" /><span class="brand-name">Image2Transition</span></a>
+  <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="navigation">Menu <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg></button>
+  <nav class="nav-links" id="navigation" aria-label="Main navigation"><a href="#showcase">The results</a><a href="#pricing">Pricing</a><a href="#agencies">Agencies</a><a href="#partnerships">Partnerships</a><a class="nav-cta" href="#contact" data-inquiry="video">Create a video ↗</a></nav>
+</header>
+<main id="main">
+  <section class="hero shell" aria-labelledby="hero-title">
+    <span class="eyebrow">Property photography, in motion</span>
+    <div class="hero-grid">
+      <h1 id="hero-title">Turn property photos into <span class="serif">cinematic video.</span></h1>
+      <div class="hero-copy"><div class="actions"><a class="button" href="#contact" data-inquiry="video">Create a video <span aria-hidden="true">↗</span></a><a class="text-link" href="#agencies" data-inquiry="agency">For agencies <span aria-hidden="true">↗</span></a></div></div>
     </div>
-
-    <h1>
-      Website is being built.
-    </h1>
-
-    <p class="intro">
-      Image2Transition is currently under development.
-      For inquiries, questions or business opportunities,
-      please get in touch.
-    </p>
-
-    <div class="contact-title">
-      Contact
+  </section>
+  <section class="showcase shell" id="showcase" aria-label="Video demos">
+    <!-- Existing demo sources and presentation are preserved. -->
+    <div class="video-row">
+      <figure class="standard-demo"><div class="video-frame standard-frame"><video autoplay muted loop playsinline controls preload="metadata" aria-label="Standard property video demo"><source src="assets/videos/demo-standard.mp4" type="video/mp4" />Your browser does not support embedded video. <a href="assets/videos/demo-standard.mp4">Watch the Standard demo.</a></video></div><figcaption>Standard <span>Landscape · property listings</span></figcaption></figure>
+      <figure class="instagram-demo"><div class="video-frame instagram-frame"><video autoplay muted loop playsinline controls preload="metadata" aria-label="Instagram property video demo"><source src="assets/videos/demo-instagram.mp4" type="video/mp4" />Your browser does not support embedded video. <a href="assets/videos/demo-instagram.mp4">Watch the Instagram demo.</a></video></div><figcaption>Instagram <span>Portrait · social media</span></figcaption></figure>
     </div>
-
-    <div class="contacts">
-
-      <!-- EMAIL -->
-      <a
-        class="contact-card"
-        href="mailto:pontus@image2transition.com"
-      >
-
-        <div class="icon-container">
-
-          <!-- Email icon -->
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            xmlns="http://www.w3.org/2000/svg"
-            aria-hidden="true"
-          >
-            <path
-              d="M4 5H20C21.1046 5 22 5.89543 22 7V17C22 18.1046 21.1046 19 20 19H4C2.89543 19 2 18.1046 2 17V7C2 5.89543 2.89543 5 4 5Z"
-              stroke="#43B5FC"
-              stroke-width="1.8"
-              stroke-linejoin="round"
-            />
-
-            <path
-              d="M3 7L12 13L21 7"
-              stroke="#43B5FC"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-          </svg>
-
-        </div>
-
-        <div class="contact-info">
-          <span class="contact-label">
-            Email
-          </span>
-
-          <span class="contact-value">
-            pontus@image2transition.com
-          </span>
-        </div>
-
-        <span class="arrow">→</span>
-
-      </a>
-
-
-      <!-- WHATSAPP -->
-      <a
-        class="contact-card"
-        href="https://wa.me/46709821065"
-        target="_blank"
-        rel="noopener noreferrer"
-      >
-
-        <div class="icon-container">
-
-          <!-- Official WhatsApp brand mark shape -->
-          <svg
-            viewBox="0 0 32 32"
-            xmlns="http://www.w3.org/2000/svg"
-            aria-hidden="true"
-          >
-            <path
-              fill="#25D366"
-              d="M16.004 3C8.832 3 3 8.815 3 15.963c0 2.279.597 4.505 1.728 6.464L3 29l6.744-1.766a13.046 13.046 0 0 0 6.254 1.592h.006C23.174 28.826 29 23.01 29 15.963 29 8.815 23.174 3 16.004 3Zm0 23.638h-.004a10.84 10.84 0 0 1-5.525-1.51l-.395-.234-4.003 1.05 1.068-3.899-.257-.4a10.73 10.73 0 0 1-1.655-5.682c0-5.924 4.833-10.75 10.775-10.75 5.94 0 10.77 4.826 10.77 10.75 0 5.925-4.83 10.675-10.774 10.675Z"
-            />
-
-            <path
-              fill="#25D366"
-              d="M21.91 18.493c-.324-.162-1.918-.944-2.216-1.051-.298-.108-.515-.162-.731.162-.217.324-.84 1.051-1.03 1.268-.19.216-.38.243-.705.081-.324-.162-1.369-.503-2.607-1.605-.963-.841-1.613-1.879-1.803-2.203-.19-.324-.02-.499.143-.66.146-.145.325-.378.487-.567.162-.189.216-.324.325-.54.108-.216.054-.405-.027-.567-.081-.162-.731-1.754-1.002-2.402-.264-.631-.532-.545-.731-.555l-.623-.011c-.217 0-.569.081-.867.405-.298.324-1.138 1.105-1.138 2.699 0 1.593 1.165 3.133 1.327 3.349.163.216 2.291 3.49 5.55 4.894.775.334 1.38.533 1.852.682.778.246 1.486.211 2.046.128.624-.092 1.918-.781 2.189-1.537.271-.756.271-1.404.19-1.539-.081-.135-.298-.216-.623-.378Z"
-            />
-          </svg>
-
-        </div>
-
-        <div class="contact-info">
-          <span class="contact-label">
-            WhatsApp
-          </span>
-
-          <span class="contact-value">
-            +46 70 982 10 65
-          </span>
-        </div>
-
-        <span class="arrow">→</span>
-
-      </a>
-
+    <p class="video-status" id="video-status" role="status" hidden></p>
+  </section>
+  <section class="section how shell" id="how-it-works" aria-labelledby="how-title">
+    <div class="section-head"><div><span class="eyebrow">A simple process</span><h2 id="how-title">From stills to <span class="serif">a story.</span></h2></div><p>You bring the property photos. We bring the movement.</p></div>
+    <div class="steps">
+      <article class="step"><span class="step-number">01</span><h3>Send photos</h3><p>Tell us about your property and share the photos you want to bring to life. We’ll confirm the sequence and details with you.</p></article>
+      <article class="step"><span class="step-number">02</span><h3>We create transitions</h3><p>We create smooth, cinematic movement between your images. Each image-to-image transition is €5.</p></article>
+      <article class="step"><span class="step-number">03</span><h3>Receive finished video</h3><p>Get your transitions in Standard or Instagram format. Add full video assembly for €10 to bring the sequence together.</p></article>
     </div>
-
-    <p class="thanks">
-      Thank you for your interest in
-      <strong>Image2Transition.</strong>
-    </p>
-
-  </main>
-
+  </section>
+  <section class="section pricing" id="pricing" aria-labelledby="pricing-title"><div class="shell pricing-grid">
+    <div class="pricing-copy"><span class="eyebrow">Simple, transparent pricing</span><h2 id="pricing-title">Small investment.<br /><span class="serif">A different impression.</span></h2><p>Pay for the transitions you need. Add an assembled video when you want the complete property story.</p><div class="price-list"><div class="price-row"><strong>€5</strong><span>per image-to-image transition</span></div><div class="price-row"><strong>+€10</strong><span>for full video assembly</span></div></div></div>
+    <div class="calculator" aria-labelledby="calculator-title">
+      <h3 id="calculator-title">Build your estimate</h3><p>Choose your transitions. See your price.</p>
+      <label for="calc-transitions">Number of transitions</label><div class="stepper"><button type="button" id="decrease" aria-label="Decrease number of transitions">−</button><input id="calc-transitions" type="number" min="1" step="1" value="8" inputmode="numeric" aria-describedby="calc-help calc-error" /><button type="button" id="increase" aria-label="Increase number of transitions">+</button></div>
+      <p class="field-help" id="calc-help">A simple sequence of 9 photos has 8 transitions.</p><p class="field-error" id="calc-error" role="status" hidden>Enter a whole number of transitions, at least 1.</p>
+      <label class="assembly-option" for="calc-assembly"><span>Full video assembly <small>One finished video · +€10</small></span><input type="checkbox" id="calc-assembly" checked /></label>
+      <div class="estimate"><span>Estimated total</span><output id="calc-total" for="calc-transitions calc-assembly" aria-live="polite">€50</output></div><a class="button" href="#contact" data-inquiry="video">Request this video <span aria-hidden="true">↗</span></a><p class="estimate-note">Estimate in EUR. We’ll confirm the scope before starting.</p>
+    </div>
+  </div></section>
+  <section class="section agencies" id="agencies" aria-labelledby="agency-title"><div class="shell agency-grid">
+    <div><span class="eyebrow">For agencies &amp; property teams</span><h2 id="agency-title">Bring the creative process <span class="serif">in-house.</span></h2></div>
+    <div class="agency-copy"><p>Want to create property videos within your own team? Request access to the Image2Transition software and tell us how it could fit your workflow.</p><ul class="agency-list"><li>For real estate agencies and property marketers</li><li>Create with your existing property photography</li><li>Discuss access around your team’s use case</li></ul><a class="button light" href="#contact" data-inquiry="agency">Request software access <span aria-hidden="true">↗</span></a></div>
+  </div></section>
+  <section class="section shell" id="partnerships" aria-labelledby="partnership-title"><div class="partnership-grid">
+    <div class="partnership-copy"><span class="eyebrow">Better, together</span><h2 id="partnership-title">Let’s build <span class="serif">what’s next.</span></h2><p>See a place for Image2Transition in your business? We’re open to partnerships that bring better property content to more people.</p><div class="actions"><a class="text-link" href="#contact" data-inquiry="partnership">Discuss a partnership <span aria-hidden="true">↗</span></a></div></div>
+    <div class="partner-types"><div><span>01 / CONNECT</span><h3>Partnerships</h3></div><div><span>02 / BUILD</span><h3>Integrations</h3></div><div><span>03 / GROW</span><h3>Resellers</h3></div><div><span>04 / EXPLORE</span><h3>New opportunities</h3></div></div>
+  </div></section>
+  <section class="section request-section" id="contact" aria-labelledby="request-title"><div class="shell request-grid">
+    <div class="request-intro"><span class="eyebrow">Start a conversation</span><h2 id="request-title">Your next property.<br /><span class="serif">In a new light.</span></h2><p>Request a video, explore software access or bring us a partnership idea. Tell us what you have in mind.</p><div class="direct-contact"><a href="mailto:contact@image2transition.com"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" /><path d="m4 7 8 6 8-6" /></svg>contact@image2transition.com</a><a href="https://wa.me/46709821065" target="_blank" rel="noopener noreferrer" aria-label="WhatsApp +46 70 982 10 65 (opens in a new tab)">WhatsApp · +46 70 982 10 65 <span aria-hidden="true">↗</span></a></div></div>
+    <form class="request-form" id="request-form" method="post" action="/api/inquiry" aria-label="Send an inquiry">
+      <fieldset id="inquiry-fields">
+        <div class="field"><label for="inquiry">I’m interested in</label><select id="inquiry" name="inquiryType"><option value="video">Create a video</option><option value="agency">Software / Agency</option><option value="partnership">Partnership</option><option value="other">Other</option></select></div>
+        <div class="form-grid">
+          <div class="field"><label for="name">Name *</label><input id="name" name="name" autocomplete="name" required maxlength="120" placeholder="Your name" /></div>
+          <div class="field"><label for="email">Email *</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="254" placeholder="you@company.com" /></div>
+        </div>
+        <div class="field"><label for="company">Company (optional)</label><input id="company" name="company" autocomplete="organization" maxlength="200" placeholder="Company or agency name" /></div>
+        <div class="field"><label for="message">Message *</label><textarea id="message" name="message" required maxlength="4000" placeholder="Tell us what you have in mind."></textarea></div>
+        <div class="inquiry-trap" aria-hidden="true"><label for="inquiry-website">Leave this field empty</label><input id="inquiry-website" name="website" tabindex="-1" autocomplete="off" maxlength="500" /></div>
+      </fieldset>
+      <div class="form-footer"><button class="button" id="submit-inquiry" type="submit">Send inquiry <span aria-hidden="true">↗</span></button><p class="form-note">Your details are used to respond to your inquiry.</p></div>
+      <p class="inquiry-status" id="inquiry-status" role="status" aria-live="polite" tabindex="-1" hidden></p>
+    </form>
+  </div></section>
+</main>
+<footer class="site-footer shell"><div class="footer-grid"><div class="footer-brand"><img src="assets/logos/i2t-logo-small-navy.png" width="40" height="40" alt="Image2Transition" /><p>Property photos. Cinematic video.<span>Image2Transition · From image to motion.</span></p></div><nav class="footer-links" aria-label="Footer navigation"><a href="#showcase">The results</a><a href="#pricing">Pricing</a><a href="#contact" data-inquiry="other">Get in touch ↗</a></nav></div></footer>
+<noscript><style>.request-form,.calculator,.menu-toggle{display:none}</style><p class="shell">For a quote, email <a href="mailto:contact@image2transition.com">contact@image2transition.com</a>. Enable JavaScript to use the live calculator and inquiry form.</p></noscript>
+<script src="assets/site.js" defer></script>
 </body>
 </html>
