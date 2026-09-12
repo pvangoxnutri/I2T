@@ -50,17 +50,46 @@ export interface ProviderMetadata {
 
 // ── Requests & results ───────────────────────────────────────────────────
 
-/** FrameToFrame's provider-neutral description of one transition job. */
+/**
+ * The subject of a generation: a pair of photographs, or one.
+ *
+ * A discriminated union rather than a nullable pairKey, so code that
+ * handles motion has to say so and code that does not cannot silently
+ * receive one.
+ */
+export type GenerationSubject =
+  | { kind: 'transition'; pairKey: string }
+  | { kind: 'motion'; segmentId: string; imageId: string; motion: string }
+
+/** FrameToFrame's provider-neutral description of one generation job. */
 export interface GenerationRequest {
   projectId: string
+  /**
+   * WHAT THIS RUN IS FOR.
+   *
+   * A transition names the pair it joins; a single-image motion names
+   * its own segment. Neither borrows the other's identifier — a motion
+   * run has no pairKey at all rather than a synthesised one, so nothing
+   * downstream can parse it as `from->to` and conclude a room connects
+   * to itself.
+   *
+   * Optional with a `transition` default so every existing construction
+   * site keeps meaning exactly what it meant.
+   */
+  subject?: GenerationSubject
   pairKey: string
   /** Absolute managed path of the START image. */
   startImagePath: string
-  /** Absolute managed path of the END image. */
-  endImagePath: string
+  /**
+   * Absolute managed path of the END image.
+   *
+   * NULL for single-image motion. The provider decides whether its model
+   * can accept that; it is never filled in with the start image.
+   */
+  endImagePath: string | null
   /** Display names, safe for logs/preview. */
   startImageName: string
-  endImageName: string
+  endImageName: string | null
   prompt: string
   durationSec: number
   /** FrameToFrame export resolution, mapped by the provider. */
@@ -106,7 +135,7 @@ export interface SanitizedRequestPreview {
   body: Record<string, unknown>
   /** Human-readable frame identifiers for the developer view. Original file
    * names only — never absolute local paths. */
-  display: { startImage: string; endImage: string; durationSec: number; resolution: string }
+  display: { startImage: string; endImage: string | null; durationSec: number; resolution: string }
   dryRun: boolean
   warnings: string[]
 }

@@ -86,7 +86,21 @@ export function transitionRecovery(
   }
 
   // ── In flight ────────────────────────────────────────────────────────
+  //
+  // The phase — a fact about the WORK, separate from provider status —
+  // is what tells a download apart from the provider still rendering.
   if (status === 'queued' || status === 'generating') {
+    const phase = job?.metadata?.phase
+    if (phase === 'downloading') {
+      return {
+        kind: 'waiting',
+        label: 'Downloading…',
+        detail: 'The provider has finished. The clip is being downloaded.',
+        costsMoney: false,
+        jobId: job?.id ?? null,
+        secondary: null
+      }
+    }
     return {
       kind: 'waiting',
       label: status === 'queued' ? 'Queued' : 'Generating…',

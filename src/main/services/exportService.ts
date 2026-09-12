@@ -1,9 +1,14 @@
+import { activeGenerationForPair } from '../db/generationCatalogueRepo'
+import { qualityAllowsActive } from '../../shared/qualityValidation'
+import type { GenerationRecord, JobMetadata } from '../../shared/types'
 import {
   applyExportFormat,
   DEFAULT_EXPORT_FORMAT,
   type ExportFormatId
 } from '../../shared/exportFormat'
 import { getFeedImages } from '../../shared/feedSequence'
+import { motionSegmentLabel, motionSegments } from '../../shared/motionSegment'
+import { readTimeline } from '../db/timelineRepo'
 import { app, BrowserWindow, dialog } from 'electron'
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -93,6 +98,104 @@ function readSettings(): { exportDefaults: ExportDefaults; pricing: typeof DEFAU
  * every one. With cuts in the picture that is simply wrong, so they all
  * come here instead and get the same answer.
  */
+/**
+ * WHAT ACTUALLY GETS EXPORTED.
+ *
+ * ── THE TIMELINE IS THE LAST WORD ────────────────────────────────────
+ *
+ * When an explicit timeline exists it decides the film: the order, the
+ * in and out points, and which segments survived the operator's cuts.
+ * The feed-derived plan is still computed — readiness, the cut/crossfade
+ * readout and the editor's own diagnostics all come from it — but it no
+ * longer chooses what is encoded. Anything else would mean an operator
+ * could split and delete on screen and export something different.
+ *
+ * A project that has never had a timeline falls straight through to the
+ * feed plan, byte-for-byte as before.
+ */
+export function exportAssembly(project: Project): {
+  plan: ReturnType<typeof planAssembly>
+  segments: AssembleSegment[]
+  seamOverrideSec: (number | null)[]
+  /** Set when the timeline decided this, for honest reporting. */
+  fromTimeline: boolean
+  /** Timeline items whose source file is gone. Blocks the export. */
+  missingItems: { index: number; label: string }[]
+} {
+  const feed = projectAssembly(project)
+  const timeline = readTimeline(project.id)
+
+  if (!timeline || timeline.items.length === 0) {
+    return {
+      ...feed,
+      seamOverrideSec: feed.plan.seamSeconds,
+      fromTimeline: false,
+      missingItems: []
+    }
+  }
+
+  const segments: AssembleSegment[] = []
+  const seams: (number | null)[] = []
+  const missingItems: { index: number; label: string }[] = []
+
+  timeline.items.forEach((item, i) => {
+    const path =
+      item.sourceType === 'still'
+        ? item.sourceImageName
+          ? imagePath(project.id, item.sourceImageName)
+          : null
+        : item.sourceClipName
+          ? clipPath(project.id, item.sourceClipName)
+          : null
+
+    if (!path || !existsSync(path)) {
+      // Named precisely (§21): "clip 4 is missing its source video" is
+      // actionable; "missing transition clips" sends the operator to a
+      // feed that is perfectly fine.
+      missingItems.push({ index: i + 1, label: timelineItemLabel(item, i) })
+      return
+    }
+
+    segments.push(
+      item.sourceType === 'still'
+        ? {
+            kind: 'still',
+            path,
+            // A still's "source range" IS its hold: splitting one just
+            // makes two shorter holds of the same photograph.
+            holdSeconds: Math.max(0, item.endOffsetSec - item.startOffsetSec)
+          }
+        : {
+            kind: 'clip',
+            path,
+            sourceStartSec: item.startOffsetSec,
+            sourceEndSec: item.endOffsetSec
+          }
+    )
+    if (i < timeline.items.length - 1) seams.push(item.seamAfterSec)
+  })
+
+  return {
+    plan: feed.plan,
+    segments,
+    // Trailing seams are dropped along with any skipped item, so the
+    // boundary list always matches segments − 1.
+    seamOverrideSec: seams.slice(0, Math.max(0, segments.length - 1)),
+    fromTimeline: true,
+    missingItems
+  }
+}
+
+function timelineItemLabel(item: { sourceType: string; sourceId: string }, index: number): string {
+  const kind =
+    item.sourceType === 'motion-clip'
+      ? 'single-image motion'
+      : item.sourceType === 'still'
+        ? 'still'
+        : 'transition'
+  return `Timeline clip ${index + 1} (${kind})`
+}
+
 export function projectAssembly(project: Project): {
   plan: ReturnType<typeof planAssembly>
   segments: AssembleSegment[]
@@ -121,7 +224,14 @@ export function projectAssembly(project: Project): {
    * fixing it here fixes both — and keeps them incapable of disagreeing.
    */
   const imageIds = getFeedImages(project).map((i) => i.id)
-  const plans = planSequence(analysis, imageIds, reviewMap(project.id, 'accepted'))
+  // Operator context is evidence, so the assembler must judge pairs with
+  // the same information the prompt was built from.
+  const contexts = new Map(
+    Object.entries(project.transitions)
+      .filter(([, t]) => t?.operatorContext && t.operatorContext.text.trim().length > 0)
+      .map(([k, t]) => [k, t!.operatorContext!])
+  )
+  const plans = planSequence(analysis, imageIds, reviewMap(project.id, 'accepted'), contexts)
 
   const modes: EffectiveTransitionMode[] = []
   const clipPaths: (string | null)[] = []
@@ -144,14 +254,23 @@ export function projectAssembly(project: Project): {
     // `imageIds` came from the feed, position N would have named one
     // photograph and shown another.
     imagePaths: getFeedImages(project).map((img) => imagePath(project.id, img.storedName) ?? ''),
-    seamBlend: exportDefaults.seamBlend ?? 'subtle'
+    seamBlend: exportDefaults.seamBlend ?? 'subtle',
+    motions: motionSegments(project).map((m) => ({
+      segmentId: m.id,
+      imageId: m.imageId,
+      label: motionSegmentLabel(m),
+      clipPath: m.clip ? clipPath(project.id, m.clip.storedName) : null
+    }))
   })
 
   return {
     plan,
+    // FFmpeg only needs to know whether a segment is a video file or a
+    // held photograph. A motion segment is a video file — that it was
+    // made from one image rather than two changes nothing downstream.
     segments: plan.segments.map((s) => ({
-      kind: s.kind,
-      path: (s.kind === 'clip' ? s.clipPath : s.imagePath) ?? '',
+      kind: s.kind === 'still' ? ('still' as const) : ('clip' as const),
+      path: (s.kind === 'still' ? s.imagePath : s.clipPath) ?? '',
       holdSeconds: s.holdSeconds
     }))
   }
@@ -173,6 +292,8 @@ export interface ExportReadiness {
   ready: boolean
   /** Feed positions of AI pairs whose clip is missing. Empty when ready. */
   missingAiClips: string[]
+  /** Motion segments on the timeline that were never generated. */
+  missingMotionClips: string[]
   /** Pairs that need no clip at all, for an honest "N of M" readout. */
   cutPairs: string[]
   crossfadePairs: string[]
@@ -208,6 +329,7 @@ export function exportReadiness(project: Project): ExportReadiness {
     return {
       ready: false,
       missingAiClips: [],
+        missingMotionClips: [],
       cutPairs: [],
       crossfadePairs: [],
       sequenceLength: feedLength,
@@ -215,10 +337,45 @@ export function exportReadiness(project: Project): ExportReadiness {
     }
   }
 
-  const { plan } = projectAssembly(project)
+  // ── READINESS ASKS THE EXPORTER'S QUESTION ────────────────────────
+  //
+  // Through `exportAssembly`, so it judges what will ACTUALLY be
+  // encoded. Reading the feed plan alone meant a timeline referencing a
+  // deleted file reported "ready" and then threw at encode time, while a
+  // feed clip the operator had already cut out of the film blocked an
+  // export that no longer needed it. Both directions were wrong.
+  const { plan, fromTimeline, missingItems, segments } = exportAssembly(project)
+
+  if (fromTimeline) {
+    return {
+      ready: missingItems.length === 0 && segments.length > 0,
+      // A timeline export is not blocked by feed pairs it does not use.
+      missingAiClips: [],
+      missingMotionClips: [],
+      cutPairs: plan.cutPairs,
+      crossfadePairs: plan.crossfadePairs,
+      sequenceLength: feedLength,
+      reason:
+        missingItems.length > 0
+          ? missingItems.map((m) => `${m.label} is missing its source video.`).join(' ')
+          : segments.length === 0
+            ? 'The timeline is empty — every clip has been removed.'
+            : null
+    }
+  }
+
+  // Export no longer asks a quality verdict. Automatic validation was
+  // removed from the product; an attached clip is one the operator chose
+  // to keep, and refusing to export their own accepted work would be the
+  // worse failure.
+  // `plan.ok` already accounts for ungenerated motion segments, so the
+  // conjunct below stays exactly as it was and the new case still
+  // reaches here — one planner, one verdict.
+  const ready = plan.ok && plan.missingClipPairs.length === 0
   return {
-    ready: plan.ok && plan.missingClipPairs.length === 0,
+    ready,
     missingAiClips: plan.missingClipPairs,
+    missingMotionClips: plan.missingMotionSegments,
     cutPairs: plan.cutPairs,
     crossfadePairs: plan.crossfadePairs,
     sequenceLength: feedLength,
@@ -294,8 +451,15 @@ export async function buildEditorPreview(
   if (!project) return { ok: false, reason: 'Project no longer exists' }
 
   // Cuts and crossfades need no clip, so only genuinely missing AI clips
-  // can block a preview.
-  const { plan, segments } = projectAssembly(project)
+  // can block a preview. THE TIMELINE decides what is in it when one
+  // exists, so the preview shows the film the operator is cutting.
+  const { plan, segments, seamOverrideSec, missingItems } = exportAssembly(project)
+  if (missingItems.length > 0) {
+    return {
+      ok: false,
+      reason: missingItems.map((m) => `${m.label} is missing its source video.`).join(' ')
+    }
+  }
   if (!plan.ok) {
     return {
       ok: false,
@@ -315,7 +479,9 @@ export async function buildEditorPreview(
   await assemble({
     clipPaths: [],
     segments,
-    seamOverrideSec: plan.seamSeconds,
+    // The TIMELINE's seams when it decided the segments, else the
+    // feed plan’s — they always describe the same boundaries.
+    seamOverrideSec,
     defaults,
     // No overlays: this is for looking at while editing, not for sending.
     // The watermark belongs to the customer preview export.
@@ -412,8 +578,20 @@ const runExportJob = async (
   // The mixed timeline: AI clips where they exist, cuts and crossfades
   // where the evidence or the operator chose them, and a held still only
   // where an image would otherwise never reach the screen.
-  const { plan, segments } = projectAssembly(project)
-  if (!plan.ok) throw new Error(plan.reason ?? 'Nothing to assemble')
+  const { plan, segments, seamOverrideSec, missingItems, fromTimeline } = exportAssembly(project)
+  if (missingItems.length > 0) {
+    throw new Error(missingItems.map((m) => `${m.label} is missing its source video.`).join(' '))
+  }
+  // ── THE FEED PLAN DOES NOT GATE A TIMELINE EXPORT ─────────────────
+  //
+  // `plan.ok` is a statement about the FEED: does every pair that needs
+  // a clip have one. With a timeline that is the wrong question — the
+  // operator may have deleted the very segment whose clip is missing,
+  // and refusing to export a film that no longer contains it would be
+  // refusing on behalf of a plan nobody is following. The timeline's own
+  // sources are checked above, which is the question that matters.
+  if (!fromTimeline && !plan.ok) throw new Error(plan.reason ?? 'Nothing to assemble')
+  if (segments.length === 0) throw new Error('Nothing to assemble')
   for (const s of segments) {
     if (!s.path) throw new Error('An assembly segment is missing its file on disk')
   }
@@ -426,7 +604,7 @@ const runExportJob = async (
   // was started and carried on the job, so a queued export renders the
   // shape it was queued for even if the setting changes meanwhile — the
   // same reason its price is snapshotted.
-  const { defaults: formatDefaults, fit } = applyExportFormat(
+  const { defaults: formatDefaults, fit, padColor } = applyExportFormat(
     readSettings().exportDefaults,
     job.metadata.exportFormat as ExportFormatId | undefined
   )
@@ -435,9 +613,12 @@ const runExportJob = async (
     const handle = assemble({
       clipPaths: [],
       segments,
-      seamOverrideSec: plan.seamSeconds,
+      // The TIMELINE's seams when it decided the segments, else the
+      // feed plan's — they always describe the same boundaries.
+      seamOverrideSec,
       defaults: formatDefaults,
       fit,
+      padColor,
       overlayPngPaths,
       outputPath,
       onProgress: ctx.onProgress
@@ -460,6 +641,37 @@ const runExportJob = async (
 registerRunner('preview-export', runExportJob)
 registerRunner('final-export', runExportJob)
 registerRunner('assembly', runExportJob)
+
+/**
+ * WHAT THE QUEUE JOB CARRIES ABOUT AN EXPORT.
+ *
+ * ── THE BUG THIS EXISTS TO PREVENT ───────────────────────────────────
+ *
+ * `JobMetadata` declared `exportFormat`, `runExportJob` read it, and the
+ * object literal that created the job simply did not set it. Every real
+ * export therefore ran as the default format: "Export Instagram Reel"
+ * wrote a landscape 1920x1080 file, which Instagram showed letterboxed
+ * inside a portrait slot.
+ *
+ * Nothing caught it. The field was optional, so TypeScript was content;
+ * the geometry proof called `assemble()` directly with the right
+ * arguments, so it was testing the layer below the fault.
+ *
+ * A named constructor is what a test can pin. An inline literal is not.
+ */
+export function exportJobMetadata(
+  kind: ExportKind,
+  outputPath: string,
+  overlayFiles: string[],
+  format: ExportFormatId | undefined
+): JobMetadata {
+  return { exportKind: kind, outputPath, overlayFiles, exportFormat: format }
+}
+
+/** Test seam: the metadata a real export of this format would queue. */
+export function exportJobMetadataForTests(format: ExportFormatId): JobMetadata {
+  return exportJobMetadata('final', 'C:/out.mp4', [], format)
+}
 
 export async function startExport(
   projectId: string,
@@ -486,13 +698,25 @@ export async function startExport(
   }
 
   // Explicit user destination via the native save dialog.
-  const defaultName = `${sanitizeFileName(project.name)}_${kind}.mp4`
+  const isReel = format === 'instagram'
+  const defaultName = `${sanitizeFileName(project.name)}_${isReel ? 'instagram_reel' : 'video'}.mp4`
+  // ── THE ONLY THING A TEST MAY REPLACE IS THE FILE PICKER ─────────
+  //
+  // Set F2F_EXPORT_DEST and the native save dialog is skipped; every
+  // other step — rasterisation, IPC, this function, the queue job, the
+  // assembly and FFmpeg — runs exactly as it does for a click. It exists
+  // because a native dialog cannot be driven from a test, and because
+  // the last round of "proof" tested a path the product does not use.
+  // Environment only: nothing in the UI can reach it.
+  const forcedDest = process.env.F2F_EXPORT_DEST
   const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-  const save = await dialog.showSaveDialog(win, {
-    title: kind === 'preview' ? 'Export Preview with Watermark' : 'Export Final',
+  const save = forcedDest
+    ? { canceled: false, filePath: join(forcedDest, defaultName) }
+    : await dialog.showSaveDialog(win, {
+    title: isReel ? 'Export Instagram Reel (1080×1920)' : 'Export Video',
     defaultPath: join(app.getPath('videos'), defaultName),
     filters: [{ name: 'MP4 video', extensions: ['mp4'] }]
-  })
+      })
   if (save.canceled || !save.filePath) return { ok: false, canceled: true }
 
   // Overlays live in the MANAGED export dir so the job survives a restart.
@@ -501,7 +725,19 @@ export async function startExport(
   const prefix = randomUUID()
   const overlayFiles: string[] = []
   // Watermark under the signature: watermark first, signature last on top.
-  if (kind === 'preview' && overlays.watermarkPng) {
+  // ── WHAT ARRIVES IS WHAT IS COMPOSITED ────────────────────────────
+  //
+  // This used to read `kind === 'preview' && overlays.watermarkPng` — a
+  // second rule about whether the watermark appears, sitting behind the
+  // one the operator actually sets. A "final" export could not carry a
+  // watermark however it was configured, and a "preview" export always
+  // did. Two authorities for one question.
+  //
+  // Inclusion is now decided once, by the export's own branding
+  // checkboxes, and expressed by whether a PNG was rasterised at all.
+  // Saved Branding Settings still decide WHICH asset, where, how big and
+  // how opaque; this decides only whether it is in THIS file.
+  if (overlays.watermarkPng) {
     const name = `${prefix}-watermark.png`
     writeFileSync(safeManagedPath(dir, name), Buffer.from(overlays.watermarkPng))
     overlayFiles.push(name)
@@ -524,7 +760,20 @@ export async function startExport(
     // unrelated to how many made the final cut.
     price: priceSnapshot(project.images.length, readSettings().pricing),
     scheduledFor,
-    metadata: { exportKind: kind, outputPath: save.filePath, overlayFiles }
+    // ── THE FORMAT TRAVELS WITH THE JOB ────────────────────────────
+    //
+    // THE BUG THIS FIXES. `JobMetadata` declared `exportFormat` and
+    // `runExportJob` read it — but this line never wrote it. Every real
+    // export therefore rendered with `exportFormat: undefined`, which
+    // resolves to the first entry in the list: the desktop format, in
+    // the project's own aspect ratio. "Export Instagram Reel" produced a
+    // landscape 1920x1080 file, and Instagram showed that letterboxed
+    // inside a portrait slot — the reported screenshot exactly.
+    //
+    // It survived a passing proof because the proof called assemble()
+    // directly with the right arguments. It was testing the layer BELOW
+    // the fault.
+    metadata: exportJobMetadata(kind, save.filePath, overlayFiles, format)
   })
 
   return { ok: true, jobId: job.id }

@@ -2,7 +2,11 @@ import type { Project } from '../../types'
 import type { PropertyAnalysis } from '../../../../shared/propertyAnalysis'
 import type { TransitionDraft } from '../../../../shared/transitionAnalysisExtractor'
 import { getFeedSequenceIds } from '../../../../shared/feedSequence'
-import { feedAnalysisLabel, feedAnalysisStatus } from '../../../../shared/feedAnalysisState'
+import {
+  feedAnalysisLabel,
+  feedAnalysisStatus,
+  feedDecisionCounts
+} from '../../../../shared/feedAnalysisState'
 
 /**
  * THE WORKFLOW PANEL — three questions, three actions, never merged.
@@ -53,6 +57,7 @@ export function Toolbox({
   onAnalyseImportedMedia,
   onReviewMediaProposal,
   onAnalyseFeed,
+  feedError,
   onReviewFeedAnalysis,
   onAnalysePromptsAll,
   onAnalysePromptSelected
@@ -69,6 +74,8 @@ export function Toolbox({
   onAnalyseImportedMedia: () => void
   onReviewMediaProposal: () => void
   onAnalyseFeed: () => void
+  /** A blocking reason from the last Analyse Feed attempt, if any. */
+  feedError?: string | null
   onReviewFeedAnalysis: () => void
   onAnalysePromptsAll: () => void
   onAnalysePromptSelected: () => void
@@ -77,6 +84,7 @@ export function Toolbox({
   const feedIds = getFeedSequenceIds(project)
   const libraryIds = project.images.map((i) => i.id)
   const feedStatus = feedAnalysisStatus(transitionDraft, feedIds, libraryIds)
+  const decisionCounts = feedDecisionCounts(transitionDraft)
 
   const mediaState =
     analysis && analysis.rooms.length > 0
@@ -157,6 +165,21 @@ export function Toolbox({
           {feedIds.length === 1 ? '' : 's'}
         </p>
         {feedStatus.detail && <p className="toolbox-help">{feedStatus.detail}</p>}
+        {/* Three numbers, never two. A pair waiting on the operator must
+            not be counted as a decision already made. */}
+        {transitionDraft && transitionDraft.pairs.length > 0 && (
+          <p className="toolbox-status">
+            {decisionCounts.ai} AI · {decisionCounts.cut} CUT
+            {decisionCounts.needsContext > 0 && (
+              <>
+                {' · '}
+                <strong className="toolbox-needs-context">
+                  {decisionCounts.needsContext} need context
+                </strong>
+              </>
+            )}
+          </p>
+        )}
 
         {feedIds.length < 2 ? (
           <p className="toolbox-help">
@@ -180,6 +203,14 @@ export function Toolbox({
               Judges the {Math.max(feedIds.length - 1, 0)} transition
               {feedIds.length - 1 === 1 ? '' : 's'} in your chosen order. Never changes the order.
             </p>
+            {/* ── A CLICK ALWAYS PRODUCES SOMETHING ─────────────────
+                A refusal from main used to be stored in state whose
+                only renderer was a dialog that hides itself when no
+                confirmation is open — so the reason existed and could
+                not be seen, and the button read as dead. The reason is
+                shown HERE, next to the button that caused it, where no
+                other component's visibility can suppress it. */}
+            {feedError && <p className="toolbox-error">{feedError}</p>}
             {(feedStatus.state === 'draft' || feedStatus.state === 'accepted') && (
               <button
                 type="button"

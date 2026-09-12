@@ -46,6 +46,21 @@ export interface ExportFormat {
    */
   aspectRatio: AspectRatio | null
   fit: FrameFit
+  /**
+   * What fills the frame where the picture cannot.
+   *
+   * A PROPERTY OF THE FORMAT, not a global setting. The desktop export
+   * has always padded black and looks wrong any other way — it is a
+   * letterbox, and letterboxes are black. A vertical Reel is supposed to
+   * be full-bleed and never pads at all; white is declared only so that
+   * if a source ever could not fill it, the result reads as deliberate
+   * margin rather than as missing picture.
+   *
+   * This was briefly set globally to white, which changed every desktop
+   * export the operator makes — their sources are 3:2 in a 16:9 frame,
+   * so every one of them gained white pillarboxing.
+   */
+  padColor: 'black' | 'white'
 }
 
 export const EXPORT_FORMATS: ExportFormat[] = [
@@ -54,7 +69,15 @@ export const EXPORT_FORMATS: ExportFormat[] = [
     label: 'Computer',
     description: 'Original / landscape format',
     aspectRatio: null,
-    fit: 'contain'
+    // ── FULL BLEED, LIKE THE REEL ─────────────────────────────────
+    //
+    // This was `contain`, and the operator's sources are about 3:2 in a
+    // 16:9 frame, so every desktop export came out with black bars down
+    // both sides. Cropping a little off the top and bottom is the better
+    // trade, and it is the same rule the vertical format uses — neither
+    // stretches, and neither pads.
+    fit: 'cover',
+    padColor: 'black'
   },
   {
     id: 'instagram',
@@ -63,7 +86,14 @@ export const EXPORT_FORMATS: ExportFormat[] = [
     aspectRatio: '9:16',
     // Fills the phone screen. The alternative is a tall black rectangle
     // with a small landscape video floating in the middle of it.
-    fit: 'cover'
+    fit: 'cover',
+    // Unreachable: `cover` scales up until the frame is filled, so there
+    // is nothing to pad. Both customer-facing formats are now cover, so
+    // neither of these colours is reached — `padColor` survives for the
+    // internal helpers that still assemble with `contain` (the editor
+    // preview, the assembly comparison), which keep the black they have
+    // always had.
+    padColor: 'white'
   }
 ]
 
@@ -82,10 +112,11 @@ export function exportFormat(id: ExportFormatId | null | undefined): ExportForma
 export function applyExportFormat(
   defaults: ExportDefaults,
   id: ExportFormatId | null | undefined
-): { defaults: ExportDefaults; fit: FrameFit } {
+): { defaults: ExportDefaults; fit: FrameFit; padColor: 'black' | 'white' } {
   const format = exportFormat(id)
   return {
     defaults: format.aspectRatio ? { ...defaults, aspectRatio: format.aspectRatio } : { ...defaults },
-    fit: format.fit
+    fit: format.fit,
+    padColor: format.padColor
   }
 }

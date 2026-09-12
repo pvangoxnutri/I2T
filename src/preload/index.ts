@@ -11,10 +11,15 @@ import type {
   GenerationRecord
 } from '../shared/types'
 import type { PropertyAnalysis } from '../shared/propertyAnalysis'
+import type { MotionSegment, MotionType } from '../shared/motionSegment'
+import type { MotionGenerationReadiness } from '../shared/motionGenerationReadiness'
+import type { MotionConfirmation } from '../shared/motionConfirmation'
+import type { TimelineEditResult, TimelineViewPayload } from '../shared/timeline'
 import type { TransitionDraft } from '../shared/transitionAnalysisExtractor'
 import type { AnalyzerDebugPreview, AnalyzerMetadata } from '../shared/analyzerTypes'
 import type { AnalysisDiff } from '../shared/analysisDiff'
 import type { TransitionPlan } from '../shared/transitionPlan'
+import type { EvidenceSource, PairAnalysisRecord } from '../shared/pairAnalysis'
 import type {
   AccuracySummary,
   ReviewableFact,
@@ -104,6 +109,20 @@ export interface SanitizedRequestPreview {
   warnings: string[]
 }
 
+/** One selectable fal.ai model, straight from main's canonical registry. */
+export interface FalModelOption {
+  id: string
+  displayName: string
+  durationsSec: number[]
+  resolutions: string[]
+  defaultResolution: string
+  audioSupport: boolean
+  /** FALSE means it cannot be submitted — its contract is unverified. */
+  confirmed: boolean
+  verificationNote: string
+  rates: Array<{ nativeAudio: boolean; usdPerSecond: number }>
+}
+
 /** Everything shown before a PAID request is sent. */
 export interface LiveConfirmationPayload {
   ok: boolean
@@ -144,6 +163,15 @@ export interface LiveConfirmationPayload {
    * `none` must never be rendered as a safe transition.
    */
   spatialGuidance: 'analysis' | 'none' | 'blocked'
+  /** The endpoint id of the model this run will use. */
+  modelId: string
+  /** FALSE when this model has not been verified against fal.ai. */
+  modelConfirmed: boolean
+  modelNote: string | null
+  /** What the SELECTED model accepts — the dialog offers only these. */
+  modelDurations: number[]
+  modelResolutions: string[]
+  modelAudioSupport: boolean
   /** Present only for an override: what the operator is agreeing to. */
   overrideWarning: string | null
   /** Why the evidence is missing. */
@@ -399,6 +427,23 @@ const api = {
        * feedSequence and can never add, remove or reorder an image. The
        * whole library is still sent as supporting evidence.
        */
+      /**
+       * Accept the feed analysis. ONE call: promotes the property map,
+       * applies pair decisions without overwriting operator ones,
+       * rebuilds wording, and marks the analysis accepted — or does
+       * none of it.
+       */
+      acceptAnalysis: (
+        projectId: string,
+        draft: TransitionDraft
+      ): Promise<{
+        ok: boolean
+        reason?: string
+        promptsUpdated: number
+        manualPromptsPreserved: number
+        stillNeedContext: number
+        operatorDecisionsPreserved: number
+      }> => ipcRenderer.invoke('feed:acceptAnalysis', projectId, draft),
       analyzeFeed: (
         projectId: string,
         notes?: string,
@@ -407,6 +452,112 @@ const api = {
         | { ok: true; draft: TransitionDraft; analysis: PropertyAnalysis; notes: string[] }
         | { ok: false; reason: string }
       > => ipcRenderer.invoke('feed:analyzeFeed', projectId, notes, token)
+    },
+    /**
+     * SINGLE-IMAGE MOTION SEGMENTS.
+     *
+     * Its own namespace, deliberately not folded into `transition` — a
+     * motion clip is not a transition, and every call site that reaches
+     * for one should have to say so.
+     */
+    motion: {
+      add: (
+        projectId: string,
+        imageId: string,
+        motion: MotionType,
+        durationSec: number
+      ): Promise<{ ok: boolean; reason?: string; segment?: MotionSegment }> =>
+        ipcRenderer.invoke('motion:add', projectId, imageId, motion, durationSec),
+      update: (
+        projectId: string,
+        segmentId: string,
+        patch: { motion?: MotionType; durationSec?: number }
+      ): Promise<{ ok: boolean; reason?: string; segment?: MotionSegment }> =>
+        ipcRenderer.invoke('motion:update', projectId, segmentId, patch),
+      remove: (
+        projectId: string,
+        segmentId: string
+      ): Promise<{ ok: boolean; reason?: string }> =>
+        ipcRenderer.invoke('motion:remove', projectId, segmentId),
+      /** Free. The same evaluator the paid path uses. */
+      confirmation: (projectId: string, segmentId: string): Promise<MotionGenerationReadiness> =>
+        ipcRenderer.invoke('motion:confirmation', projectId, segmentId),
+      /** Free. Everything the paid dialog shows, for a given model+length. */
+      generateConfirmation: (
+        projectId: string,
+        segmentId: string,
+        modelId?: string | null,
+        durationSec?: number | null,
+        motion?: MotionType | null
+      ): Promise<MotionConfirmation | null> =>
+        ipcRenderer.invoke(
+          'motion:generateConfirmation',
+          projectId,
+          segmentId,
+          modelId,
+          durationSec,
+          motion
+        ),
+      /** PAID. The model is not optional. */
+      generate: (
+        projectId: string,
+        segmentId: string,
+        modelId: string,
+        durationSec: number,
+        motion?: MotionType
+      ): Promise<{ ok: boolean; jobId?: string; reason?: string }> =>
+        ipcRenderer.invoke('motion:generate', projectId, segmentId, modelId, durationSec, motion)
+    },
+    /**
+     * THE FINAL EDIT — what actually gets exported.
+     *
+     * Its own namespace because a timeline is not a feed concept: these
+     * calls never touch `feedSequence`, the spatial analysis, a
+     * transition's mode or the generation history. Reading materialises
+     * it once; everything else is an operator action, and none of it
+     * costs anything.
+     */
+    timeline: {
+      get: (projectId: string): Promise<TimelineViewPayload | null> =>
+        ipcRenderer.invoke('timeline:get', projectId),
+      /** Split at ABSOLUTE timeline seconds. No file is written. */
+      split: (
+        projectId: string,
+        itemId: string,
+        atSec: number
+      ): Promise<TimelineEditResult> => ipcRenderer.invoke('timeline:split', projectId, itemId, atSec),
+      /** Remove one segment from the video. The clip and its history stay. */
+      delete: (projectId: string, itemId: string): Promise<TimelineEditResult> =>
+        ipcRenderer.invoke('timeline:delete', projectId, itemId),
+      reorder: (
+        projectId: string,
+        itemId: string,
+        toIndex: number
+      ): Promise<TimelineEditResult> =>
+        ipcRenderer.invoke('timeline:reorder', projectId, itemId, toIndex),
+      /** Discards manual edits — hence the explicit confirm flag. */
+      rebuild: (
+        projectId: string,
+        confirmDiscardEdits: boolean
+      ): Promise<TimelineEditResult> =>
+        ipcRenderer.invoke('timeline:rebuild', projectId, confirmDiscardEdits)
+    },
+    /**
+     * BRANDING ASSETS.
+     *
+     * The bytes go to a managed file; the caller stores the short url
+     * that comes back. Nothing here touches what branding is ENABLED —
+     * that is settings, saved separately.
+     */
+    branding: {
+      save: (
+        dataUrl: string,
+        name: string,
+        replacing?: string | null
+      ): Promise<{ ok: true; url: string } | { ok: false; reason: string }> =>
+        ipcRenderer.invoke('branding:saveAsset', dataUrl, name, replacing),
+      remove: (url: string | null): Promise<{ ok: true }> =>
+        ipcRenderer.invoke('branding:removeAsset', url)
     },
     /**
      * Historical record of all generated transitions in the project.
@@ -423,9 +574,91 @@ const api = {
         projectId: string,
         generationId: string
       ): Promise<{ ok: true; pairKey: string } | { ok: false; reason: string }> =>
-        ipcRenderer.invoke('catalogue:attach', projectId, generationId)
+        ipcRenderer.invoke('catalogue:attach', projectId, generationId),
+      /**
+       * Accept a clip the automatic quality check rejected.
+       *
+       * Requires explicit confirmation in the UI first — the operator is
+       * agreeing to ship a clip something objected to. The verdict is
+       * kept and the override is recorded alongside it, so history shows
+       * both the objection and the decision.
+       */
+      approveQuality: (
+        projectId: string,
+        generationId: string
+      ): Promise<{ ok: true; pairKey: string } | { ok: false; reason: string }> =>
+        ipcRenderer.invoke('catalogue:approveQuality', projectId, generationId)
+    },
+    /**
+     * ONE transition, analysed on its own. Never reorders the feed and
+     * never rewrites the whole property map — see pairAnalysisService.
+     */
+    pairAnalysis: {
+      analyze: (
+        projectId: string,
+        pairKey: string,
+        token?: string
+      ): Promise<{ ok: boolean; reason?: string; record?: PairAnalysisRecord }> =>
+        ipcRenderer.invoke('pair:analyze', projectId, pairKey, token),
+      read: (projectId: string, pairKey: string): Promise<PairAnalysisRecord | null> =>
+        ipcRenderer.invoke('pair:read', projectId, pairKey),
+      accept: (
+        projectId: string,
+        pairKey: string
+      ): Promise<{ ok: boolean; reason?: string; record?: PairAnalysisRecord }> =>
+        ipcRenderer.invoke('pair:accept', projectId, pairKey),
+      /**
+       * Settle one pair completely: their context, their decision, and the
+       * wording rebuilt and stamped against whatever evidence that leaves
+       * in force. One call, so no half-applied approval can exist — the
+       * shape that let a fully approved pair still read as outdated.
+       */
+      approve: (
+        projectId: string,
+        pairKey: string,
+        mode: 'ai' | 'cut',
+        contextText?: string
+      ): Promise<{
+        ok: boolean
+        reason?: string
+        evidenceSource?: string
+        evidenceFingerprint?: string
+        manualPromptPreserved?: boolean
+      }> => ipcRenderer.invoke('pair:approve', projectId, pairKey, mode, contextText),
+      /**
+       * Swap a held suggestion in for the operator's own wording. Only
+       * ever called from an explicit action — never as a side effect.
+       */
+      /**
+       * What main says this pair's wording is currently based on. The
+       * panel must not resolve precedence itself — a badge that
+       * disagrees with the generation gate is worse than no badge.
+       */
+      currentEvidence: (
+        projectId: string,
+        pairKey: string
+      ): Promise<{
+        source: EvidenceSource
+        fingerprint: string
+        operatorContextFingerprint?: string
+      } | null> => ipcRenderer.invoke('pair:currentEvidence', projectId, pairKey),
+      replacePrompt: (
+        projectId: string,
+        pairKey: string
+      ): Promise<{ ok: boolean; reason?: string }> =>
+        ipcRenderer.invoke('pair:replacePrompt', projectId, pairKey)
     },
     transitions: {
+      /**
+       * Record what the operator knows about this pair that the photos do
+       * not show. Empty text clears it.
+       */
+      setOperatorContext: (
+        projectId: string,
+        pairKey: string,
+        text: string
+      ): Promise<{ ok: true } | { ok: false; reason: string }> =>
+        ipcRenderer.invoke('transitions:setOperatorContext', projectId, pairKey, text),
       /**
        * Detach the active clip. The generation, its file and the pair all
        * survive; only the assignment goes, so it can be re-attached.
@@ -486,14 +719,23 @@ const api = {
     ): Promise<{ ok: true; preview: SanitizedRequestPreview } | { ok: false; reason: string }> =>
       ipcRenderer.invoke('generation:preview', projectId, pairKey),
     /** Data for the paid-request confirmation dialog. */
-    liveConfirmation: (projectId: string, pairKey: string): Promise<LiveConfirmationPayload | null> =>
-      ipcRenderer.invoke('generation:liveConfirmation', projectId, pairKey),
+    /** Every registered fal.ai model — ONE list, from main's registry. */
+    models: (): Promise<FalModelOption[]> => ipcRenderer.invoke('generation:models'),
+    liveConfirmation: (
+      projectId: string,
+      pairKey: string,
+      /** The model the dialog is showing; recomputes cost and capabilities. */
+      modelId?: string | null
+    ): Promise<LiveConfirmationPayload | null> =>
+      ipcRenderer.invoke('generation:liveConfirmation', projectId, pairKey, modelId),
     /** Submits exactly ONE live transition. Batches are refused in main. */
     generateLive: (
       projectId: string,
-      pairKeys: string[]
+      pairKeys: string[],
+      /** The model chosen for THIS run. */
+      modelId?: string | null
     ): Promise<{ ok: true; job: QueueJob } | { ok: false; reasons: string[] }> =>
-      ipcRenderer.invoke('generation:generateLive', projectId, pairKeys)
+      ipcRenderer.invoke('generation:generateLive', projectId, pairKeys, modelId)
   },
 
   providers: {

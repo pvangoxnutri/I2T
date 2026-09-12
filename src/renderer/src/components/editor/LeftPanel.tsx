@@ -55,7 +55,7 @@ export function LeftPanel({
   onAnalysisChange: () => void
 }): React.JSX.Element {
   const [tab, setTab] = useState<PanelTab>('media')
-  const { updateTransition, applyFeedProposal } = useAppState()
+  const { updateTransition, applyFeedProposal, refreshProjects } = useAppState()
 
   // Load persisted transition draft on project open
   useEffect(() => {
@@ -109,8 +109,16 @@ export function LeftPanel({
   const [transitionAnalysisVisible, setTransitionAnalysisVisible] = useState(false)
   const [transitionSnapshotFromAnalysis, setTransitionSnapshotFromAnalysis] = useState<FeedSnapshot | null>(null)
   const [transitionDraft, setTransitionDraft] = useState<TransitionDraft | null>(null)
-  const [transitionConfirmation, setTransitionConfirmation] = useState<any>(null)
-  const [transitionConfirmationToken, setTransitionConfirmationToken] = useState<string | null>(null)
+  /**
+   * Analyse Feed's OWN confirmation.
+   *
+   * Separate from the transition slot below: one confirmation object per
+   * paid action, because the dialog's Confirm button is bound to one
+   * handler and sharing the slot would let one action's approval submit
+   * another's request.
+   */
+  const [feedConfirmation, setFeedConfirmation] = useState<any>(null)
+  const [feedConfirmationToken, setFeedConfirmationToken] = useState<string | null>(null)
   /** Which Toolbox action is running, so none can be started twice. */
   const [toolboxBusy, setToolboxBusy] = useState<
     'media' | 'feed' | 'prompts' | 'prompt-selected' | null
@@ -319,13 +327,6 @@ export function LeftPanel({
     setProposalVisible(true)
   }, [proposal])
 
-  /** Abandoning the run drops the one-shot token unused; nothing is charged. */
-  const handleCancelTransitionAnalysis = useCallback((): void => {
-    setTransitionConfirmation(null)
-    setTransitionConfirmationToken(null)
-    setTransitionAnalysisError(null)
-  }, [])
-
   /**
    * ANALYSE FEED — judge the chosen order, never revise it.
    *
@@ -335,15 +336,69 @@ export function LeftPanel({
    */
   const handleAnalyseFeed = useCallback(async (): Promise<void> => {
     if (toolboxBusy) return
+    console.log('[analyse-feed] click')
+
+    // ── STEP 1: CONFIRM, DO NOT SPEND ───────────────────────────────
+    //
+    // This step did not exist. The handler called the paid IPC directly
+    // with an empty token; main correctly refused ("This analysis
+    // requires a confirmation token"), the refusal was stored in
+    // `transitionAnalysisError` — and the only component that renders
+    // that error returns null while `confirmation` is null. So the
+    // reason was set, unrenderable, and the button looked dead.
+    if (!feedConfirmation) {
+      setToolboxBusy('feed')
+      setTransitionAnalysisError(null)
+      try {
+        // 'gemini', not 'default'. There is no analyzer registered under
+        // the id 'default' — analyzerById returns null for it — so the
+        // removed rival handler would have died here too, one step later
+        // than the one that shipped. This must name the SAME analyzer
+        // that feed:analyzeFeed actually runs.
+        const confirmation = await window.f2f.projects.analysis.confirmation(project.id, 'gemini')
+        console.log('[analyse-feed] preflight', confirmation ? 'ok' : 'null')
+        if (!confirmation) {
+          setTransitionAnalysisError(
+            'Could not prepare the feed analysis. Check the analyzer settings.'
+          )
+          return
+        }
+        setFeedConfirmation(confirmation)
+        setFeedConfirmationToken(confirmation.token ?? null)
+        console.log('[analyse-feed] confirmation open')
+      } catch (err) {
+        setTransitionAnalysisError(
+          err instanceof Error ? err.message : 'Could not prepare the feed analysis.'
+        )
+      } finally {
+        setToolboxBusy(null)
+      }
+      return
+    }
+
+    // ── STEP 2: THE OPERATOR CONFIRMED ──────────────────────────────
+    console.log('[analyse-feed] submit')
     setToolboxBusy('feed')
     setTransitionAnalysisError(null)
     try {
       const before = getFeedSequenceIds(project)
-      const result = await window.f2f.projects.feed.analyzeFeed(project.id, '')
+      // The one-shot token is spent here and nowhere else. Cancelling
+      // consumes nothing, because nothing is sent until this line.
+      const token = feedConfirmation.paidLive ? (feedConfirmationToken ?? undefined) : undefined
+      console.log('[analyse-feed] ipc start')
+      const result = await window.f2f.projects.feed.analyzeFeed(project.id, '', token)
+      console.log('[analyse-feed] ipc result', result.ok ? 'ok' : `blocked: ${result.reason}`)
       if (!result.ok) {
         setTransitionAnalysisError(result.reason)
+        // The token is spent or invalid either way — a retry must go
+        // back through a fresh confirmation rather than silently reusing
+        // one the operator already approved.
+        setFeedConfirmation(null)
+        setFeedConfirmationToken(null)
         return
       }
+      setFeedConfirmation(null)
+      setFeedConfirmationToken(null)
       setTransitionDraft(result.draft)
       setTransitionAnalysisVisible(true)
       onAnalysisChange()
@@ -358,11 +413,14 @@ export function LeftPanel({
         console.error('[analyse-feed] the feed changed during analysis', { before, after })
       }
     } catch (err) {
+      console.error('[analyse-feed] error', err)
       setTransitionAnalysisError(err instanceof Error ? err.message : 'Could not analyse the feed.')
+      setFeedConfirmation(null)
+      setFeedConfirmationToken(null)
     } finally {
       setToolboxBusy(null)
     }
-  }, [project, toolboxBusy, onAnalysisChange])
+  }, [project, toolboxBusy, onAnalysisChange, feedConfirmation, feedConfirmationToken])
 
   /** Wording for every eligible current feed pair. Manual prompts survive. */
   const handleAnalysePromptsAll = useCallback(async (): Promise<void> => {
@@ -422,68 +480,56 @@ export function LeftPanel({
     }
   }, [transitionDraft])
 
+  /**
+   * ACCEPT — one call, one transaction, in main.
+   *
+   * This used to be a loop here: it patched each pair's mode, marked the
+   * feed draft accepted, and stopped. It never promoted the property map
+   * the analysis had been built from, so everything downstream kept
+   * reading the previous accepted analysis — which is how an accepted
+   * "safe" verdict coexisted with a generation refusal citing missing
+   * evidence about the same mirror.
+   *
+   * It also stamped `modeProvenance: 'analysis'` on every pair,
+   * overwriting decisions the operator had just made in this very
+   * dialog. Both are fixed in main, where the writes can be atomic.
+   */
   const handleAcceptTransitionAnalysis = useCallback(async (): Promise<void> => {
     if (!transitionDraft) return
-
-    // Verify feed hasn't changed since draft was created
-    const currentFeedIds = getFeedSequenceIds(project)
-    const feedChanged = currentFeedIds.length !== transitionDraft.feedImageIds.length ||
-      !currentFeedIds.every((id, i) => id === transitionDraft.feedImageIds[i])
-
-    if (feedChanged) {
-      console.warn('[handleAcceptTransitionAnalysis] Feed changed since analysis, rejecting')
-      setTransitionAnalysisError('Transition Feed changed since analysis. Re-analyse transitions.')
-      return
-    }
-
-    // WHAT ACCEPTING AN ANALYSIS IS ALLOWED TO TOUCH.
-    //
-    // Only the mode, and the prompt when the analyzer produced one AND no
-    // human has written that transition's wording. `updateTransition`
-    // patches, so the clip, its provider metadata and the generation
-    // status are carried through untouched — accepting an analysis must
-    // never discard generation work that was already paid for.
-    for (const pair of transitionDraft.pairs) {
-      const patch: Partial<TransitionSettings> = {}
-      if (pair.recommendation) {
-        patch.mode = pair.recommendation
-        // Chosen by the analysis, so it stays bound to the analysis.
-        patch.modeProvenance = 'analysis'
-      }
-
-      if (pair.prompt) {
-        const existing = project.transitions[transitionKey(pair.fromId, pair.toId)]
-        // A hand-written prompt outranks the analyzer, always.
-        if (!existing?.promptProvenance?.manuallyEdited) patch.prompt = pair.prompt
-      }
-
-      if (Object.keys(patch).length > 0) {
-        updateTransition(project.id, pair.fromId, pair.toId, patch)
-      }
-    }
-
-    const acceptedDraft: TransitionDraft = { ...transitionDraft, status: 'accepted' }
-
-    // PERSIST BEFORE CLAIMING IT. This write used to be fire-and-forget,
-    // so a failed save left the panel showing an accepted analysis that
-    // would be gone on the next launch.
+    console.log('[feed-review] accept start')
+    setTransitionAnalysisError(null)
     try {
-      await window.f2f.projects.transitionAnalysis.save(project.id, acceptedDraft)
-    } catch (err) {
-      console.error('[transition-analysis] accept failed to persist', err)
-      setTransitionAnalysisError(
-        err instanceof Error ? err.message : 'Could not save the transition analysis.'
+      const result = await window.f2f.projects.feed.acceptAnalysis(project.id, transitionDraft)
+      console.log('[feed-review] accept result', JSON.stringify(result))
+      if (!result.ok) {
+        setTransitionAnalysisError(result.reason ?? 'The analysis could not be accepted.')
+        return
+      }
+      setTransitionDraft({ ...transitionDraft, status: 'accepted' })
+      setTransitionSnapshotFromAnalysis(null)
+      setTransitionAnalysisVisible(false)
+      setProposalApplied(
+        `Feed analysis accepted · ${result.promptsUpdated} prompt${result.promptsUpdated === 1 ? '' : 's'} updated` +
+          (result.manualPromptsPreserved > 0
+            ? ` · ${result.manualPromptsPreserved} manual preserved`
+            : '') +
+          (result.operatorDecisionsPreserved > 0
+            ? ` · ${result.operatorDecisionsPreserved} operator decision${result.operatorDecisionsPreserved === 1 ? '' : 's'} kept`
+            : '') +
+          (result.stillNeedContext > 0 ? ` · ${result.stillNeedContext} still need context` : '')
       )
-      return // dialog stays open; nothing claims success
+      // ONE canonical refresh. Everything downstream — inspector, modes,
+      // prompt basis, generation preflight — re-reads the newly accepted
+      // map rather than whatever it loaded before the click.
+      onAnalysisChange()
+      refreshProjects()
+    } catch (err) {
+      console.error('[feed-review] accept error', err)
+      setTransitionAnalysisError(
+        err instanceof Error ? err.message : 'The analysis could not be accepted.'
+      )
     }
-
-    setTransitionDraft(acceptedDraft)
-    // The accepted analysis now describes this feed, so the pending-review
-    // snapshot is spent.
-    setTransitionSnapshotFromAnalysis(null)
-    setTransitionAnalysisVisible(false)
-    onAnalysisChange()
-  }, [transitionDraft, project, updateTransition, onAnalysisChange])
+  }, [transitionDraft, project, onAnalysisChange, refreshProjects])
 
   /**
    * DECLINE — nothing is applied, and the draft must not come back as a
@@ -500,80 +546,6 @@ export function LeftPanel({
       .catch((err) => console.error('[transition-analysis] could not record decline', err))
   }, [transitionDraft, project.id])
 
-  const handleAnalyzeTransitions = useCallback(
-    async (): Promise<void> => {
-      const feedIds = getFeedSequenceIds(project)
-      if (feedIds.length < 2) {
-        console.warn('[handleAnalyzeTransitions] Feed has fewer than 2 images')
-        return
-      }
-
-      setTransitionAnalysisLoading(true)
-      setTransitionAnalysisError(null)
-
-      try {
-        // Step 1: Get confirmation (handles paid analyzer token)
-        if (!transitionConfirmation) {
-          const confirmation = await window.f2f.projects.analysis.confirmation(project.id, 'default')
-          if (!confirmation) {
-            setTransitionAnalysisError('Could not prepare transition analysis.')
-            return
-          }
-
-          // Store confirmation details
-          setTransitionConfirmation(confirmation)
-          setTransitionConfirmationToken(confirmation.token)
-          setTransitionAnalysisLoading(false)
-          // Return here - user sees confirmation dialog in modal
-          return
-        }
-
-        // Step 2: Run analysis with token (if we reach here, user confirmed)
-        const pairKeys = Array.from({ length: feedIds.length - 1 }, (_, i) =>
-          `${feedIds[i]}->${feedIds[i + 1]}`
-        )
-
-
-        // Capture snapshot BEFORE analysis starts
-        const snapshot = getFeedSnapshot(feedIds)
-        setTransitionSnapshotFromAnalysis(snapshot)
-
-        // Run REAL analysis with confirmation token
-        const token = transitionConfirmation.paidLive ? (transitionConfirmationToken ?? undefined) : undefined
-        const result = await window.f2f.projects.analysis.run(project.id, 'default', '', token)
-
-        if (!result.ok) {
-          setTransitionAnalysisError(`Analysis failed: ${result.reason}`)
-          setTransitionConfirmation(null)
-          setTransitionConfirmationToken(null)
-          return
-        }
-
-        // Extract transition-specific results from whole-property analysis
-        const analysisResult = extractTransitionAnalysis(result.analysis, feedIds, Date.now())
-        if (!analysisResult.draft || analysisResult.error) {
-          setTransitionAnalysisError(analysisResult.error ?? 'Failed to extract transition analysis')
-          return
-        }
-
-        // PERSIST BEFORE SHOWING. A draft the operator can review but that
-        // never reached disk would silently vanish on the next launch, and
-        // the paid analysis behind it would have to be run again.
-        await window.f2f.projects.transitionAnalysis.save(project.id, analysisResult.draft)
-
-        setTransitionDraft(analysisResult.draft)
-        setTransitionAnalysisVisible(true)
-        setTransitionConfirmation(null)
-        setTransitionConfirmationToken(null)
-      } catch (err) {
-        setTransitionAnalysisError(err instanceof Error ? err.message : 'Unknown error')
-        console.error('[handleAnalyzeTransitions]', err)
-      } finally {
-        setTransitionAnalysisLoading(false)
-      }
-    },
-    [project]
-  )
 
   return (
     <aside className="left-panel">
@@ -632,6 +604,7 @@ export function LeftPanel({
             onAnalyseImportedMedia={() => void handleProposeFeedOrder()}
             onReviewMediaProposal={handleReviewMediaProposal}
             onAnalyseFeed={() => void handleAnalyseFeed()}
+            feedError={feedConfirmation ? null : transitionAnalysisError}
             onReviewFeedAnalysis={handleReviewTransitionAnalysis}
             onAnalysePromptsAll={() => void handleAnalysePromptsAll()}
             onAnalysePromptSelected={() => void handleAnalysePromptSelected()}
@@ -698,16 +671,30 @@ export function LeftPanel({
         onCancel={handleRejectProposal}
       />
 
-      {/* The transition run is the same two-step gate as the media run, so
-          it reuses the same dialog. Without this the first click set a
-          confirmation nothing rendered, and "Analyse Transitions" looked
-          like a button that did nothing. */}
+      {/* ── ANALYSE FEED, STEP TWO ──────────────────────────────────
+          Bound to `handleAnalyseFeed`, which is the handler the Toolbox
+          button actually calls. It used to point at a second, rival
+          implementation that nothing triggered — so the button ran a
+          handler with no confirmation, and the dialog waited on a
+          confirmation no one set. */}
       <AnalyzeFeedConfirmDialog
-        confirmation={transitionConfirmation}
-        running={transitionAnalysisLoading}
+        confirmation={feedConfirmation}
+        kind="feed"
+        feed={{
+          imageCount: getFeedSequenceIds(project).length,
+          pairCount: Math.max(0, getFeedSequenceIds(project).length - 1)
+        }}
+        running={toolboxBusy === 'feed'}
         error={transitionAnalysisError}
-        onConfirm={() => void handleAnalyzeTransitions()}
-        onCancel={handleCancelTransitionAnalysis}
+        onConfirm={() => void handleAnalyseFeed()}
+        onCancel={() => {
+          // Cancelling consumes nothing: the token is only spent inside
+          // step two, which this never reaches.
+          console.log('[analyse-feed] cancelled')
+          setFeedConfirmation(null)
+          setFeedConfirmationToken(null)
+          setTransitionAnalysisError(null)
+        }}
       />
 
       <MediaProposalReview
@@ -726,6 +713,10 @@ export function LeftPanel({
         visible={transitionAnalysisVisible}
         onAccept={() => void handleAcceptTransitionAnalysis()}
         onDecline={handleDeclineTransitionAnalysis}
+        // A per-pair decision writes to the project, so the panel and
+        // everything derived from it re-read rather than showing the
+        // state from before the operator answered.
+        onRefresh={onAnalysisChange}
       />
     </aside>
   )

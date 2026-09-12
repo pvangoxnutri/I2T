@@ -46,10 +46,27 @@ export interface TransitionDraft {
     fromId: string
     toId: string
     recommendation: 'ai' | 'cut'
+    /**
+     * The THREE-WAY outcome. `recommendation` stays two-valued so every
+     * existing consumer keeps working; this is what tells a pair waiting
+     * for an answer apart from one that was refused.
+     */
+    decision?: 'ai' | 'cut' | 'needs-context'
+    /** Phrased as questions, because they are for the operator. */
+    missingContext?: { type: string; question: string }[]
     safety: TransitionSafety | null
     prompt?: string
   }>
   createdAt: number
+  /**
+   * The accepted PropertyAnalysis this was accepted against.
+   *
+   * Lets a later reader tell that an accepted feed analysis describes a
+   * map that has since been replaced — the exact divergence that let a
+   * feed analysis say "safe" while generation preflight, reading an
+   * older accepted map, said "insufficient evidence".
+   */
+  acceptedAnalysisUpdatedAt?: number
   /**
    * `declined` exists so a dismissed draft stays in history without coming
    * back as a pending review after a restart. Deleting it would lose the
@@ -119,17 +136,32 @@ export function extractTransitionAnalysis(
 
       const { mode, reason } = recommendedMode(plan)
       const facts = evidenceFor(plan)
+      const verdict = plan?.safetyVerdict ?? null
+      // The canonical decision, carried straight through. Deriving it
+      // again here would be a second evaluator with a second opinion.
+      const decision = verdict?.decision ?? (mode === 'ai' ? 'ai' : 'cut')
 
       pairs.push({
         fromId,
         toId,
         recommendation: mode,
+        decision,
+        missingContext: verdict?.missingContext ?? [],
         safety: {
           fromImageId: fromId,
           toImageId: toId,
-          level: safetyLevel(plan, mode),
+          level: verdict?.safety ?? safetyLevel(plan, mode),
           // The rule's own words, plus the visible facts it rested on.
-          reasoning: facts.length > 0 ? `${reason} (${facts.join('; ')})` : reason
+          // A needs-context pair explains itself from the canonical
+          // verdict, which names the missing fact rather than the refusal.
+          reasoning:
+            decision === 'needs-context' && verdict
+              ? facts.length > 0
+                ? `${verdict.reason} (${facts.join('; ')})`
+                : verdict.reason
+              : facts.length > 0
+                ? `${reason} (${facts.join('; ')})`
+                : reason
         }
       })
     }

@@ -116,6 +116,31 @@ export function feedAnalysisStatus(
 }
 
 /** Short label for a status row. */
+/**
+ * How the draft's pairs came out, as three separate numbers.
+ *
+ * ── WHY needs-context IS NOT FOLDED INTO CUT ─────────────────────────
+ *
+ * They mean opposite things to the operator. A CUT is finished work —
+ * the evidence says no. A needs-context pair is waiting on THEM, and
+ * hiding it inside the CUT count makes a question look like a decision,
+ * so nobody ever answers it.
+ */
+export function feedDecisionCounts(draft: TransitionDraft | null | undefined): {
+  ai: number
+  cut: number
+  needsContext: number
+} {
+  const counts = { ai: 0, cut: 0, needsContext: 0 }
+  for (const pair of draft?.pairs ?? []) {
+    const decision = pair.decision ?? pair.recommendation
+    if (decision === 'ai') counts.ai++
+    else if (decision === 'needs-context') counts.needsContext++
+    else counts.cut++
+  }
+  return counts
+}
+
 export function feedAnalysisLabel(status: FeedAnalysisStatus): string {
   switch (status.state) {
     case 'unavailable':

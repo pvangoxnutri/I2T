@@ -47,6 +47,22 @@ WHAT TO DETERMINE
   "picture window", "glass wall" or "closed sliding door" when they could not.
   This distinction decides whether a camera may travel through the opening, so
   a window described as a door will produce a clip that flies through glazing.
+- REFLECTIVE SURFACES visible in each image, reported in "reflectiveSurfaces".
+  List every mirror, mirrored wardrobe, shower glass, glass wall, polished metal
+  or stone, high-gloss cabinetry and dark TV screen. These are HAZARDS, not
+  landmarks: a generated camera move past a mirror can invent a person or a
+  camera in the reflection, and that has already reached a real customer video.
+  Do NOT report a mirror only inside "landmarks" — it must appear here.
+  For each one give:
+    type                   e.g. "wall mirror", "shower glass", "TV screen"
+    locationDescription    where it sits in the frame
+    dominant               true when it occupies a large part of the frame
+    expectedVisibleContent what the reflection ACTUALLY shows, read from the
+                           photograph: "beige wall tiles", "vanity", "ceiling
+                           light", "doorway edge". Leave this EMPTY if you
+                           cannot read the reflection. An empty list is correct
+                           and useful; a guess is not. Never write "no person"
+                           or "no camera" here — list only surfaces you can see.
 - Visual OVERLAP between images: which pairs share a region of the same space.
 - Approximate CAMERA ORIENTATION for each image, expressed relative to shared landmarks rather than compass directions.
 - SAFE transitions: pairs where a camera move can be defended with strong visual evidence.
@@ -103,7 +119,7 @@ DO NOT
 OUTPUT
 Return structured data matching the PropertyAnalysis schema:
 - rooms: with ID, label, image IDs, marketingImportance (0-10), confidence, and notes
-- images: with room assignment, marketingImportance, isHero flag, landmarks, openings, overlaps, orientation
+- images: with room assignment, marketingImportance, isHero flag, landmarks, openings, reflectiveSurfaces, overlaps, orientation
 - edges: with confidence, supportingImageIds, visibleOpeningImageIds, and notes explaining the evidence
 - transitionHints: with pair-specific safety assessment and reasoning
 

@@ -8,7 +8,8 @@ import type {
   ProjectStatus,
   ProviderId,
   QueueJob,
-  TransitionClip
+  TransitionClip,
+  TransitionSettings
 } from '../shared/types'
 import { transitionKey } from '../shared/types'
 import {
@@ -18,7 +19,12 @@ import {
   getSettingsJson,
   saveSettingsJson
 } from './db/projectsRepo'
-import { getAllProjectGenerations } from './db/generationCatalogueRepo'
+import {
+  getAllProjectGenerations,
+  approveQualityManually,
+  generationForJobPair,
+  getGenerationsForMotion
+} from './db/generationCatalogueRepo'
 import { logProposalEvidence } from './analysisDiagnostics'
 import {
   attachGenerationToTransition,
@@ -32,6 +38,8 @@ import {
   removeImageFile,
   resolveClipPath,
   type ImportItem
+  ,saveBrandingAsset,
+  removeBrandingAsset
 } from './files'
 import { ffmpegStatus } from './services/ffmpegService'
 import {
@@ -67,6 +75,8 @@ import {
   replacementForModel
 } from './analysis/providers/gemini/geminiConfig'
 import { sanitizeApiKey } from './providers/keyHygiene'
+import { modelListPayload } from './providers/fal/falModels'
+import { mergeSettingsForSave, normalizeProductSettings } from './services/productSettings'
 import { consumeAnalysisToken, issueAnalysisToken } from './analysis/confirmationTokens'
 import {
   clearOverrideField,
@@ -75,6 +85,10 @@ import {
   setOverrideField
 } from './db/overrideRepo'
 import { applyImageOverrides, imageFacts, type OverrideField } from '../shared/imageFacts'
+import { reflectionEvidenceForPair } from '../shared/reflectionRisk'
+import { makeOperatorContext, reviewAfterReanalysis } from '../shared/operatorContext'
+import { broadcastProjectUpdated } from './events'
+import { imageAnalysis } from '../shared/propertyAnalysis'
 import type { AnalyzerMode } from '../shared/analysisWorkflow'
 import { logicalTransitions } from '../shared/logicalTransitions'
 import { recommendedMode, resolveTransitionMode } from '../shared/transitionMode'
@@ -99,7 +113,36 @@ import { diffAnalyses } from '../shared/analysisDiff'
 import { planSequence } from '../shared/transitionPlan'
 import { proposeFeedOrder, proposeTransitionModes } from '../shared/feedProposal'
 import { getFeedImages, getFeedSequenceIds } from '../shared/feedSequence'
-import { extractTransitionAnalysis } from '../shared/transitionAnalysisExtractor'
+import {
+  extractTransitionAnalysis,
+  type TransitionDraft
+} from '../shared/transitionAnalysisExtractor'
+import { acceptFeedAnalysis } from './services/feedAnalysisAccept'
+import { approvePair } from './services/pairApproval'
+import {
+  addMotionSegment,
+  removeMotionSegment,
+  updateMotionSegment
+} from './services/motionSegmentService'
+import { MOTION_LABEL, motionSegments, type MotionType } from '../shared/motionSegment'
+import { motionGenerationReadiness } from '../shared/motionGenerationReadiness'
+import { motionConfirmation, queueMotionGeneration } from './services/motionGenerationService'
+import { clipsForJob } from './services/jobClipsService'
+import {
+  deleteTimelineItem,
+  getTimeline,
+  rebuildTimeline,
+  reorderTimelineItem,
+  splitTimelineAt
+} from './services/timelineService'
+import { FAL_MODEL_REGISTRY } from './providers/fal/falModels'
+import { currentPairEvidence } from './services/currentEvidence'
+import {
+  analysePair,
+  acceptPairAnalysis,
+  replaceManualPrompt
+} from './services/pairAnalysisService'
+import { readPairAnalysis } from './db/pairAnalysisRepo'
 
 /**
  * Builds the provider-independent analyzer request.
@@ -603,7 +646,12 @@ export function registerIpc(): void {
       mode: 'dry-run' as const
     }
     saveSettingsJson(
-      JSON.stringify({ ...settings, analyzer: { ...analyzer, apiKey: sanitizeApiKey(apiKey) } })
+      JSON.stringify(
+        normalizeProductSettings({
+          ...settings,
+          analyzer: { ...analyzer, apiKey: sanitizeApiKey(apiKey) }
+        })
+      )
     )
     return true
   })
@@ -925,6 +973,39 @@ export function registerIpc(): void {
         return { ok: false as const, reason: 'The feed analysis could not be saved.' }
       }
 
+      // ── OLD OPERATOR CONTEXT STOPS BEING AUTHORITATIVE ───────────────
+      //
+      // A sentence written against the PREVIOUS understanding of the
+      // property has not been checked against this one. It is kept — the
+      // operator may still be right, and deleting their knowledge on
+      // every re-analysis would be its own bug — but its authority is
+      // withdrawn until they confirm it.
+      //
+      // Until then it is not injected into rebuilt prompts and cannot
+      // resolve a needs-context verdict. That is what stops an old test
+      // instruction quietly steering a fresh analysis.
+      try {
+        const fingerprint = draft.createdAt
+        const live = listProjects().find((p) => p.id === projectId)
+        if (live) {
+          let demoted = 0
+          for (const [pairKey, t] of Object.entries(live.transitions)) {
+            const reviewed = reviewAfterReanalysis(t?.operatorContext, fingerprint)
+            if (reviewed && reviewed !== t?.operatorContext) {
+              live.transitions[pairKey] = { ...t!, operatorContext: reviewed }
+              demoted++
+            }
+          }
+          if (demoted > 0) {
+            live.updatedAt = Date.now()
+            saveProject(live)
+            console.log(`[feed-analysis] ${demoted} operator context entr(y/ies) now need review`)
+          }
+        }
+      } catch (err) {
+        console.error('[feed-analysis] could not review operator context', err)
+      }
+
       logProposalEvidence(
         result.analysis,
         feedImageIds,
@@ -1150,9 +1231,17 @@ export function registerIpc(): void {
     return json ? (JSON.parse(json) as AppSettings) : null
   }
 
+  /**
+   * EVERY key, not only the provider ones.
+   *
+   * This stripped `providers[].apiKey` and left `analyzer.apiKey` in the
+   * payload, so the Gemini key was handed to the renderer on every
+   * settings read — and, far worse, came back on every write.
+   */
   const withoutKeys = (settings: AppSettings): AppSettings => ({
     ...settings,
-    providers: (settings.providers ?? []).map((p) => ({ ...p, apiKey: '', legacySecret: '' }))
+    providers: (settings.providers ?? []).map((p) => ({ ...p, apiKey: '', legacySecret: '' })),
+    analyzer: settings.analyzer ? { ...settings.analyzer, apiKey: '' } : settings.analyzer
   })
 
   ipcMain.handle('settings:get', (): AppSettings | null => {
@@ -1162,14 +1251,7 @@ export function registerIpc(): void {
 
   ipcMain.handle('settings:save', (_e, settings: AppSettings): void => {
     const stored = storedSettings()
-    const merged: AppSettings = {
-      ...settings,
-      providers: (settings.providers ?? []).map((p) => {
-        const previous = stored?.providers?.find((x) => x.id === p.id)
-        return { ...p, apiKey: previous?.apiKey ?? '', legacySecret: previous?.legacySecret ?? '' }
-      })
-    }
-    saveSettingsJson(JSON.stringify(merged))
+    saveSettingsJson(JSON.stringify(mergeSettingsForSave(settings, stored)))
   })
 
   /** Sanitises the key and CREATES a missing provider entry rather than
@@ -1258,7 +1340,7 @@ export function registerIpc(): void {
   ipcMain.handle(
     'generation:queue',
     (_e, projectId: string, pairKeys: string[], scheduledFor: number | null): QueueJob | null =>
-      queueGeneration(projectId, pairKeys, scheduledFor)
+      queueGeneration(projectId, pairKeys, null, scheduledFor)
   )
 
   /** Sanitized request preview for the developer "View Request" action —
@@ -1291,9 +1373,27 @@ export function registerIpc(): void {
     nativeAudioDefault: FAL_NATIVE_AUDIO_DEFAULT
   }))
 
+  /**
+   * THE MODELS AN OPERATOR MAY PICK.
+   *
+   * ── WHY THE DROPDOWN WAS EMPTY ──────────────────────────────────────
+   *
+   * This handler did not exist. The registry was right, the preload
+   * bridge was right, the dialog was right — and `ipcRenderer.invoke`
+   * was calling a channel nothing answered, so the list arrived empty
+   * and the select rendered no options.
+   *
+   * The DOM test did not catch it because the harness MOCKS
+   * `generation.models`, which meant the proof exercised everything
+   * except the one link that was missing.
+   */
+  ipcMain.handle('generation:models', () => modelListPayload())
+
   /** Everything the paid-confirmation dialog must show, computed in main. */
-  ipcMain.handle('generation:liveConfirmation', (_e, projectId: string, pairKey: string) =>
-    liveConfirmation(projectId, pairKey)
+  ipcMain.handle(
+    'generation:liveConfirmation',
+    (_e, projectId: string, pairKey: string, modelId?: string | null) =>
+      liveConfirmation(projectId, pairKey, modelId)
   )
 
   /**
@@ -1302,7 +1402,8 @@ export function registerIpc(): void {
    */
   ipcMain.handle(
     'generation:generateLive',
-    (_e, projectId: string, pairKeys: string[]) => queueLiveGeneration(projectId, pairKeys)
+    (_e, projectId: string, pairKeys: string[], modelId?: string | null) =>
+      queueLiveGeneration(projectId, pairKeys, modelId)
   )
 
   // ── Exports & queue ───────────────────────────────────────────────────
@@ -1320,6 +1421,7 @@ export function registerIpc(): void {
       return {
         ready: false,
         missingAiClips: [],
+        missingMotionClips: [],
         cutPairs: [],
         crossfadePairs: [],
         sequenceLength: 0,
@@ -1385,48 +1487,7 @@ export function registerIpc(): void {
    * "View clip" / "Show in folder" appear only when there is really
    * something to view.
    */
-  ipcMain.handle('queue:clips', (_e, jobId: string): JobClipStatus[] => {
-    const job = listJobs().find((j) => j.id === jobId)
-    if (!job) return []
-    const pairKeys = job.metadata?.pairKeys ?? []
-    if (pairKeys.length === 0) return []
-
-    const project = listProjects().find((p) => p.id === job.projectId)
-    if (!project) return []
-
-    // Image ORDER gives the human label, exactly as the editor numbers them in the feed.
-    const labels = new Map<string, string>()
-    const feedImages = getFeedImages(project)
-    for (let i = 0; i < feedImages.length - 1; i++) {
-      labels.set(
-        transitionKey(feedImages[i].id, feedImages[i + 1].id),
-        `Image ${i + 1} → Image ${i + 2}`
-      )
-    }
-
-    return pairKeys.map((pairKey) => {
-      const clip = project.transitions[pairKey]?.clip ?? null
-      const path = clip ? resolveClipPath(project.id, clip.storedName) : null
-      let bytes = 0
-      if (path) {
-        try {
-          bytes = statSync(path).size
-        } catch {
-          bytes = 0
-        }
-      }
-      return {
-        pairKey,
-        label: labels.get(pairKey) ?? pairKey,
-        storedName: clip?.storedName ?? null,
-        originalName: clip?.originalName ?? null,
-        source: clip?.source ?? null,
-        src: clip?.src ?? null,
-        exists: path !== null,
-        bytes
-      }
-    })
-  })
+  ipcMain.handle('queue:clips', (_e, jobId: string): JobClipStatus[] => clipsForJob(jobId))
 
   /**
    * MANUAL RECOVERY — attaches fal's queue urls to an EXISTING paid task
@@ -1440,13 +1501,78 @@ export function registerIpc(): void {
       recoverRemoteTaskUrls(jobId, urls ?? {})
   )
 
+  // ── BRANDING ASSETS ────────────────────────────────────────────────
+  //
+  // The picker hands the renderer a data URL; this writes the bytes to a
+  // managed file and returns a short f2f://brand/ url to store instead.
+  // Replacing an asset removes the file it replaced, so the directory
+  // does not accumulate every logo anyone ever tried.
+  ipcMain.handle('branding:saveAsset', (_e, dataUrl: string, name: string, replacing?: string | null) => {
+    const url = saveBrandingAsset(dataUrl, name)
+    if (!url) return { ok: false as const, reason: 'That file is not a readable image.' }
+    if (replacing) removeBrandingAsset(replacing)
+    return { ok: true as const, url }
+  })
+
+  ipcMain.handle('branding:removeAsset', (_e, url: string | null) => {
+    removeBrandingAsset(url)
+    return { ok: true as const }
+  })
+
   ipcMain.handle('queue:reveal', (_e, path: string): void => {
     shell.showItemInFolder(path)
   })
 
+  // ── THE FINAL EDIT ──────────────────────────────────────────────────
+  //
+  // Reading materialises the timeline the first time and is otherwise
+  // pure. Every write below is an operator action — nothing here rebuilds
+  // on its own, which is what stops a background refresh eating someone's
+  // cuts. None of it costs anything: a split is two ranges over a file
+  // that already exists.
+  ipcMain.handle('timeline:get', (_e, projectId: string) => getTimeline(projectId))
+
+  ipcMain.handle(
+    'timeline:split',
+    (_e, projectId: string, itemId: string, atSec: number) =>
+      splitTimelineAt(projectId, itemId, atSec)
+  )
+
+  ipcMain.handle('timeline:delete', (_e, projectId: string, itemId: string) =>
+    deleteTimelineItem(projectId, itemId)
+  )
+
+  ipcMain.handle('timeline:reorder', (_e, projectId: string, itemId: string, toIndex: number) =>
+    reorderTimelineItem(projectId, itemId, toIndex)
+  )
+
+  /**
+   * Rebuild from the Feed — explicit, and confirmed when edits exist.
+   *
+   * `confirmDiscardEdits` is required by the service, not defaulted here:
+   * a handler that quietly passed `true` would turn the confirmation into
+   * decoration.
+   */
+  ipcMain.handle('timeline:rebuild', (_e, projectId: string, confirmDiscardEdits: boolean) =>
+    rebuildTimeline(projectId, confirmDiscardEdits === true)
+  )
+
   // ── Generation Catalogue ───────────────────────────────────────────────
 
-  ipcMain.handle('catalogue:getAll', (_e, projectId: string) => getAllProjectGenerations(projectId))
+  ipcMain.handle('catalogue:getAll', (_e, projectId: string) => {
+    // Reflection risk is DERIVED here rather than stored on the row: it
+    // is a fact about the photographs, and re-running analysis can change
+    // it. Read from the same evidence the safety gate and the validator
+    // use, so all three agree about which pairs involve a mirror.
+    const analysis = applyImageOverrides(readAnalysis(projectId), listOverrides(projectId))
+    return getAllProjectGenerations(projectId).map((gen) => ({
+      ...gen,
+      reflectionRisk: reflectionEvidenceForPair(
+        imageAnalysis(analysis, gen.fromImageId),
+        imageAnalysis(analysis, gen.toImageId)
+      ).risk
+    }))
+  })
 
   /**
    * Reuse a clip this project already generated. Pure bookkeeping over
@@ -1458,9 +1584,232 @@ export function registerIpc(): void {
   )
 
   /**
+   * "Use anyway" — an operator accepting a clip the quality check rejected.
+   *
+   * Two steps, deliberately in this order and deliberately not one: the
+   * override is RECORDED first, then the clip is attached. The recorded
+   * override is what makes the attachment legitimate to every later
+   * reader — export readiness re-asks the same rule, and would refuse a
+   * clip attached without it.
+   *
+   * The verdict itself is never rewritten. `qualityStatus` keeps saying
+   * `failed` and the reason stays readable, so the catalogue continues to
+   * show that the automatic check objected and that a human overruled it.
+   * Silently flipping it to `passed` would destroy the only record that
+   * this decision was ever made.
+   */
+  ipcMain.handle(
+    'catalogue:approveQuality',
+    (_e, projectId: string, generationId: string) => {
+      approveQualityManually(projectId, generationId)
+      return attachGenerationToTransition(projectId, generationId)
+    }
+  )
+
+  /**
    * Detach the active clip. The generation row, the file and the pair all
    * survive — only the assignment goes, so it can be re-attached.
    */
+  /**
+   * Store what the operator knows that the photographs do not show.
+   *
+   * Written to the transition row, keyed by the exact pair — not folded
+   * into the prompt, where the next rebuild would erase it. Passing an
+   * empty string clears it, which is how an operator withdraws a claim
+   * they no longer stand behind.
+   */
+  ipcMain.handle(
+    'transitions:setOperatorContext',
+    (_e, projectId: string, pairKey: string, text: string) => {
+      const project = listProjects().find((p) => p.id === projectId)
+      if (!project) return { ok: false as const, reason: 'Project not found' }
+      const trimmed = (text ?? '').trim()
+      const existing =
+        project.transitions[pairKey] ??
+        ({ prompt: '', durationSec: 5, status: 'not-generated', clip: null } as TransitionSettings)
+      project.transitions[pairKey] = {
+        ...existing,
+        operatorContext: trimmed.length > 0 ? makeOperatorContext(trimmed) : undefined
+      }
+      project.updatedAt = Date.now()
+      saveProject(project)
+      broadcastProjectUpdated(projectId)
+      return { ok: true as const }
+    }
+  )
+
+  /**
+   * ACCEPT FEED ANALYSIS — the whole operation, in main, in one
+   * transaction. The renderer used to do this as a loop of per-pair
+   * writes and never promoted the property map the analysis was built
+   * from, which is why an accepted analysis could say "safe" while
+   * generation preflight still read a five-week-old map and refused.
+   */
+  ipcMain.handle('feed:acceptAnalysis', (_e, projectId: string, draft: TransitionDraft) =>
+    acceptFeedAnalysis(projectId, draft)
+  )
+
+  // ── SINGLE-IMAGE MOTION SEGMENTS ────────────────────────────────────
+  //
+  // Add, retime and remove. None of these costs anything: creating a
+  // motion segment only records the intent, exactly as adding a pair to
+  // the feed does. The paid run goes through the same canonical
+  // confirmation as every other generation.
+  ipcMain.handle(
+    'motion:add',
+    (_e, projectId: string, imageId: string, motion: MotionType, durationSec: number) =>
+      addMotionSegment({ projectId, imageId, motion, durationSec })
+  )
+
+  ipcMain.handle(
+    'motion:update',
+    (
+      _e,
+      projectId: string,
+      segmentId: string,
+      patch: { motion?: MotionType; durationSec?: number }
+    ) => updateMotionSegment(projectId, segmentId, patch)
+  )
+
+  ipcMain.handle('motion:remove', (_e, projectId: string, segmentId: string) =>
+    removeMotionSegment(projectId, segmentId)
+  )
+
+  /**
+   * MAY THIS MOTION CLIP BE GENERATED — and on which model?
+   *
+   * The button asks this before it enables itself, and the paid path
+   * asks the SAME function before it spends anything, so the two can
+   * never disagree. Reading it costs nothing.
+   */
+  ipcMain.handle('motion:confirmation', (_e, projectId: string, segmentId: string) => {
+    const project = listProjects().find((p) => p.id === projectId)
+    const segment = project ? motionSegments(project).find((s) => s.id === segmentId) : null
+    return motionGenerationReadiness(segment ?? null, FAL_MODEL_REGISTRY)
+  })
+
+  /**
+   * EVERYTHING THE PAID DIALOG SHOWS. Free to read.
+   *
+   * Re-asked whenever the model or the duration changes, so the cost on
+   * screen is always the cost of the run that would actually happen.
+   */
+  ipcMain.handle(
+    'motion:generateConfirmation',
+    (
+      _e,
+      projectId: string,
+      segmentId: string,
+      modelId?: string | null,
+      durationSec?: number | null,
+      motion?: MotionType | null
+    ) => motionConfirmation(projectId, segmentId, modelId, durationSec, motion)
+  )
+
+  /**
+   * THE PAID SUBMIT.
+   *
+   * Shaped exactly like `generation:generateLive`: the gate lives in the
+   * service, not here, so main re-checks eligibility and capability
+   * itself and never trusts the renderer for either.
+   *
+   * `modelId` is REQUIRED by `queueMotionGeneration` — there is no
+   * default and no fallback — so a single-image run cannot be submitted
+   * without a model having been chosen in the dialog above.
+   */
+  ipcMain.handle(
+    'motion:generate',
+    (
+      _e,
+      projectId: string,
+      segmentId: string,
+      modelId: string,
+      durationSec: number,
+      motion?: MotionType
+    ) => queueMotionGeneration({ projectId, segmentId, modelId, durationSec, motion })
+  )
+
+  /**
+   * RE-ANALYSE ONE TRANSITION.
+   *
+   * Same one-shot token gate as every other paid analyzer run — there is
+   * no second ad-hoc paid path. The first click only fetches a
+   * confirmation; this is what the second click reaches.
+   */
+  ipcMain.handle(
+    'pair:analyze',
+    async (_e, projectId: string, pairKey: string, token?: string) => {
+      const runtime = analyzerRuntimeFrom(storedSettings())
+      const analyzer = analyzerById('gemini', runtime)
+      if (!analyzer) return { ok: false as const, reason: 'Gemini analyzer not available' }
+      const paidLive = analyzer.metadata().capabilities.incursCost && runtime.mode === 'live'
+      if (paidLive) {
+        if (!token) {
+          return {
+            ok: false as const,
+            reason: 'This analysis requires a confirmation token. Open the confirmation dialog.'
+          }
+        }
+        if (!consumeAnalysisToken(token, projectId, 'gemini')) {
+          return {
+            ok: false as const,
+            reason: 'This confirmation token is invalid or expired. Get a new confirmation.'
+          }
+        }
+      }
+      return analysePair({
+        projectId,
+        pairKey,
+        apiKey: runtime.apiKey ?? '',
+        model: runtime.model ?? GEMINI_DEFAULT_MODEL
+      })
+    }
+  )
+
+  ipcMain.handle('pair:read', (_e, projectId: string, pairKey: string) =>
+    readPairAnalysis(projectId, pairKey)
+  )
+
+  /** Promote a reviewed pair analysis. Touches only this pair. */
+  /** Explicitly swap a held suggestion in for the operator's wording. */
+  ipcMain.handle('pair:replacePrompt', (_e, projectId: string, pairKey: string) =>
+    replaceManualPrompt(projectId, pairKey)
+  )
+
+  /**
+   * APPROVE ONE PAIR — context, decision and wording as one operation.
+   *
+   * Replaces three separate renderer writes whose last step decided
+   * whether to rebuild the prompt from a record written BEFORE the
+   * operator answered. That is how a pair could end up approved, with
+   * current context, and a prompt carrying no recorded basis at all —
+   * which generation then correctly refused.
+   */
+  ipcMain.handle(
+    'pair:approve',
+    (
+      _e,
+      projectId: string,
+      pairKey: string,
+      mode: 'ai' | 'cut',
+      contextText?: string
+    ) => approvePair({ projectId, pairKey, mode, contextText })
+  )
+
+  ipcMain.handle('pair:currentEvidence', (_e, projectId: string, pairKey: string) => {
+    const current = currentPairEvidence(projectId, pairKey)
+    if (!current) return null
+    return {
+      source: current.source,
+      fingerprint: current.fingerprint,
+      operatorContextFingerprint: current.operatorContextFingerprint
+    }
+  })
+
+  ipcMain.handle('pair:accept', (_e, projectId: string, pairKey: string) =>
+    acceptPairAnalysis(projectId, pairKey)
+  )
+
   ipcMain.handle('transitions:clearClip', (_e, projectId: string, pairKey: string) =>
     clearActiveClip(projectId, pairKey)
   )

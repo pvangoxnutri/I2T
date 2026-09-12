@@ -1,4 +1,14 @@
 import { useEffect, useState } from 'react'
+import type { GenerationRecord } from '../../types'
+import { qualityAllowsActive } from '../../../../shared/qualityValidation'
+import { resolvePairSpatialEvidence } from '../../../../shared/pairEvidence'
+import { EVIDENCE_SOURCE_LABEL } from '../../../../shared/pairAnalysis'
+import {
+  evidenceFingerprintOf,
+  isPromptBasisCurrent
+} from '../../../../shared/promptPlanner'
+import type { EvidenceSource, PairAnalysisRecord } from '../../../../shared/pairAnalysis'
+import { useLiveGeneration } from '../../hooks/useLiveGeneration'
 import { useAppState } from '../../state/AppState'
 import { defaultTransitionSettings, transitionKey, type Project } from '../../types'
 import { LiveGenerateDialog } from './LiveGenerateDialog'
@@ -47,8 +57,14 @@ export function TransitionInspector({
 }): React.JSX.Element {
   const { updateTransition, settings, queue, refreshProjects } = useAppState()
   const [tab, setTab] = useState<Tab>('motion')
-  const [liveConfirm, setLiveConfirm] = useState<LiveConfirmationPayload | null>(null)
-  const [submitting, setSubmitting] = useState(false)
+  /**
+   * The paid path, shared with Generation History.
+   *
+   * Both places that can spend money drive ONE hook — confirmation from
+   * main, dialog, submit with the one-shot token — so a guard cannot go
+   * missing from one of two copies.
+   */
+  const live = useLiveGeneration(project.id, refreshProjects)
   const [entries, setEntries] = useState<GenerationCostEntry[]>([])
   const [providerCatalog, setProviderCatalog] = useState<ProviderMetadataPayload[]>([])
   const [confirmClearClip, setConfirmClearClip] = useState(false)
@@ -56,6 +72,31 @@ export function TransitionInspector({
   const [confirmRegenerate, setConfirmRegenerate] = useState(false)
   const [clipInfo, setClipInfo] = useState<{ exists: boolean; bytes: number } | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  /**
+   * Every generation for this pair, newest first.
+   *
+   * ── WHY THE INSPECTOR NEEDS THE WHOLE HISTORY ──────────────────────
+   *
+   * Shown as Generation History: every attempt for this pair, so an
+   * older clip can be brought back without paying again.
+   */
+  const [history, setHistory] = useState<GenerationRecord[]>([])
+  /** This pair's own analysis, when one has ever been run. */
+  const [pairRecord, setPairRecord] = useState<PairAnalysisRecord | null>(null)
+  /** What main says governs this pair. Null until the first answer. */
+  const [currentEvidence, setCurrentEvidence] = useState<{
+    source: EvidenceSource
+    fingerprint: string
+    operatorContextFingerprint?: string
+  } | null>(null)
+  const [pairBusy, setPairBusy] = useState(false)
+  const [pairError, setPairError] = useState<string | null>(null)
+  /** Paid confirmation for a single-pair run. Null = nothing pending. */
+  const [pairConfirm, setPairConfirm] = useState<{ payload: any; token: string | null } | null>(null)
+  /** The result awaiting the operator's decision. Never auto-applied. */
+  const [pairReview, setPairReview] = useState<PairAnalysisRecord | null>(null)
+  const [pairContext, setPairContext] = useState('')
+  const [showSuggestion, setShowSuggestion] = useState(false)
 
   /**
    * THE PAIR, LOCATED IN THE FEED.
@@ -127,6 +168,49 @@ export function TransitionInspector({
     void window.f2f.clips.info(project.id, stored).then(setClipInfo)
   }, [project.id, transition?.clip?.storedName])
 
+  useEffect(() => {
+    let cancelled = false
+    void window.f2f.projects.catalogue.getAll(project.id).then((all) => {
+      if (!cancelled) setHistory(all)
+    })
+    return () => {
+      cancelled = true
+    }
+    // Re-read when the clip changes: a finished generation is exactly
+    // when the newest row and the active row may start disagreeing.
+  }, [project.id, transition?.clip?.storedName])
+
+  useEffect(() => {
+    if (!pairKey) return
+    let cancelled = false
+    void window.f2f.projects.pairAnalysis.read(project.id, pairKey).then((r) => {
+      if (!cancelled) setPairRecord(r)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [project.id, pairKey, project.updatedAt])
+
+  /**
+   * WHAT THE GATE SAYS THIS PAIR IS BASED ON — asked, not re-derived.
+   *
+   * This panel used to resolve precedence itself, passing "a plan exists
+   * for this pair" as `coveredByFeedAnalysis`. That is not the same claim
+   * as "the accepted feed analysis covers it", so the badge could read
+   * current while generation refused the pair, or the reverse. Main owns
+   * the answer; the label reports it.
+   */
+  useEffect(() => {
+    if (!pairKey) return
+    let cancelled = false
+    void window.f2f.projects.pairAnalysis.currentEvidence(project.id, pairKey).then((e) => {
+      if (!cancelled) setCurrentEvidence(e)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [project.id, pairKey, project.updatedAt])
+
   // Only a genuinely unresolvable pair falls back — an id that names no
   // adjacent pair in the current order, which a reorder can produce.
   if (!pairKey || !start || !end) {
@@ -166,6 +250,17 @@ export function TransitionInspector({
   const providerName = provider?.id === 'fal' ? 'fal.ai' : 'Kling'
   const pendingDownload = transition.clip === null && attempts.length > 0
 
+  // ── ACTIVE CLIP vs LATEST GENERATION ────────────────────────────────
+  //
+  // Normally the same row. They diverge exactly when the newest
+  // generation was inspected and refused, which is the case that must
+  // never read as "the regenerate did nothing".
+  const pairHistory = history.filter(
+    (g) => g.fromImageId === start.id && g.toImageId === end.id
+  )
+  const latestGeneration = pairHistory[0] ?? null
+  const activeGeneration = pairHistory.find((g) => g.active) ?? null
+
   // WHAT THIS MODEL CAN ACTUALLY BE ASKED FOR.
   //
   // Read from the provider's published capability rather than a literal.
@@ -188,11 +283,160 @@ export function TransitionInspector({
   const setDuration = (next: number): void =>
     updateTransition(project.id, start.id, end.id, { durationSec: next })
 
-  const openGenerate = (): void => {
-    void window.f2f.generation.liveConfirmation(project.id, pairKey).then((data) => {
-      if (data) setLiveConfirm(data)
-    })
+  const openGenerate = (): void => live.open(pairKey)
+
+  /**
+   * STEP ONE: confirm. Nothing is spent here.
+   *
+   * Reuses the same one-shot token the whole-property runs use, so there
+   * is exactly one paid analyzer path rather than an ad-hoc second one.
+   */
+  const openPairConfirmation = async (): Promise<void> => {
+    setPairError(null)
+    setPairBusy(true)
+    try {
+      const payload = await window.f2f.projects.analysis.confirmation(project.id, 'gemini')
+      if (!payload) {
+        setPairError('Could not prepare this analysis. Check the analyzer settings.')
+        return
+      }
+      setPairConfirm({ payload, token: payload.token ?? null })
+      console.log('[pair-analyse] confirmation open pair=' + pairKey)
+    } catch (err) {
+      setPairError(err instanceof Error ? err.message : 'Could not prepare this analysis.')
+    } finally {
+      setPairBusy(false)
+    }
   }
+
+  /** STEP TWO: the operator confirmed. This is what spends. */
+  const runPairAnalysis = async (): Promise<void> => {
+    if (!pairConfirm) return
+    setPairBusy(true)
+    setPairError(null)
+    try {
+      console.log('[pair-analyse] submit pair=' + pairKey)
+      const res = await window.f2f.projects.pairAnalysis.analyze(
+        project.id,
+        pairKey,
+        pairConfirm.payload.paidLive ? (pairConfirm.token ?? undefined) : undefined
+      )
+      setPairConfirm(null)
+      if (!res.ok || !res.record) {
+        setPairError(res.reason ?? 'The analysis failed.')
+        return
+      }
+      // Reviewed, never applied on arrival.
+      setPairReview(res.record)
+      setPairContext(transition.operatorContext?.text ?? '')
+    } catch (err) {
+      setPairError(err instanceof Error ? err.message : 'The analysis failed.')
+    } finally {
+      setPairBusy(false)
+    }
+  }
+
+  /** Accept the reviewed pair analysis. Touches only this pair. */
+  const acceptPair = async (mode: 'ai' | 'cut', context?: string): Promise<void> => {
+    setPairBusy(true)
+    setPairError(null)
+    try {
+      // ONE call. This used to be three — save context, accept, set mode —
+      // and the prompt rebuild hung off the last one, judged against a
+      // record written before the operator answered. An approved pair
+      // could come out the far end still marked as based on outdated
+      // evidence, and generation refused it.
+      const text = (context ?? '').trim()
+      const res = await window.f2f.projects.pairAnalysis.approve(
+        project.id,
+        pairKey,
+        mode,
+        text
+      )
+      if (!res.ok) {
+        setPairError(res.reason ?? 'The approval could not be saved.')
+        return
+      }
+      setPairReview(null)
+      setPairRecord({ ...(pairReview as PairAnalysisRecord), state: 'accepted' })
+      // Reload from disk rather than patching what is on screen — the
+      // prompt and its recorded basis were both just rewritten in main,
+      // and a locally-patched copy would show the old ones.
+      refreshProjects()
+      console.log(
+        `[pair-analyse] approved pair=${pairKey} mode=${mode} basis=${res.evidenceSource}` +
+          (res.manualPromptPreserved ? ' (manual prompt kept)' : '')
+      )
+    } catch (err) {
+      setPairError(err instanceof Error ? err.message : 'Could not accept the analysis.')
+    } finally {
+      setPairBusy(false)
+    }
+  }
+
+  /** Explicit swap. Never a side effect of anything else. */
+  const replaceManual = async (): Promise<void> => {
+    setPairBusy(true)
+    setPairError(null)
+    try {
+      const res = await window.f2f.projects.pairAnalysis.replacePrompt(project.id, pairKey)
+      if (!res.ok) {
+        setPairError(res.reason ?? 'The suggestion could not be applied.')
+        return
+      }
+      setShowSuggestion(false)
+      refreshProjects()
+      console.log('[pair-analyse] manual prompt replaced pair=' + pairKey)
+    } catch (err) {
+      setPairError(err instanceof Error ? err.message : 'The suggestion could not be applied.')
+    } finally {
+      setPairBusy(false)
+    }
+  }
+
+  /**
+   * WHAT THE PROMPT IS BASED ON, named.
+   *
+   * Resolved through the one canonical helper so the label cannot claim
+   * a source the generation path does not actually use.
+   */
+  const evidence = resolvePairSpatialEvidence({
+    pairKey,
+    analysis,
+    pairAnalysis: pairRecord,
+    operatorContext: transition.operatorContext,
+    // Main's answer when it has arrived. The local resolve stays only as
+    // the first-paint fallback, and only for the LABEL — the currency
+    // check below never uses it.
+    coveredByFeedAnalysis: currentEvidence
+      ? currentEvidence.source === 'feed-analysis'
+      : Boolean(plan),
+    fingerprints: {
+      feedFingerprint: feedImages.map((i) => i.id).join('|'),
+      libraryFingerprint: project.images.map((i) => i.id).join('|')
+    }
+  })
+  const evidenceLabel = evidence.individualOutdated ? 'Outdated' : evidence.label
+
+  /**
+   * IS THE STORED WORDING STILL BUILT ON WHAT WE NOW BELIEVE?
+   *
+   * "A prompt exists" was the old test, and it is how a prompt written
+   * against a five-week-old map kept guiding generation after a fresh
+   * analysis. This compares what the prompt RECORDS against what
+   * resolves for the pair today.
+   */
+  //
+  // ASKED, NOT RECOMPUTED. The panel derived this fingerprint itself and
+  // could therefore disagree with the gate — the badge saying the prompt
+  // was fine while generation refused it, which is the same "screen says
+  // one thing, paid path does another" failure this codebase keeps
+  // removing. Until main answers, nothing is claimed either way.
+  const basisCurrent = currentEvidence
+    ? isPromptBasisCurrent(transition.promptProvenance, currentEvidence)
+    : true
+  const manualPrompt = transition.promptProvenance?.manuallyEdited === true
+  const suggestion = transition.promptSuggestion ?? null
 
   return (
     <section className="inspector">
@@ -458,6 +702,74 @@ export function TransitionInspector({
         {/* ── PROMPT ─────────────────────────────────────────────────── */}
         {tab === 'prompt' && (
           <div className="inspector-prompt">
+            {/* ── WHAT THIS PROMPT IS ACTUALLY BASED ON ─────────────
+                Generation used to be guided by whichever spatial source
+                a component happened to hold, and the operator had no way
+                to see which. Named here, next to the wording it
+                produced. */}
+            <div className="inspector-evidence-row">
+              <span className="inspector-evidence-label">
+                Evidence: <strong>{evidenceLabel}</strong>
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-tiny"
+                disabled={pairBusy}
+                title="Analyse only this transition. Other imported images are used as spatial context."
+                onClick={() => {
+                  console.log('[pair-analyse] click pair=' + pairKey)
+                  void openPairConfirmation()
+                }}
+              >
+                {pairBusy ? 'Analysing…' : 'Re-analyse'}
+              </button>
+            </div>
+            {/* WHAT THE WORDING IS BUILT ON — named, and whether it
+                still matches the evidence in force. */}
+            <p className="inspector-basis">
+              {manualPrompt
+                ? 'Manual prompt'
+                : basisCurrent
+                  ? `Based on: ${EVIDENCE_SOURCE_LABEL[evidence.source]}`
+                  : 'Prompt basis outdated'}
+            </p>
+
+            {/* A suggestion a re-analysis produced for wording a human
+                wrote. Offered, never applied — replacing their sentence
+                is theirs to choose. */}
+            {suggestion && manualPrompt && (
+              <div className="inspector-suggestion">
+                <p className="inspector-suggestion-title">New AI suggestion available</p>
+                {showSuggestion && (
+                  <pre className="inspector-suggestion-text">{suggestion.text}</pre>
+                )}
+                <div className="inspector-suggestion-actions">
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-tiny"
+                    onClick={() => setShowSuggestion((v) => !v)}
+                  >
+                    {showSuggestion ? 'Hide suggestion' : 'Review suggestion'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-tiny"
+                    disabled={pairBusy}
+                    onClick={() => void replaceManual()}
+                  >
+                    Replace manual prompt
+                  </button>
+                </div>
+              </div>
+            )}
+            {pairError && <p className="inspector-pair-error">{pairError}</p>}
+
+            {/* THE EDITOR ROW. Separated from the notices above so the
+                layout does not depend on how many of them happen to be
+                showing: with everything in one grid, an extra notice
+                pushed the textarea into an auto-sized row and it
+                collapsed. This row is the one that grows. */}
+            <div className="inspector-prompt-editor">
             <textarea
               className="inspector-textarea"
               value={transition.prompt}
@@ -520,6 +832,7 @@ export function TransitionInspector({
                   </button>
                 </>
               )}
+            </div>
             </div>
           </div>
         )}
@@ -650,16 +963,31 @@ export function TransitionInspector({
                   Regenerate is a NEW paid submit. It never replaces or
                   deletes an earlier generation: those stay in History,
                   and the new one becomes active when it succeeds. */}
-              {recovery.secondary?.kind === 'regenerate' && (
-                <button
-                  type="button"
-                  className="btn btn-tiny btn-regenerate"
-                  onClick={() => setConfirmRegenerate(true)}
-                  title="Submits a NEW paid request. Existing generations stay in History."
-                >
-                  {transition.clip ? 'Regenerate clip — costs again' : 'Generate new clip'}
-                </button>
-              )}
+              {/* ── ONLY WHEN THE PRIMARY IS NOT ALREADY REGENERATE ────
+                  With a clip attached, `transitionRecovery` returns
+                  `preview` WITH a regenerate secondary — and the primary
+                  above renders `preview` as "Regenerate clip — costs
+                  again". Both conditions were true at once, so the same
+                  action appeared twice, with the same words, side by
+                  side.
+
+                  The secondary earns its place only where the primary is
+                  a FREE action: Resume and Retry download continue work
+                  already paid for and can never produce a different
+                  clip, so paying for a new one has to be offered
+                  separately. */}
+              {recovery.secondary?.kind === 'regenerate' &&
+                recovery.kind !== 'preview' &&
+                recovery.kind !== 'regenerate' && (
+                  <button
+                    type="button"
+                    className="btn btn-tiny btn-regenerate"
+                    onClick={() => setConfirmRegenerate(true)}
+                    title="Submits a NEW paid request. Existing generations stay in History."
+                  >
+                    {transition.clip ? 'Regenerate clip — costs again' : 'Generate new clip'}
+                  </button>
+                )}
               <button
                 type="button"
                 className="btn btn-ghost btn-tiny"
@@ -704,6 +1032,7 @@ export function TransitionInspector({
             <p className={`inspector-cost-note${recovery.costsMoney ? '' : ' is-free'}`}>
               {mode && mode.effectiveMode !== 'ai' ? '' : recovery.detail}
             </p>
+
             {transition.clip && (
               <p className="inspector-cost-note">
                 A clip already exists. Regenerating submits a new paid request and does not replace
@@ -822,20 +1151,152 @@ export function TransitionInspector({
 
       {note && <p className="inspector-note">{note}</p>}
 
-      {liveConfirm && (
-        <LiveGenerateDialog
-          data={liveConfirm}
-          busy={submitting}
-          onCancel={() => setLiveConfirm(null)}
-          onConfirm={() => {
-            setSubmitting(true)
-            void window.f2f.generation.generateLive(project.id, [pairKey]).then(() => {
-              setSubmitting(false)
-              setLiveConfirm(null)
-              refreshProjects()
-            })
-          }}
-        />
+      {live.dialog}
+
+      {/* ── RE-ANALYSE ONE TRANSITION: CONFIRM FIRST ────────────────
+          A paid run, so the first click only reaches here. The wording
+          states the two things that distinguish it from a feed run:
+          scope, and what the other photographs are for. */}
+      {pairConfirm && (
+        <div className="dialog-backdrop" onClick={() => setPairConfirm(null)}>
+          <div className="dialog-card" onClick={(e) => e.stopPropagation()}>
+            <h3 className="dialog-title">Re-analyse this transition?</h3>
+            <p className="dialog-body">
+              <strong>{start.fileName}</strong> → <strong>{end.fileName}</strong>
+            </p>
+            <p className="dialog-body">
+              Analyzer: {pairConfirm.payload.analyzer} · {pairConfirm.payload.model ?? 'default model'}
+            </p>
+            <p className="dialog-body dialog-emphasis">Only this transition will be analysed.</p>
+            <p className="dialog-body">
+              Other imported images may be used as spatial context —{' '}
+              {Math.max(0, project.images.length - 2)} supporting photograph
+              {project.images.length - 2 === 1 ? '' : 's'}. The feed order is not changed and no
+              other transition is touched.
+            </p>
+            <p className="dialog-body">
+              <strong>Cost:</strong> {pairConfirm.payload.estimatedCostLabel}
+            </p>
+            {pairConfirm.payload.warning && (
+              <p className="dialog-body dialog-warning">{pairConfirm.payload.warning}</p>
+            )}
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="btn btn-ghost btn-tiny"
+                onClick={() => setPairConfirm(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-tiny"
+                disabled={pairBusy}
+                onClick={() => void runPairAnalysis()}
+              >
+                {pairBusy ? 'Analysing…' : 'Re-analyse transition'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── THE RESULT, REVIEWED — never applied on arrival ────────── */}
+      {pairReview && (
+        <div className="dialog-backdrop" onClick={() => setPairReview(null)}>
+          <div className="dialog-card" onClick={(e) => e.stopPropagation()}>
+            <h3 className="dialog-title">
+              {pairReview.decision === 'ai'
+                ? 'Analysis: AI'
+                : pairReview.decision === 'cut'
+                  ? 'Analysis: CUT'
+                  : 'Analysis: Missing context'}
+            </h3>
+            <p className="dialog-body">{pairReview.reason}</p>
+            {pairReview.evidence.sharedLandmarks.length > 0 && (
+              <p className="dialog-body">
+                Shared in both frames: {pairReview.evidence.sharedLandmarks.join(', ')}
+              </p>
+            )}
+            {pairReview.motionInstruction && (
+              <p className="dialog-body dialog-emphasis">{pairReview.motionInstruction}</p>
+            )}
+            {pairReview.missingContext.map((m, i) => (
+              <p key={i} className="dialog-body dialog-warning">
+                Missing: {m.question}
+              </p>
+            ))}
+
+            {pairReview.decision === 'needs-context' && (
+              <textarea
+                className="transition-review-context-input"
+                rows={3}
+                placeholder="Example: The mirror reflects only the beige wall and the doorway opposite the sink."
+                value={pairContext}
+                onChange={(e) => setPairContext(e.target.value)}
+              />
+            )}
+            {pairError && <p className="inspector-pair-error">{pairError}</p>}
+
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="btn btn-ghost btn-tiny"
+                onClick={() => setPairReview(null)}
+              >
+                Cancel
+              </button>
+              {pairReview.decision === 'cut' ? (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-tiny"
+                    disabled={pairBusy}
+                    onClick={() => void acceptPair('cut')}
+                  >
+                    Accept CUT
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-tiny"
+                    disabled={pairBusy}
+                    onClick={() => void acceptPair('ai')}
+                  >
+                    Override to AI
+                  </button>
+                </>
+              ) : pairReview.decision === 'ai' ? (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-tiny"
+                  disabled={pairBusy}
+                  onClick={() => void acceptPair('ai')}
+                >
+                  Accept analysis
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-tiny"
+                    disabled={pairBusy}
+                    onClick={() => void acceptPair('ai', pairContext)}
+                  >
+                    {pairContext.trim().length > 0 ? 'Approve AI with context' : 'Approve AI'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-tiny"
+                    disabled={pairBusy}
+                    onClick={() => void acceptPair('cut')}
+                  >
+                    Keep as CUT
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── A NEW PAID GENERATION IS A DECISION ────────────────────────

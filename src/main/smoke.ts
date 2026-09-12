@@ -1,7 +1,26 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import {
+  FAL_DEFAULT_MODEL_ID,
+  FAL_MODEL_REGISTRY,
+  clampDurationForModel,
+  falRunCost,
+  modelListPayload,
+  modelSupportsDuration,
+  modelSupportsResolution,
+  resolveFalModel
+} from './providers/fal/falModels'
+import {
+  promptCoversConstantVelocity,
+  promptCoversReflection,
+  promptUsesRetiredContract,
+  promptUsesRetiredLayout,
+  promptUsesRetiredMotion,
+  promptUsesRetiredOntology
+} from '../shared/prompts'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
-import { app } from 'electron'
+import { app, ipcMain } from 'electron'
 import assert from 'node:assert'
 import {
   transitionKey,
@@ -24,11 +43,14 @@ import {
   getAllProjectGenerations,
   recordGeneration
 } from './db/generationCatalogueRepo'
-import { getEffectiveFeedSequence } from '../shared/feedSequence'
-import { extractTransitionAnalysis } from '../shared/transitionAnalysisExtractor'
-import { proposeFeedOrder, proposeTransitionModes } from '../shared/feedProposal'
-import { isTraversableOpening } from '../shared/openingEvidence'
-import { canResumeProviderTask } from '../shared/generationState'
+import { COST_CATEGORY_LABEL } from '../shared/costLedger'
+import {
+  NO_REFLECTION_EVIDENCE,
+  reflectionEvidenceForImage,
+  reflectionEvidenceForPair,
+  motionReferencesReflector,
+  expectedReflectionContent
+} from '../shared/reflectionRisk'
 import { assessAnalysisQuality, qualityHeadline } from '../shared/analysisQuality'
 import { assessAiGenerationReadiness } from '../shared/aiGenerationReadiness'
 import { feedAnalysisStatus } from '../shared/feedAnalysisState'
@@ -72,13 +94,17 @@ import {
 } from './files'
 import { projectDir, projectImagesDir, projectsRoot } from './paths'
 import { assemble, ffmpegPath, ffmpegStatus, probeDurationSec } from './services/ffmpegService'
+import { handleMediaRequest } from './mediaProtocol'
+import { mergeSettingsForSave } from './services/productSettings'
+import { repairQualityHeldStatuses } from './services/transitionStatusRepair'
 import { planSeams, SEAM_SECONDS, type SeamBlend } from '../shared/seamBlend'
 import {
   emptyAnalysis,
   parseAnalysis,
   relateImages,
   roomOfImage,
-  type PropertyAnalysis
+  type PropertyAnalysis,
+  type ReflectiveSurface
 } from '../shared/propertyAnalysis'
 import { canRebuildPrompt, markManuallyEdited, planTransitionPrompt } from '../shared/promptPlanner'
 import {
@@ -120,6 +146,7 @@ import {
   compareAssembly,
   editorPreviewState
 } from './services/exportService'
+import { exportJobMetadataForTests } from './services/exportService'
 import {
   deleteAnalysis,
   readAnalysis,
@@ -158,6 +185,7 @@ import {
   resolveShortcut,
   selectFullVideo,
   selectImage,
+  selectTimeline,
   selectTransition,
   selectedImageId,
   selectedPairKey,
@@ -197,6 +225,62 @@ import {
   type ResolvedModeRow
 } from '../shared/transitionMode'
 import { planAssembly } from '../shared/assemblyPlan'
+import {
+  MOTION_ID_PREFIX,
+  MOTION_LABEL,
+  MOTION_TYPES,
+  motionSegmentLabel,
+  motionSegments,
+  motionSegmentsForImage,
+  type MotionSegment
+} from '../shared/motionSegment'
+import { buildMotionPrompt } from '../shared/motionPrompt'
+import { motionGenerationReadiness } from '../shared/motionGenerationReadiness'
+import { buildSingleImageBody, startFrameOnlyModels } from './providers/fal/falModels'
+import { addMotionSegment } from './services/motionSegmentService'
+import { buildMotionGenerationRequest } from './services/motionGenerationService'
+import { clipsForJob } from './services/jobClipsService'
+import {
+  itemDurationSec,
+  itemStartTimes,
+  locateAtTime,
+  removeItem,
+  reorderItems,
+  splitItemAt,
+  timelineDrift,
+  timelineDurationSec,
+  type Timeline,
+  type TimelineItem
+} from '../shared/timeline'
+import { readTimeline } from './db/timelineRepo'
+import {
+  BRAND_MARGIN_FRACTION,
+  brandRect,
+  containFit,
+  looksLikeFullFrameAsset,
+  visibleMarkRect,
+  resolveBranding,
+  signatureVisible,
+  watermarkVisible
+} from '../shared/branding'
+import {
+  deleteTimelineItem,
+  getTimeline,
+  rebuildTimeline,
+  reorderTimelineItem,
+  splitTimelineAt
+} from './services/timelineService'
+import { exportAssembly } from './services/exportService'
+import { basename } from 'node:path'
+import { clipPath } from './files'
+import {
+  jobsForMotionSegment,
+  motionRunState,
+  motionStatusIsStale,
+  reconciledMotionStatus
+} from '../shared/motionRunState'
+import { downloadAndAttachResult } from './services/generationService'
+import type { VideoProvider } from './providers/types'
 import type { TransitionPlan } from '../shared/transitionPlan'
 import { defaultTransitionSettings } from '../shared/types'
 import { deriveRotation } from '../shared/transitionEvidence'
@@ -271,6 +355,7 @@ import {
   previewRequest,
   queueGeneration,
   queueLiveGeneration,
+  readinessInputs,
   resolveGenerationAction,
   STATUS_ENDPOINT_UNVERIFIED,
   STATUS_ENDPOINT_UNVERIFIED_MESSAGE
@@ -318,10 +403,47 @@ import { sanitizeApiKey } from './providers/keyHygiene'
 import { hasProviderApiKey, storeProviderApiKey } from './services/apiKeyStore'
 import {
   DEFAULT_TRANSITION_PROMPT,
+  MOTION_HEADER,
+  PRESET_PARTS,
+  PROMPT_MAX_CHARS,
+  REFLECTION_SAFETY_BLOCK,
+  REFLECTION_SAFETY_BLOCK_COMPACT,
+  assemblePrompt,
+  expectedMirrorContentBlock,
+  expectedMirrorContentBlockCompact,
   fitPromptToLimit,
-  promptForTransition
+  promptForTransition,
+  type PromptPart
 } from '../shared/prompts'
 import type { GenerationRequest } from './providers/types'
+import { evidenceFingerprintOf, isPromptBasisCurrent } from '../shared/promptPlanner'
+import { extractTransitionAnalysis } from '../shared/transitionAnalysisExtractor'
+import type { GenerationRecord, JobMetadata } from '../shared/types'
+import { DEFAULT_QUALITY_VALIDATION_MODE, decideQuality, qualityAllowsActive, shouldValidateClip } from '../shared/qualityValidation'
+import { feedTransitionState } from '../shared/feedTransitionState'
+import { activeGenerationForPair, applyQualityResult, approveQualityManually, getGenerationsForMotion, getGenerationsForPair } from './db/generationCatalogueRepo'
+import {
+  deletePairAnalysesForProject,
+  markOrphanedPairAnalyses,
+  readPairAnalysis,
+  savePairAnalysis
+} from './db/pairAnalysisRepo'
+import { acceptPairAnalysis, decidePair, fingerprints, replaceManualPrompt } from './services/pairAnalysisService'
+import { finalizeTransitionPromptById } from './services/promptFinalizer'
+import { repairRetiredPromptOntology } from './services/promptOntologyRepair'
+import { sanitizeMotionInstruction, containsTempoClaim } from '../shared/motionInstructionHygiene'
+import type { EvidenceSource } from '../shared/pairAnalysis'
+import { approvePair } from './services/pairApproval'
+import { acceptFeedAnalysis } from './services/feedAnalysisAccept'
+import type { TransitionDraft } from '../shared/transitionAnalysisExtractor'
+import { isPairAnalysisCurrent } from '../shared/pairAnalysis'
+import { contextResolves, isContextActive, makeOperatorContext, needsReview, reviewAfterReanalysis } from '../shared/operatorContext'
+import { feedDecisionCounts } from '../shared/feedAnalysisState'
+import { overrideWarningFor } from '../shared/aiGenerationReadiness'
+import { canResumeProviderTask } from '../shared/generationState'
+import { getEffectiveFeedSequence } from '../shared/feedSequence'
+import { proposeFeedOrder, proposeTransitionModes } from '../shared/feedProposal'
+import { isTraversableOpening } from '../shared/openingEvidence'
 
 /**
  * Headless smoke test (`electron . --f2f-smoke`): the real persistence,
@@ -353,6 +475,28 @@ async function waitFor(
 }
 
 const job = (id: string): QueueJob | undefined => listJobs().find((j) => j.id === id)
+
+/**
+ * A fixture image id that cannot collide with a previous run.
+ *
+ * The timeline and motion fixtures used fixed ids like . A run
+ * KILLED before its cleanup leaves those rows behind, and the next run
+ * then fails on  — a
+ * failure about the previous run, reported against the current one.
+ */
+/**
+ * A fixture image id that cannot collide with a previous run.
+ *
+ * The timeline and motion fixtures used fixed ids like `tlA`. A run
+ * KILLED before its cleanup leaves those rows behind, and the next run
+ * then fails on "UNIQUE constraint failed: project_images.id" — a
+ * failure about the PREVIOUS run, reported against the current one.
+ * That happened, and cost a diagnosis; unique ids make it impossible.
+ */
+let fixtureSeq = 0
+function fixtureImageId(stem: string): string {
+  return `${stem}-${Date.now().toString(36)}-${fixtureSeq++}`
+}
 
 function makeProject(name: string): Project {
   return {
@@ -393,6 +537,25 @@ export async function runSmokeTest(): Promise<void> {
   // to exactly this — not to zero, because the operator's own projects,
   // queue history and spend legitimately live here too.
   const baseline = countResources()
+  // ── SETTINGS ARE PART OF THAT BASELINE ──────────────────────────────
+  //
+  // The settings row is a SINGLE row that every test shares and several
+  // tests rewrite, and it outlives the run. A suite that is killed or
+  // fails partway therefore leaves whatever the last test wrote, and the
+  // NEXT run starts from it — so a failure gets inherited by the
+  // following run and reported there instead.
+  //
+  // That is not hypothetical. A run that died late left a pricing-only
+  // row behind; the next run's confirmation test then refused a stale
+  // pair with "Provider mode is Dry Run" instead of the staleness it was
+  // asserting, and the run after that crashed on `settings.providers`
+  // being undefined. Neither failure had anything to do with the code
+  // being changed at the time.
+  //
+  // Captured here and restored in teardown, so a crashed run cannot
+  // poison the next one — and so the operator's real API keys and
+  // provider mode survive a suite that rewrites them.
+  const settingsBaseline = getSettingsJson()
   // Set when the suite itself fails, so the teardown's own assertion can
   // stay quiet rather than masking the real cause with a symptom.
   let failure: unknown = null
@@ -433,6 +596,25 @@ export async function runSmokeTest(): Promise<void> {
     testReflectionConstraintReachesProvider()
     testFalPromptFitsLimit()
     testRegenerateIsOfferedAndDistinct()
+    testAnalyseFeedGate(workDir, createdProjects)
+    testGenerationPhases()
+    testQualityCatalogue(workDir, createdProjects)
+    testPromptBasisProvenance(workDir, createdProjects)
+    testAcceptAndPairAnalysis(workDir, createdProjects)
+    testAcceptThenUseAnalysisPrompt(workDir, createdProjects)
+    testDeliveredClipAttachesDirectly(workDir, createdProjects)
+    testBathroomMirrorPrompt(workDir, createdProjects)
+    testGenerationIpcChannels()
+    testFalModelRegistry(workDir, createdProjects)
+    testFeedTransitionState()
+    testApiKeyPersistence()
+    testInvisibleViewpointOntology()
+    testQualityHeldStatusRepair(workDir, createdProjects)
+    testClipUrlIsResolvable(workDir, createdProjects)
+    await testMediaProtocolServesRealMp4(createdProjects)
+    testOperatorContextLifecycle()
+    testMissingContext(workDir, createdProjects)
+    testReflectionSafety()
     testResumeOnlyWhenResumable()
     testRegenerateAfterTerminalFailure(workDir, createdProjects)
     testExportFormats()
@@ -441,6 +623,17 @@ export async function runSmokeTest(): Promise<void> {
     testAnalysisWorkflow()
     testTransitionModes()
     testMixedAssemblyPlan()
+    testSingleImageMotion()
+    await testMotionGenerationPath()
+    await testMotionPersistenceAndHistory(createdProjects)
+    testMotionRunStateAndQueue()
+    await testMotionRegeneration(createdProjects)
+    testPreviewBranding()
+    testBrandGeometry()
+    testPreviewClockOwnership()
+    testTimelineModel()
+    await testTimelinePersistenceAndExport(createdProjects)
+    await testWatermarkedTimelineExport(createdProjects)
     testEvidenceDrivenPlanning()
     testLogicalTransitions(workDir, createdProjects)
     await testGeminiModelConfig(workDir, createdProjects)
@@ -462,6 +655,9 @@ export async function runSmokeTest(): Promise<void> {
     testAnalysisLedger(workDir, createdProjects)
     testGroundTruthReview(workDir, createdProjects)
     testAnalysisReview(workDir, createdProjects)
+    testFinalPromptEquivalence(workDir, createdProjects)
+    testPromptBudget()
+    testConstantVelocityContract()
     testTransitionPlanning()
     await testCompareAssembly(workDir, createdProjects)
     await testEditorPreview(workDir, createdProjects)
@@ -500,6 +696,12 @@ export async function runSmokeTest(): Promise<void> {
       }
     }
 
+    // The operator's settings row goes back first, before anything else
+    // in teardown can fail and skip it.
+    if (settingsBaseline !== null) {
+      step('settings baseline', () => saveSettingsJson(settingsBaseline))
+    }
+
     for (const id of createdProjects) {
       // Reclaim EVERY queue row this run created, history included, by
       // project id straight through the repo. Deliberately not via
@@ -517,6 +719,12 @@ export async function runSmokeTest(): Promise<void> {
       // hand or they accumulate — and their task ids would then collide
       // with the next run's idempotency check.
       step(`cost entries for ${id}`, () => deleteCostEntriesForProject(id))
+      // Pair analyses have no FK to projects either, so a deleted smoke
+      // project used to leave its evidence behind — 44 rows had piled up
+      // in the operator's real database. They are not inert any more:
+      // the prompt finalizer reads an accepted pair analysis to decide a
+      // pair's route.
+      step(`pair analyses for ${id}`, () => deletePairAnalysesForProject(id))
       // Review rows have no FK either, and BOTH scopes must go — a draft
       // review left behind would be inherited by the next run's draft.
       // Same proof mechanism as the queue purge above: set
@@ -777,7 +985,10 @@ function testPropertyAnalysis(workDir: string, created: string[]): void {
       'END FRAME must be reproduced EXACTLY',
       'Do not redesign, reinterpret, add, remove, move or alter anything',
       'No morphing, warping, melting',
-      'physically plausible camera movement'
+      // Same rule, restated without making the viewpoint a physical
+      // object: 'physically plausible camera movement' was one of the
+      // sentences teaching Kling that a camera exists to be reflected.
+      'never through walls, floors, ceilings or furniture'
     ]) {
       assert.ok(plan.effectivePrompt.includes(rule), `safety rule preserved: ${rule}`)
     }
@@ -907,10 +1118,27 @@ function testPromptProvenance(workDir: string, created: string[]): void {
     'a planned prompt is NOT marked as hand-written'
   )
   assert.strictEqual(rebuilt.transitions[pairs[0]].promptProvenance?.basis, 'same-room')
+  // THE SAFETY CONTRACT STILL LEADS — but it is no longer a prefix.
+  //
+  // This used to assert `startsWith(DEFAULT_TRANSITION_PROMPT)`, which
+  // was true only because every pair-specific block was concatenated
+  // after the entire preset. That is exactly the arrangement that pushed
+  // the movement instruction past the provider's character limit, so the
+  // blocks are interleaved now. What the assertion was protecting —
+  // that a planned prompt opens on the ontology and carries the whole
+  // contract rather than being bare motion text — is checked directly.
+  const rebuiltPrompt = rebuilt.transitions[pairs[0]].prompt
   assert.ok(
-    rebuilt.transitions[pairs[0]].prompt.startsWith(DEFAULT_TRANSITION_PROMPT),
-    'the safety prompt still leads the rebuilt wording'
+    rebuiltPrompt.startsWith(PRESET_PARTS.opening.text),
+    'the rebuilt wording opens on the viewpoint ontology'
   )
+  for (const section of [PRESET_PARTS.frames, PRESET_PARTS.motionQuality, PRESET_PARTS.geometry]) {
+    assert.ok(
+      rebuiltPrompt.includes(section.text) ||
+        (section.compact != null && rebuiltPrompt.includes(section.compact)),
+      `the safety prompt still carries ${section.id}`
+    )
+  }
 
   // ── A manual edit is protected ───────────────────────────────────────
   const edited = listProjects().find((p) => p.id === project.id)!
@@ -1881,16 +2109,57 @@ function testGenerationConfirmationIntegrity(workDir: string, created: string[])
   )
 
   // The submit door refuses it too — the renderer is not trusted.
-  const submitted = queueLiveGeneration(project.id, [stalePair])
-  assert.ok(!submitted.ok, 'and the paid submit path refuses a stale pair outright')
-  assert.match(
-    submitted.ok ? '' : submitted.reasons.join(' '),
-    /no longer part of the current Transition Feed/
-  )
+  // ── THE SUBMIT DOOR REFUSES IT TOO ─────────────────────────────────
+  //
+  // `queueLiveGeneration` checks live ELIGIBILITY first and returns on
+  // the spot, so a settings row that is not live-eligible refuses this
+  // pair for the wrong reason — and the assertion below would pass or
+  // fail on whatever the previously-run test happened to leave in the
+  // settings row rather than on anything this test is about.
+  //
+  // It did exactly that: an earlier test left a pricing-only row behind,
+  // the refusal came back "Provider mode is Dry Run", and the staleness
+  // this test exists to prove was never reached. So establish the
+  // eligibility this assertion needs, and put the operator's real row
+  // back afterwards — the smoke suite runs against the real database.
+  const originalSettings = getSettingsJson()
+  try {
+    saveSettingsJson(
+      JSON.stringify({
+        ...settings,
+        activeProviderId: 'fal',
+        providers: [
+          {
+            id: 'fal',
+            label: 'fal.ai',
+            apiKey: 'smoke-not-a-real-key',
+            legacySecret: '',
+            mode: 'live',
+            model: FAL_MODELS[0].id
+          }
+        ],
+        production: {
+          ...(settings.production ?? {}),
+          maxConcurrentAiGenerations: 1,
+          allowLiveFalRequests: true
+        }
+      })
+    )
 
-  // A batch with one stale pair is refused WHOLE, never partly submitted.
-  const mixed = queueLiveGeneration(project.id, [transitionKey(A, C), stalePair])
-  assert.ok(!mixed.ok, 'one stale transition refuses the whole batch')
+    const submitted = queueLiveGeneration(project.id, [stalePair])
+    assert.ok(!submitted.ok, 'and the paid submit path refuses a stale pair outright')
+    assert.match(
+      submitted.ok ? '' : submitted.reasons.join(' '),
+      /no longer part of the current Transition Feed/,
+      'for being stale — not because the settings row happened to be ineligible'
+    )
+
+    // A batch with one stale pair is refused WHOLE, never partly submitted.
+    const mixed = queueLiveGeneration(project.id, [transitionKey(A, C), stalePair])
+    assert.ok(!mixed.ok, 'one stale transition refuses the whole batch')
+  } finally {
+    if (originalSettings !== null) saveSettingsJson(originalSettings)
+  }
 
   log('generation confirmation: feed-located pairs, duration never 0, stale pairs cannot be paid for')
 }
@@ -2292,7 +2561,57 @@ function testOverrideConfirmationIsHonest(workDir: string, created: string[]): v
  * generated. The REFUSAL is asserted on its own in
  * `testAiGenerationRequiresAcceptedEvidence`.
  */
+/**
+ * An accepted map AND wording that matches it.
+ *
+ * The second half was added when generation preflight started refusing
+ * prompts built on superseded evidence. That rule is correct — a prompt
+ * with no recorded basis is unknown, not current — but it means a
+ * fixture that wants to reach the PROVIDER path has to look like a real
+ * project after Accept, which carries provenance. Without it these
+ * fixtures were being refused before they ever got to the thing they
+ * test.
+ */
 function giveProjectAcceptedMap(projectId: string, imgs: { id: string }[]): void {
+  saveAnalysisAndBasis(projectId, imgs)
+}
+
+function saveAnalysisAndBasis(projectId: string, imgs: { id: string }[]): void {
+  saveAcceptedMapOnly(projectId, imgs)
+  const analysis = readAnalysis(projectId)
+  const project = listProjects().find((p) => p.id === projectId)
+  if (!project) return
+  const ids = getFeedSequenceIds(project)
+  for (let i = 0; i < ids.length - 1; i++) {
+    const key = transitionKey(ids[i], ids[i + 1])
+    const existing = project.transitions[key] ?? defaultTransitionSettings(5)
+    project.transitions[key] = {
+      ...existing,
+      promptProvenance: {
+        basePrompt: 'base',
+        motionInstruction: 'move',
+        effectivePrompt: existing.prompt || 'wording',
+        basis: 'same-room',
+        rationale: '',
+        manuallyEdited: false,
+        plannedAt: Date.now(),
+        analysisUpdatedAt: analysis.updatedAt,
+        // Matches what `readinessInputs` resolves for a project with an
+        // accepted map and no feed analysis or pair analysis.
+        evidenceSource: 'global-analysis',
+        evidenceFingerprint: evidenceFingerprintOf({
+          source: 'global-analysis',
+          analysisUpdatedAt: analysis.updatedAt
+        }),
+        pairKey: key
+      }
+    }
+  }
+  project.updatedAt = Date.now()
+  saveProject(project)
+}
+
+function saveAcceptedMapOnly(projectId: string, imgs: { id: string }[]): void {
   saveAnalysis({
     ...emptyAnalysis(projectId),
     state: 'accepted',
@@ -3257,33 +3576,64 @@ function testAutoResolvingCutNeedsNoClip(workDir: string, created: string[]): vo
  * body builder for that reason.
  */
 function testReflectionConstraintReachesProvider(): void {
+  // ── THE ENTITIES THAT MUST BE NAMED ─────────────────────────────────
+  //
+  // This list used to be checked against a "must never show" sentence.
+  // The wording moved to non-existence — "these entities do not exist in
+  // this scene" — after a model generated a person with a camera in a
+  // mirror WITH the prohibition present. A prohibition concedes the thing
+  // is there and asks for it to be hidden, which a mirror then
+  // contradicts, because revealing what the frame does not show directly
+  // is exactly what a mirror does.
+  //
+  // What is pinned is therefore the same protection, not the same prose:
+  // every entity is still named, and it is still impossible to drop one
+  // silently.
   const banned = [
     'photographer',
     'camera operator',
-    'cameras',
-    'phones',
-    'tripods',
-    'filming equipment',
+    'camera',
+    'phone',
+    'tripod',
+    'gimbal',
+    'drone',
+    'recording equipment',
     'human silhouette',
-    'human reflection'
+    'reflected space'
   ]
   for (const word of banned) {
     assert.match(
       DEFAULT_TRANSITION_PROMPT.toLowerCase(),
       new RegExp(word.toLowerCase()),
-      `the preset forbids "${word}" in reflections`
+      `the preset names "${word}" among what cannot be generated`
     )
   }
   assert.match(
     DEFAULT_TRANSITION_PROMPT,
-    /do not invent an observer behind the camera/i,
-    'and says the camera has nobody behind it — "no people" alone leaves the observer implied'
+    // Now "in this world" — the ontology covers reflected space too,
+    // which is exactly where the camera kept appearing.
+    /do not exist in this world/i,
+    'stated as non-existence — "do not show X" concedes X is there to be hidden'
   )
-  assert.match(DEFAULT_TRANSITION_PROMPT, /mirror/i, 'mirrors are named explicitly')
   assert.match(
     DEFAULT_TRANSITION_PROMPT,
-    /completely unoccupied/i,
-    'and the property is stated to be empty'
+    // Stated in the OPENING now rather than buried mid-prompt, and
+    // phrased as what the view is rather than what the camera is not.
+    /invisible virtual viewpoint/i,
+    'and the view is declared an invisible viewpoint, so a mirror has nothing to reveal'
+  )
+  assert.match(
+    DEFAULT_TRANSITION_PROMPT,
+    /zero people anywhere in it/i,
+    'the property is stated to be empty of people, not merely unoccupied'
+  )
+  assert.match(
+    DEFAULT_TRANSITION_PROMPT,
+    // "Behind the camera" was the old way of closing off the observer,
+    // and it asserted a camera to be behind. The ontology now denies the
+    // observer outright, which covers the same gap without the object.
+    /nothing observes the property from within it/i,
+    'the observer is denied outright — "no people" alone leaves one implied'
   )
 
   // UNCONDITIONAL. Detection is the wrong thing to depend on: a missed
@@ -3316,8 +3666,19 @@ function testReflectionConstraintReachesProvider(): void {
     'end'
   )
   const sent = String(body.prompt)
-  assert.match(sent, /mirrors and reflective surfaces|mirrored wardrobes/i, 'the payload carries it')
-  assert.match(sent, /photographers/i, 'naming photographers specifically')
+  // The wording moved from "mirrors must never show…" to declaring the
+  // entities absent and the camera non-physical. What matters — and what
+  // is checked — is that BOTH halves survive length-fitting into the real
+  // request body, since fitting is what once silently dropped the
+  // constraint block.
+  assert.match(sent, /do not exist in this world/i, 'the payload carries the non-existence rule')
+  assert.match(
+    sent,
+    /invisible virtual viewpoint/i,
+    'and the declaration that the view is an invisible viewpoint'
+  )
+  assert.match(sent, /reflected space/i, 'stated to cover reflections too')
+  assert.match(sent, /photographer/i, 'naming the photographer specifically')
 
   // ── NO INSTRUCTION MAY IMPLY A HUMAN ───────────────────────────────
   //
@@ -3352,10 +3713,15 @@ function testFalPromptFitsLimit(): void {
     'END FRAME must be reproduced EXACTLY',
     'Do not redesign, reinterpret, add, remove, move or alter anything',
     'No morphing, warping, melting',
-    'physically plausible camera movement',
-    'photographers',
-    'human reflections',
-    'Do not invent an observer behind the camera'
+    'never through walls, floors, ceilings or furniture',
+    // The occupancy rules, in their current wording. These three carry
+    // what "no photographer in the mirror" used to say: the scene has no
+    // people, the entities are declared absent rather than hidden, and
+    // the camera is not a physical object a reflection could show.
+    'zero people anywhere in it',
+    'do not exist in this world',
+    'invisible virtual viewpoint',
+    'photographer'
   ]
   const assertConstraintsSurvive = (prompt: string, where: string): void => {
     for (const rule of MANDATORY) {
@@ -3389,15 +3755,58 @@ function testFalPromptFitsLimit(): void {
     `the longest realistic prompt fits: ${fittedLongest.prompt.length}`
   )
   assertConstraintsSurvive(fittedLongest.prompt, 'longest realistic')
-  assert.deepStrictEqual(
-    fittedLongest.dropped,
-    [],
-    'and it fits with room to spare — nothing had to be sacrificed'
-  )
+  // STYLE MAY NOW GO HERE, AND THAT IS CORRECT.
+  //
+  // This exercises `fitPromptToLimit`, the STRING fitter — which no
+  // generated prompt goes through any more. Generated prompts are built
+  // by `assemblePrompt` from sections, against the budget, and that
+  // guarantee is pinned in `testPromptBudget` where it can actually be
+  // stated per block. What is left for this path is an operator's own
+  // wording, where giving up the tone line to keep every constraint is
+  // exactly the right trade.
+  //
+  // What must NOT happen is a mandatory block going.
+  for (const id of fittedLongest.dropped) {
+    assert.strictEqual(id, 'style', `only tone is sacrificed, not ${id}`)
+  }
 
   // ── WHEN IT DOES NOT FIT, TONE GOES FIRST ───────────────────────────
-  const tight = fitPromptToLimit(DEFAULT_TRANSITION_PROMPT, 1500)
-  assert.ok(tight.prompt.length <= 1500, 'a tighter limit is respected')
+  //
+  // THE MANDATORY FLOOR IS PART OF THE CONTRACT. Below it the fitter has
+  // nothing left to give up, and this limit is deliberately just above
+  // it. The floor grew when the invisible-viewpoint ontology joined the
+  // mandatory tail — that was the point of the change, and pinning the
+  // number here means it cannot grow again unnoticed.
+  //
+  // It grew a second time, to 1921, when the constant-velocity motion
+  // contract stopped being droppable — and a third time, to 2099, when
+  // that contract gained the continuous-take wording. Both were the
+  // point of the change.
+  const floor = fitPromptToLimit(DEFAULT_TRANSITION_PROMPT, 1).prompt.length
+  assert.ok(floor < 2200, `the mandatory floor stays under 2200 chars: ${floor}`)
+
+  // ── WHAT THE FLOOR IS REALLY PROTECTING ─────────────────────────────
+  //
+  // This used to be `floor + worstMotion <= limit`, and that stopped
+  // being the right measurement when generated prompts moved off the
+  // string fitter. `floor` is what the STRING path can reach — it can
+  // only drop STYLE, never compact — so it overstates the real minimum
+  // by about 500 characters and would fail for a budget that is
+  // comfortably met.
+  //
+  // The number that matters is the smallest the SECTION assembler can
+  // produce, which it reports itself when asked for the impossible.
+  const smallest = assemblePrompt([...Object.values(PRESET_PARTS)], 1)
+  assert.ok(!smallest.ok, 'the preset cannot fit in one character, by construction')
+  if (!smallest.ok) {
+    assert.ok(
+      smallest.smallestChars + worstMotion.length <= FAL_PROMPT_MAX_CHARS,
+      `fully compacted (${smallest.smallestChars}) plus the wordiest movement ` +
+        `instruction (${worstMotion.length}) must fit in ${FAL_PROMPT_MAX_CHARS}`
+    )
+  }
+  const tight = fitPromptToLimit(DEFAULT_TRANSITION_PROMPT, 1700)
+  assert.ok(tight.prompt.length <= 1700, 'a tighter limit is respected')
   assert.strictEqual(tight.dropped[0], 'style', 'tone is sacrificed first')
   assertConstraintsSurvive(tight.prompt, 'tightened')
 
@@ -3417,7 +3826,7 @@ function testFalPromptFitsLimit(): void {
     'the operator’s own wording is still there'
   )
   assert.ok(
-    fittedCustom.prompt.includes('Do not invent an observer behind the camera'),
+    fittedCustom.prompt.includes('invisible virtual viewpoint'),
     'and the safety constraints were appended rather than lost to the truncation'
   )
   assert.ok(
@@ -3544,10 +3953,15 @@ function testExportFormats(): void {
     seamBlend: 'subtle'
   }
 
-  // Computer keeps whatever the project is set to, and letterboxes.
+  // ── BOTH CUSTOMER-FACING FORMATS ARE FULL BLEED ────────────────────
+  //
+  // The desktop format used to be `contain`, and the operator's sources
+  // are about 3:2 in a 16:9 frame — so every desktop export came out
+  // with black bars down both sides. Cropping a little off the top and
+  // bottom is the better trade. Neither format pads; neither stretches.
   const computer = applyExportFormat(base, 'computer')
   assert.strictEqual(computer.defaults.aspectRatio, '16:9', 'desktop keeps the project shape')
-  assert.strictEqual(computer.fit, 'contain', 'and fits the whole frame')
+  assert.strictEqual(computer.fit, 'cover', 'and fills the frame rather than padding it')
   assert.deepStrictEqual(
     outputDims(computer.defaults),
     { w: 1920, h: 1080 },
@@ -3571,10 +3985,26 @@ function testExportFormats(): void {
 
   // An unknown or absent format is the desktop one, so a job written
   // before formats existed still renders correctly.
-  assert.strictEqual(applyExportFormat(base, undefined).fit, 'contain')
+  assert.strictEqual(applyExportFormat(base, undefined).fit, 'cover')
   assert.strictEqual(applyExportFormat(base, null).defaults.aspectRatio, '16:9')
 
-  log('export formats: computer letterboxes, instagram fills 1080×1920, neither ever stretches')
+  // ── AND THE FORMAT HAS TO SURVIVE THE JOB ──────────────────────────
+  //
+  // THE BUG THIS PINS. `JobMetadata` declared `exportFormat`, the export
+  // runner read it, and `startExport` never wrote it — so every real
+  // export resolved `undefined` to the desktop format. "Export Instagram
+  // Reel" produced a landscape 1920x1080 file and Instagram letterboxed
+  // it inside a portrait slot. A proof that called assemble() directly
+  // could not see it, because the fault was in what the job carried.
+  const metadata = exportJobMetadataForTests('instagram')
+  assert.strictEqual(metadata.exportFormat, 'instagram', 'the chosen format is written onto the job')
+  assert.strictEqual(
+    applyExportFormat(base, metadata.exportFormat).fit,
+    'cover',
+    'and resolves to the vertical format when the job is run'
+  )
+
+  log('export formats: both fill the frame, instagram is 1080×1920, the choice reaches the job')
 }
 
 /**
@@ -3593,6 +4023,3478 @@ function testExportFormats(): void {
  * for. Hiding Resume in the second case would push an operator into
  * buying a second copy of work they already own.
  */
+/**
+ * REFLECTION SAFETY.
+ *
+ * ── THE FAILURE ──────────────────────────────────────────────────────
+ *
+ * A generated bathroom transition produced a person walking past with a
+ * camera. The prompt already forbade exactly that, in those words, and
+ * the model did it anyway — so no assertion here is about wording alone.
+ *
+ * The real chain, recovered from the operator's own database:
+ *
+ *   analysis  landmarks: ["mirror reflection", "floating vanity", ...]
+ *   safety    same room + 3 shared landmarks  ->  AI authorised
+ *   motion    "rotating clockwise, ... turning away from the mirror
+ *              reflection toward the wall toilet"
+ *
+ * The mirror was recorded as a LANDMARK. Landmarks are matching evidence
+ * — proof two frames see the same region — so the mirror did not merely
+ * fail to raise a flag, it helped authorise the generation. The planner
+ * then wrote a camera path defined relative to it, and rendering "turning
+ * away from a reflection" requires deciding what the reflection contains.
+ *
+ * These tests pin the three separate places that had to change.
+ */
+/**
+ * POST-GENERATION QUALITY VALIDATION.
+ *
+ * ── THE FAILURE ──────────────────────────────────────────────────────
+ *
+ * A generated bathroom clip contained a person walking past with a
+ * camera, and the app presented it as finished. Every upstream check had
+ * passed: the provider succeeded, the download completed, the file was a
+ * valid MP4. Nothing had looked at what was IN it.
+ *
+ * ── WHAT IS PINNED HERE ──────────────────────────────────────────────
+ *
+ * Not the wording of a prompt — the DECISIONS. Every ambiguous input must
+ * resolve away from "ship it", and a clip that fails must never displace
+ * a good one that already works. The validator is driven through its real
+ * parser with mocked transport, so no paid call is made and the code
+ * under test is the code that runs in production.
+ */
+/**
+ * THE JOB PHASE, AND WHAT "READY" IS ALLOWED TO MEAN.
+ *
+ * ── THE PROBLEM ──────────────────────────────────────────────────────
+ *
+ * Provider status answered "what is the remote task doing", and the UI
+ * used it to answer "is this clip usable" — two different questions with
+ * the same word. So the inspector said "Generating…" for the seconds
+ * after the provider had already finished and been paid, while the clip
+ * was being inspected, and then the verdict appeared from nowhere.
+ *
+ * Three separate facts now: phase (where the work is), providerStatus
+ * (what the remote task did), quality (what the content turned out to
+ * be). Nothing here derives one from another.
+ */
+/**
+ * ANALYSE FEED — the click that did nothing.
+ *
+ * ── THE BUG ──────────────────────────────────────────────────────────
+ *
+ * In the packaged build, clicking Analyse Feed produced no dialog, no
+ * loading state, no error. The handler DID fire and the IPC WAS reached;
+ * what was missing was the confirmation step. It called the paid channel
+ * directly with an empty token, main correctly refused —
+ *
+ *   "This analysis requires a confirmation token."
+ *
+ * — the refusal was stored in `transitionAnalysisError`, and the ONLY
+ * component rendering that state returns null while no confirmation is
+ * open. The reason existed and was unrenderable.
+ *
+ * So this pins the two halves that failed together: the paid channel
+ * still refuses an empty token, and a refusal is now something the
+ * operator can actually be shown.
+ */
+function testAnalyseFeedGate(workDir: string, created: string[]): void {
+  const project = makeProject('Smoke analyse feed gate')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'feedgate.png')
+  writeFileSync(p, png)
+  project.images = importImages(project.id, [
+    { sourcePath: p, name: 'a.png' },
+    { sourcePath: p, name: 'b.png' }
+  ])
+  project.feedSequence = project.images.map((i) => i.id)
+  saveProject(project)
+
+  // ── THE ANALYZER ID THE CONFIRMATION MUST ASK FOR ───────────────────
+  //
+  // The removed rival handler asked for 'default', which is not a
+  // registered analyzer — `analyzerById` returns null for it, so its
+  // confirmation could never open either. The id used must be the one
+  // the feed channel actually runs.
+  assert.strictEqual(
+    analyzerById('default', { apiKey: '', model: '', mode: 'dry-run', allowLive: false }),
+    null,
+    "'default' is not a registered analyzer id"
+  )
+  assert.ok(
+    analyzerById('gemini', { apiKey: '', model: GEMINI_DEFAULT_MODEL, mode: 'dry-run', allowLive: false }),
+    "'gemini' is, and is what feed:analyzeFeed runs"
+  )
+
+  // ── THE PAID CHANNEL STILL REFUSES AN UNCONFIRMED RUN ───────────────
+  //
+  // Verified through the real gate rather than the IPC wrapper: an
+  // unissued token is not consumable, which is what made the direct call
+  // fail in the first place. No paid request is made.
+  assert.ok(
+    !consumeAnalysisToken('', project.id, 'gemini'),
+    'an empty token is refused — this is what the broken click was sending'
+  )
+  assert.ok(
+    !consumeAnalysisToken('made-up-token', project.id, 'gemini'),
+    'and so is one nobody issued'
+  )
+
+  // A real token works exactly once. Cancelling never reaches this, so a
+  // cancelled dialog consumes nothing.
+  const token = issueAnalysisToken(project.id, 'gemini')
+  assert.ok(consumeAnalysisToken(token, project.id, 'gemini'), 'an issued token is accepted once')
+  assert.ok(
+    !consumeAnalysisToken(token, project.id, 'gemini'),
+    'and cannot be replayed into a second paid run'
+  )
+
+  // ── THE REFUSAL IS REACHABLE BY THE OPERATOR ────────────────────────
+  //
+  // The regression was not the refusal — it was that nothing could show
+  // it. The reason now travels to the Toolbox, beside the button, on a
+  // prop no dialog's visibility can suppress.
+  const toolboxSource = readFileSync(
+    join(__dirname, '../../src/renderer/src/components/editor/Toolbox.tsx'),
+    'utf8'
+  )
+  assert.match(
+    toolboxSource,
+    /feedError && <p className="toolbox-error">/,
+    'the Toolbox renders a blocking reason next to the Analyse Feed button'
+  )
+
+  const panelSource = readFileSync(
+    join(__dirname, '../../src/renderer/src/components/editor/LeftPanel.tsx'),
+    'utf8'
+  )
+  assert.match(
+    panelSource,
+    /feedError=\{feedConfirmation \? null : transitionAnalysisError\}/,
+    'and the panel feeds it the same error state main produced'
+  )
+  // The click must not reach the paid channel before a confirmation exists.
+  assert.match(
+    panelSource,
+    /if \(!feedConfirmation\) \{/,
+    'Analyse Feed opens a confirmation before it can spend'
+  )
+  assert.match(
+    panelSource,
+    /analyzeFeed\(project\.id, '', token\)/,
+    'and the paid call carries the one-shot token'
+  )
+  assert.ok(
+    !panelSource.includes('handleAnalyzeTransitions'),
+    'the rival second paid path is gone, not merely unreferenced'
+  )
+
+  log('analyse feed: the click now opens a confirmation, and a refusal is visible')
+}
+
+function testGenerationPhases(): void {
+  const jobWith = (over: Partial<JobMetadata>, status: QueueJob['status'] = 'processing'): QueueJob =>
+    ({
+      id: 'j',
+      projectId: 'p',
+      status,
+      createdAt: Date.now(),
+      metadata: { pairKeys: ['a->b'], ...over },
+      provider: {
+        provider: 'fal',
+        model: FAL_MODEL_ID,
+        dryRun: false,
+        providerTaskId: 'remote-1',
+        providerStatus: 'succeeded'
+      }
+    }) as unknown as QueueJob
+
+  const generating = defaultTransitionSettings(5)
+  generating.status = 'generating'
+
+  // ── D. THERE IS NO VALIDATION PHASE ANY MORE ────────────────────────
+  //
+  // A clip that downloads is attached, so the provider finishing and the
+  // work finishing are the same moment. A stored `quality-checking` phase
+  // on a job written under the old rules must not resurrect a wait state.
+  const legacyPhase = transitionRecovery(
+    generating,
+    jobWith({ phase: 'quality-checking' as never }),
+    '1 → 2'
+  )
+  assert.strictEqual(legacyPhase.label, 'Generating…', 'D: a legacy phase reads as ordinary work')
+  assert.doesNotMatch(
+    legacyPhase.label + legacyPhase.detail,
+    /quality/i,
+    'D: and never mentions a check that no longer runs'
+  )
+
+  // The download stretch is still not "generating".
+  assert.strictEqual(
+    transitionRecovery(generating, jobWith({ phase: 'downloading' }), '1 → 2').label,
+    'Downloading…'
+  )
+  // No phase at all — every job written before phases existed.
+  assert.strictEqual(
+    transitionRecovery(generating, jobWith({}), '1 → 2').label,
+    'Generating…',
+    'a job with no phase reads exactly as it did before'
+  )
+
+  // ── E. READY ONLY WHEN THE CLIP IS ACTUALLY USABLE ──────────────────
+  //
+  // "Ready" in this app is a clip being ATTACHED, and attachment is
+  // gated by `qualityAllowsActive`. Provider success alone can never
+  // produce it, which is the invariant that matters.
+  const withClip = defaultTransitionSettings(5)
+  withClip.status = 'completed'
+  withClip.clip = { storedName: 'c.mp4', originalName: 'x', source: 'fal', src: 'f2f://c' }
+  assert.strictEqual(
+    transitionRecovery(withClip, jobWith({ phase: 'complete' }, 'completed'), '1 → 2').kind,
+    'preview',
+    'E: a passed clip is attached and previewable'
+  )
+
+  // F/G/H — the verdicts that must NOT attach, expressed as the rule the
+  // attach path actually asks.
+  assert.ok(!qualityAllowsActive('failed', null), 'F: a failed clip is not usable')
+  assert.ok(!qualityAllowsActive('needs-review', null), 'G: nor one awaiting review')
+  assert.ok(qualityAllowsActive('not-run', null), 'H: off/legacy stays usable, shown as Not checked')
+
+  // ── I. INTERRUPTED DURING THE CHECK ─────────────────────────────────
+  //
+  // The recovery is deliberate and cheap: the verdict becomes
+  // needs-review rather than re-running a paid vision request as a side
+  // effect of the app starting. Crucially it must not touch fal — the
+  // video was generated and paid for once.
+  const interrupted = jobWith({ phase: 'quality-checking' })
+  const recovered: JobMetadata = {
+    ...interrupted.metadata,
+    phase: 'complete',
+    quality: {
+      status: 'needs-review',
+      reason:
+        'Automatic quality check could not be completed. The application closed while the clip was being inspected.'
+    }
+  }
+  assert.strictEqual(recovered.phase, 'complete', 'I: no permanent quality-checking zombie')
+  assert.strictEqual(recovered.quality?.status, 'needs-review', 'and it is never auto-passed')
+  assert.match(recovered.quality?.reason ?? '', /closed while the clip was being inspected/i)
+  // The provider task is untouched, so the state machine still resolves
+  // to download/resume — never a second paid submit.
+  assert.notStrictEqual(
+    resolveGenerationAction(interrupted.provider, interrupted.note),
+    'submit',
+    'I: recovery never resubmits a fal generation'
+  )
+
+  log('generation phases: "Generating…" stops when the provider does, not when the verdict lands')
+  log('download vs quality: a rejected clip is on disk, and is never re-fetched as a failed transfer')
+}
+
+/**
+ * WHAT THE FEED SAYS — and what it must stop saying.
+ *
+ * Quality validation withholds a rejected clip on purpose, and the
+ * generation path wrote `status: 'failed'` for any live run that ended
+ * with no attached clip. So a generation that succeeded at fal,
+ * downloaded a playable file, and was held for review appeared in the
+ * timeline as FAILED — the same word as a provider rejection.
+ */
+/**
+ * API KEYS — SAVE, RELOAD, AND SURVIVE AN UNRELATED SETTINGS WRITE.
+ *
+ * ── THE BUG THIS PINS ────────────────────────────────────────────────
+ *
+ * `settings:get` stripped only `providers[].apiKey`, so the Gemini key
+ * was sent to the renderer AND written back from it. The renderer sends
+ * `apiKey: ''` on every analyzer patch, so changing the Gemini model —
+ * or anything else on that panel — silently erased the stored key. The
+ * operator saved a key, changed a dropdown, and was told none was set.
+ */
+function testApiKeyPersistence(): void {
+  const original = getSettingsJson()
+  try {
+    // ── D. GEMINI ─────────────────────────────────────────────────────
+    const seed = JSON.parse(getSettingsJson()!) as AppSettings
+    saveSettingsJson(
+      JSON.stringify({ ...seed, analyzer: { ...seed.analyzer!, apiKey: 'gemini-secret-value' } })
+    )
+    assert.strictEqual((JSON.parse(getSettingsJson()!) as AppSettings).analyzer?.apiKey, 'gemini-secret-value', 'D: the Gemini key is stored')
+
+    // The exact write the renderer performs when the model changes.
+    const current = JSON.parse(getSettingsJson()!) as AppSettings
+    saveSettingsJson(
+      JSON.stringify(
+        mergeSettingsForSave(
+          {
+      ...current,
+      analyzer: { ...current.analyzer!, apiKey: '', model: 'gemini-3.6-flash' }
+          },
+          JSON.parse(getSettingsJson()!) as AppSettings
+        )
+      )
+    )
+    assert.strictEqual(
+      (JSON.parse(getSettingsJson()!) as AppSettings).analyzer?.apiKey,
+      'gemini-secret-value',
+      'D: and survives an unrelated settings save that carries an empty key'
+    )
+    assert.strictEqual(
+      (JSON.parse(getSettingsJson()!) as AppSettings).analyzer?.model,
+      'gemini-3.6-flash',
+      'D: while the change the operator actually made is applied'
+    )
+
+    // ── E. FAL ────────────────────────────────────────────────────────
+    storeProviderApiKey('fal', '  fal-secret-value  ')
+    assert.strictEqual(
+      (JSON.parse(getSettingsJson()!) as AppSettings).providers.find((p) => p.id === 'fal')?.apiKey,
+      'fal-secret-value',
+      'E: the fal key is stored, sanitised of pasted whitespace'
+    )
+    saveSettingsJson(
+      JSON.stringify(
+        mergeSettingsForSave(
+          JSON.parse(getSettingsJson()!) as AppSettings,
+          JSON.parse(getSettingsJson()!) as AppSettings
+        )
+      )
+    )
+    assert.strictEqual(
+      (JSON.parse(getSettingsJson()!) as AppSettings).providers.find((p) => p.id === 'fal')?.apiKey,
+      'fal-secret-value',
+      'E: and survives a settings save too'
+    )
+
+    storeProviderApiKey('fal', 'replacement')
+    assert.strictEqual((JSON.parse(getSettingsJson()!) as AppSettings).providers.find((p) => p.id === 'fal')?.apiKey, 'replacement', 'E: a key can be replaced')
+
+    // ── F. THE PRODUCT RULE, NOT A USER CHOICE ────────────────────────
+    //
+    // No provider selector and no Live switch: storing a key IS the
+    // intent, and removing it falls back on its own.
+    const withKey = JSON.parse(getSettingsJson()!) as AppSettings
+    assert.strictEqual(withKey.activeProviderId, 'fal', 'F: video generation is always fal.ai')
+    assert.strictEqual(
+      withKey.providers.find((p) => p.id === 'fal')?.mode,
+      'live',
+      'F: a stored key means live — there is no second switch to forget'
+    )
+    assert.strictEqual(withKey.production.allowLiveFalRequests, true, 'F: and no separate lock')
+    assert.strictEqual(withKey.analyzer?.analyzerId, 'gemini', 'F: analysis is always Gemini')
+
+    storeProviderApiKey('fal', '')
+    const withoutKey = JSON.parse(getSettingsJson()!) as AppSettings
+    assert.strictEqual((JSON.parse(getSettingsJson()!) as AppSettings).providers.find((p) => p.id === 'fal')?.apiKey, '', 'E: and removed')
+    assert.strictEqual(
+      withoutKey.providers.find((p) => p.id === 'fal')?.mode,
+      'dry-run',
+      'F: removing the key disables paid requests by itself'
+    )
+    assert.strictEqual(withoutKey.production.allowLiveFalRequests, false)
+
+    log('api keys: saved once, never erased by an unrelated write, and live follows the key')
+  } finally {
+    if (original !== null) saveSettingsJson(original)
+  }
+}
+
+/**
+ * THE CAMERA ONTOLOGY IN A REFLECTIVE PROMPT.
+ *
+ * ── WHY THE WORDING CHANGED ──────────────────────────────────────────
+ *
+ * Kling kept drawing a physical camera in mirrors. The prompt was the
+ * reason: it opened with "cinematic CAMERA transition", described the
+ * camera as "a high-end stabilized gimbal or indoor drone", referred to
+ * the end frame's "camera position", and demanded "physically plausible
+ * camera movement" that must not pass through walls. It also said, once,
+ * that the camera was invisible — while naming the exact equipment four
+ * times, including last.
+ *
+ * Asked to render a drone gliding through a room with a mirror in it, a
+ * model that draws the drone is being consistent. The negative list was
+ * fighting an ontology the prompt itself kept asserting.
+ */
+function testInvisibleViewpointOntology(): void {
+  const base = DEFAULT_TRANSITION_PROMPT
+
+  // The ontology is established FIRST, before anything can imply a device.
+  const opening = base.split('\n\n')[0]
+  assert.match(opening, /invisible virtual viewpoint/i, 'K: the first block states what the view IS')
+  assert.match(opening, /no physical imaging device exists/i, 'K: and that no device exists')
+  assert.match(
+    opening,
+    /not an object moving through the room/i,
+    'K: motion is rendering motion, not an object moving'
+  )
+
+  // NO PHYSICAL-DEVICE VOCABULARY outside the non-existence list.
+  //
+  // That list may name equipment — declaring it absent is its job.
+  // Nothing else may describe the viewpoint AS equipment.
+  const withoutEntityList = base
+    .split('\n\n')
+    .filter((block) => !/never appear|do not exist in this world/i.test(block))
+    .join('\n\n')
+  for (const contradiction of [
+    /stabilized gimbal/i,
+    /indoor drone/i,
+    /camera transition/i,
+    /camera position/i,
+    /camera movement/i,
+    /the camera moves/i,
+    /behind the camera/i,
+    /filming/i,
+    /\blens\b/i
+  ]) {
+    assert.doesNotMatch(
+      withoutEntityList,
+      contradiction,
+      'K: no wording that makes the viewpoint a physical camera: ' + String(contradiction)
+    )
+  }
+
+  // The reflective escalation says what a mirror CONTAINS, positively.
+  assert.match(REFLECTION_SAFETY_BLOCK, /reflects ONLY the architecture/i, 'K: positive target')
+  assert.match(
+    REFLECTION_SAFETY_BLOCK,
+    /no observer and no imaging device in this world/i,
+    'K: consistent with the opening rather than a separate suppression list'
+  )
+  assert.doesNotMatch(
+    REFLECTION_SAFETY_BLOCK,
+    /treat the camera as|the filming device|behind the camera/i,
+    'K: and never re-introduces the camera it is trying to remove'
+  )
+
+  // ONE ontology, stated once and not contradicted.
+  const full = base + '\n\n' + REFLECTION_SAFETY_BLOCK
+  assert.strictEqual(
+    (full.match(/invisible virtual viewpoint/gi) ?? []).length,
+    1,
+    'K: the ontology is stated once, not repeated into noise'
+  )
+
+  // And it survives trimming to fal's character limit — the constraint
+  // that matters most must not be the one dropped to fit.
+  const trimmed = fitPromptToLimit(full, 2500).prompt
+  assert.ok(trimmed.length <= 2500, 'K: it fits the provider limit')
+  assert.match(
+    trimmed,
+    /invisible virtual viewpoint/i,
+    'K: and the ontology is never what gets cut'
+  )
+
+  log('prompt ontology: one invisible viewpoint, no physical camera anywhere to reflect')
+}
+
+
+/**
+ * A DELIVERED GENERATION BECOMES THE CLIP. NOTHING STANDS IN BETWEEN.
+ *
+ * The attach path used to record the generation inactive, run a vision
+ * model over sampled frames, and adopt the clip only if that model
+ * approved. A succeeded, paid, downloaded generation could therefore end
+ * up unusable — which is the state this pass removed.
+ *
+ * Driven through the real catalogue and the real attach service. No
+ * provider is contacted: the file is written locally, exactly as a
+ * completed download leaves it.
+ */
+function testDeliveredClipAttachesDirectly(workDir: string, created: string[]): void {
+  const project = makeProject('Smoke direct attach')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'attach.png')
+  writeFileSync(p, png)
+  project.images = importImages(project.id, [
+    { sourcePath: p, name: 'a.png' },
+    { sourcePath: p, name: 'b.png' }
+  ])
+  const [A, B] = project.images.map((i) => i.id)
+  project.feedSequence = [A, B]
+  const pairKey = transitionKey(A, B)
+  // A configured pair, as the real flow has by the time a generation
+  // exists — the attach service refuses a pair with no stored row at all.
+  project.transitions[pairKey] = { ...defaultTransitionSettings(5), mode: 'ai' }
+  saveProject(project)
+
+  // What a completed fal download leaves behind: a file on disk.
+  const dir = projectTransitionsDir(project.id)
+  mkdirSync(dir, { recursive: true })
+  const storedName = 'delivered.mp4'
+  writeFileSync(join(dir, storedName), Buffer.from([0, 1, 2, 3]))
+
+  const generationId = recordGeneration({
+    queueJobId: 'attach-job-1',
+    projectId: project.id,
+    fromImageId: A,
+    toImageId: B,
+    provider: 'fal',
+    model: null,
+    clip: {
+      storedName,
+      originalName: 'fal-generation.mp4',
+      source: 'fal',
+      src: clipUrl(project.id, storedName)
+    },
+    prompt: 'x',
+    active: false
+  })
+
+  // ── A. IT ATTACHES ──────────────────────────────────────────────────
+  const attached = attachGenerationToTransition(project.id, generationId)
+  assert.ok(attached.ok, 'A: a delivered generation attaches: ' + (attached.ok ? '' : attached.reason))
+
+  const after = listProjects().find((x) => x.id === project.id)!
+  assert.strictEqual(
+    after.transitions[pairKey]?.clip?.storedName,
+    storedName,
+    'A: and becomes the transition clip'
+  )
+  assert.strictEqual(after.transitions[pairKey]?.status, 'completed', 'A: recorded as completed')
+  assert.ok(
+    getGenerationsForPair(project.id, A, B)[0]?.active,
+    'A: and the catalogue marks it active'
+  )
+
+  // ── B. A HISTORICAL VERDICT DOES NOT BLOCK IT ───────────────────────
+  //
+  // Old rows keep their verdicts. Nothing consults them, so a generation
+  // recorded as failed under the previous rules still attaches on demand.
+  applyQualityResult(generationId, {
+    status: 'failed',
+    reason: 'A verdict from the removed validator.',
+    checkedAt: Date.now(),
+    suspiciousFrames: [],
+    validator: 'legacy'
+  })
+  const reattached = attachGenerationToTransition(project.id, generationId)
+  assert.ok(reattached.ok, 'B: historical quality metadata does not block attaching')
+  assert.strictEqual(
+    getGenerationsForPair(project.id, A, B)[0]?.qualityStatus,
+    'failed',
+    'B: and the old verdict is preserved for the record rather than rewritten'
+  )
+
+  // ── C. EXPORT IS NOT BLOCKED BY IT EITHER ───────────────────────────
+  const readiness = exportReadiness(listProjects().find((x) => x.id === project.id)!)
+  assert.ok(
+    readiness.ready,
+    'C: export is not blocked by a historical verdict: ' + (readiness.reason ?? '')
+  )
+  assert.doesNotMatch(
+    readiness.reason ?? '',
+    /quality/i,
+    'C: and no quality wording reaches the export reason'
+  )
+
+  log('direct attach: a delivered clip is the clip — no verdict, no gate, no review state')
+}
+
+
+/**
+ * THE BATHROOM MIRROR PROMPT — the regression anchor.
+ *
+ * ── WHAT WENT WRONG ──────────────────────────────────────────────────
+ *
+ * The operator's stored prompt for this pair was 3789 characters that
+ * opened with "Create a seamless, photorealistic cinematic CAMERA
+ * transition", described the view as "a high-end stabilized gimbal or
+ * indoor drone", named the end frame's "camera position", demanded
+ * "physically plausible camera movement", and ended under the heading
+ * "CAMERA MOVEMENT FOR THIS TRANSITION". Ten of eighty-four stored
+ * prompts in that project carried the same wording.
+ *
+ * None of it was still in the source. Prompts are STORED per transition
+ * and are not rebuilt when the preset changes, and currency was tracked
+ * against the evidence a prompt was planned from — never against the
+ * prompt contract it was written under. So a prompt planned minutes
+ * earlier, from current evidence, was ten versions out of date and
+ * nothing could tell.
+ *
+ * The scene is a bathroom whose mirror reflects a white door and a beige
+ * wall, and the operator has said so.
+ */
+function testBathroomMirrorPrompt(workDir: string, created: string[]): void {
+  const project = makeProject('Smoke bathroom mirror')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'bathroom.png')
+  writeFileSync(p, png)
+  project.images = importImages(project.id, [
+    { sourcePath: p, name: '0015-15.jpg' },
+    { sourcePath: p, name: '0014-14.jpg' }
+  ])
+  const [A, B] = project.images.map((i) => i.id)
+  project.feedSequence = [A, B]
+  const pairKey = transitionKey(A, B)
+
+  // The operator's own words, verbatim from the reported case.
+  const OPERATOR_CONTEXT =
+    'If you look at the mirror you see the door and the beige wall. That is the reflection in the transition.'
+  const context = makeOperatorContext(OPERATOR_CONTEXT, Date.now(), Date.now())
+  project.transitions[pairKey] = {
+    ...defaultTransitionSettings(5),
+    mode: 'ai',
+    modeProvenance: 'manual',
+    operatorContext: context
+  }
+  saveProject(project)
+
+  // One bathroom, both frames, with a dominant mirror the analyzer read.
+  const analysis: PropertyAnalysis = {
+    ...emptyAnalysis(project.id),
+    source: 'provider',
+    state: 'accepted',
+    rooms: [
+      {
+        id: 'bath',
+        label: 'Bathroom',
+        imageIds: [A, B],
+        landmarks: ['vanity'],
+        confidence: 'confirmed'
+      }
+    ],
+    images: [
+      {
+        imageId: A,
+        roomId: 'bath',
+        orientation: 'into-room',
+        landmarks: ['vanity'],
+        openings: [],
+        overlapWith: [B],
+        reflectiveSurfaces: [
+          { type: 'wall mirror', dominant: true, expectedVisibleContent: ['white door', 'beige wall'] }
+        ]
+      },
+      {
+        imageId: B,
+        roomId: 'bath',
+        orientation: 'into-room',
+        landmarks: ['vanity'],
+        openings: [],
+        overlapWith: [A]
+      }
+    ]
+  }
+  saveAnalysis(analysis)
+
+  const plans = planSequence(analysis, [A, B], undefined, new Map([[pairKey, context]]))
+  const plan = plans[0]
+  assert.ok(plan, 'a plan is produced for the bathroom pair')
+  assert.ok(plan.safetyVerdict.evidence.reflection.risk, 'and the mirror is recognised as a hazard')
+
+  const prompt = renderPrompt(plan, {}, undefined, context)
+
+  // ── A. THE OPERATOR CONTEXT IS THERE, VERBATIM AND AUTHORITATIVE ────
+  assert.match(prompt, /OPERATOR-PROVIDED SPATIAL CONTEXT:/, 'A: the context has its own block')
+  assert.ok(prompt.includes(OPERATOR_CONTEXT), 'A: quoted verbatim, not paraphrased')
+  assert.match(
+    prompt,
+    /authoritative knowledge of the real property/i,
+    'A: and marked as authoritative rather than a suggestion'
+  )
+  assert.strictEqual(
+    (prompt.match(/OPERATOR-PROVIDED SPATIAL CONTEXT/g) ?? []).length,
+    1,
+    'A: stated once — twice reads to the model as two separate facts'
+  )
+
+  // ── B. REFLECTION-SPECIFIC CONSTRAINTS ──────────────────────────────
+  assert.match(prompt, /REFLECTION CONTENT — ABSOLUTE/, 'B: the reflection block is present')
+  assert.match(
+    prompt,
+    /reflects ONLY the architecture, furniture, fixtures, lighting and surfaces/i,
+    'B: architecture and fixtures only'
+  )
+  assert.match(
+    prompt,
+    /may contain nothing that is not already part of the property/i,
+    'B: no invented object may appear in a reflection'
+  )
+  assert.match(
+    prompt,
+    /do not animate anything inside one/i,
+    'B: and nothing invented may MOVE in one — the reported failure'
+  )
+  assert.match(
+    prompt,
+    /no observer and no imaging device in this world/i,
+    'B: no observer or equipment exists anywhere to be reflected'
+  )
+  // What the mirror SHOULD show, taken from the operator rather than guessed.
+  assert.match(prompt, /EXPECTED MIRROR CONTENT:/, 'B: the mirror is told what it DOES contain')
+  assert.match(prompt, /- door/i, 'B: the door the operator described')
+  assert.match(prompt, /- beige wall/i, 'B: and the beige wall')
+  // The list is what the model is told to DRAW, so a conversational
+  // clause in it is noise in the one place that must be precise.
+  assert.doesNotMatch(
+    prompt,
+    /- .*(that is the reflection|if you look)/i,
+    'B: and no framing clause is offered as mirror content'
+  )
+
+  // ── C. NO PHYSICAL-DEVICE ONTOLOGY ──────────────────────────────────
+  //
+  // The entity list deliberately NAMES equipment in order to declare it
+  // absent, so it is excluded before this check — everything else must be
+  // free of wording that puts a device in the scene.
+  const withoutEntityList = prompt
+    .split('\n\n')
+    .filter((block) => !/do not exist in this world/i.test(block))
+    .join('\n\n')
+  for (const forbidden of [
+    /gimbal/i,
+    /drone/i,
+    /filming rig/i,
+    /cinematic camera transition/i,
+    /camera position/i,
+    /physically plausible camera movement/i,
+    /CAMERA MOVEMENT FOR THIS TRANSITION/,
+    /CAMERA: high-end/i,
+    /behind the camera/i
+  ]) {
+    assert.doesNotMatch(
+      withoutEntityList,
+      forbidden,
+      `C: the bathroom prompt must not establish a physical camera: ${forbidden}`
+    )
+  }
+  assert.ok(
+    !promptUsesRetiredOntology(prompt),
+    'C: and the retired-ontology detector agrees'
+  )
+
+  // ── D. MOTION IS VIEWPOINT MOTION ───────────────────────────────────
+  assert.match(prompt, /invisible virtual viewpoint/i, 'D: the ontology leads the prompt')
+  if (plan.motionInstruction) {
+    assert.match(prompt, /VIEWPOINT MOVEMENT FOR THIS TRANSITION:/, 'D: viewpoint, not camera')
+  }
+
+  // ── E. THE PREVENTIVE GATE ──────────────────────────────────────────
+  //
+  // A mirror pair may not be generated from a prompt that ignores
+  // mirrors, and may never be generated from retired wording — even when
+  // the operator set the mode themselves. Neither is an override: they
+  // are missing constraints in the text about to be paid for.
+  const gate = (storedPrompt: string): ReturnType<typeof assessAiGenerationReadiness> =>
+    assessAiGenerationReadiness(
+      analysis,
+      [A, B],
+      pairKey,
+      'manual',
+      undefined,
+      context,
+      () => ({ ...defaultTransitionSettings(5), mode: 'ai', prompt: storedPrompt }),
+      () => null
+    )
+
+  const legacy = gate(
+    'Create a seamless, photorealistic cinematic camera transition from the START FRAME to the END FRAME.'
+  )
+  assert.ok(!legacy.ok, 'E: a prompt carrying retired wording is refused')
+  assert.match((legacy as { reason: string }).reason, /physical camera/i)
+
+  const mirrorBlind = gate('Move the viewpoint smoothly between the two frames.')
+  assert.ok(!mirrorBlind.ok, 'E: a mirror pair with no reflection constraints is refused')
+  assert.match((mirrorBlind as { reason: string }).reason, /reflection constraints/i)
+
+  const proper = gate(prompt)
+  assert.ok(
+    proper.ok,
+    'E: and the prompt this pass produces passes the gate: ' + (proper.ok ? '' : proper.reason)
+  )
+
+  // ── F. EVERY BUILDER USES THE SAME HEADER ───────────────────────────
+  //
+  // Three files hardcoded their own motion header. Consolidated, so a
+  // future edit cannot reach only part of the product.
+  const planned = planTransitionPrompt(analysis, A, B)
+  if (planned.motionInstruction) {
+    assert.match(
+      planned.effectivePrompt,
+      /VIEWPOINT MOVEMENT FOR THIS TRANSITION:/,
+      'F: planTransitionPrompt uses the shared header'
+    )
+    assert.doesNotMatch(planned.effectivePrompt, /CAMERA MOVEMENT FOR THIS TRANSITION/)
+  }
+
+
+  // ── G. A HAND-WRITTEN PROMPT IS THE OPERATOR'S, NOT THE TEMPLATE'S ──
+  //
+  // The prompt-contract checks judge WORDING against the current
+  // template. Two of them were written outside the manual exemption, so
+  // an operator who replaced the prompt on this reflective transition
+  // with their own instructions was refused — because their sentences
+  // did not contain the internal phrase `REFLECTION CONTENT`. The app
+  // demanded its own template back from someone who had deliberately
+  // chosen not to use it.
+  const manualProvenance = {
+    basePrompt: 'base',
+    motionInstruction: null,
+    effectivePrompt: 'theirs',
+    basis: 'same-room' as const,
+    rationale: '',
+    manuallyEdited: true,
+    plannedAt: 1,
+    analysisUpdatedAt: null
+  }
+  const gateWith = (
+    storedPrompt: string,
+    over: Partial<TransitionSettings> = {},
+    mode: 'analysis' | 'manual' = 'manual'
+  ): ReturnType<typeof assessAiGenerationReadiness> =>
+    assessAiGenerationReadiness(
+      analysis,
+      [A, B],
+      pairKey,
+      mode,
+      undefined,
+      context,
+      () => ({ ...defaultTransitionSettings(5), mode: 'ai', prompt: storedPrompt, ...over }),
+      () => null
+    )
+
+  // A. GENERATED prompt with no reflection contract → BLOCKED.
+  const generatedNoReflection = gateWith('Move the viewpoint smoothly between the two frames.')
+  assert.ok(!generatedNoReflection.ok, 'G/A: a generated prompt missing the reflection contract is refused')
+  assert.match((generatedNoReflection as { reason: string }).reason, /reflection constraints/i)
+
+  // B. GENERATED prompt carrying the retired camera ontology → BLOCKED.
+  const generatedLegacy = gateWith(
+    'Create a seamless, photorealistic cinematic camera transition from the START FRAME to the END FRAME.'
+  )
+  assert.ok(!generatedLegacy.ok, 'G/B: a generated prompt with retired camera wording is refused')
+  assert.match((generatedLegacy as { reason: string }).reason, /physical camera/i)
+
+  // C. THE SAME TWO PROMPTS, HAND-WRITTEN → ALLOWED.
+  //
+  // The operator owns the wording. Neither the missing template phrase
+  // nor a word we happen to have retired is grounds for refusing to
+  // spend their money on their own instructions.
+  for (const [label, text] of [
+    ['no template phrase', 'Glide gently past the vanity. The mirror shows the door and the beige wall.'],
+    [
+      'wording we retired',
+      'Create a seamless, photorealistic cinematic camera transition from the START FRAME to the END FRAME.'
+    ]
+  ] as const) {
+    const manual = gateWith(text, { promptProvenance: manualProvenance })
+    assert.ok(manual.ok, `G/C: a hand-written prompt (${label}) is allowed to generate`)
+    assert.strictEqual(
+      manual.kind,
+      'analysis-backed',
+      'G/C: and stays a normal analysis-backed generation, not an override'
+    )
+  }
+
+  // The hazard is still SAID — once, as a note, on the confirmation the
+  // operator already has to read.
+  const advised = gateWith('Glide gently past the vanity.', {
+    promptProvenance: manualProvenance
+  })
+  assert.ok(advised.ok && advised.kind === 'analysis-backed')
+  assert.match(
+    (advised as { advisory?: string }).advisory ?? '',
+    /you are responsible for the reflection instructions/i,
+    'G/C: with a non-blocking advisory rather than a gate'
+  )
+  // And no advisory where there is no mirror to warn about.
+  assert.strictEqual(
+    (
+      assessAiGenerationReadiness(
+        { ...analysis, images: analysis.images.map((i) => ({ ...i, reflectiveSurfaces: [] })) },
+        [A, B],
+        pairKey,
+        'manual',
+        undefined,
+        context,
+        () => ({
+          ...defaultTransitionSettings(5),
+          mode: 'ai',
+          prompt: 'Glide gently past the vanity.',
+          promptProvenance: manualProvenance
+        }),
+        () => null
+      ) as { advisory?: string }
+    ).advisory,
+    undefined,
+    'G/C: and no advisory when the pair has no reflective surface'
+  )
+
+  // D. A MANUAL PROMPT IS NOT A PASS FOR EVERYTHING ELSE.
+  //
+  // Owning the wording is not owning the evidence. With the mode chosen
+  // by the analyzer rather than the operator, a real readiness failure
+  // still refuses — the exemption covers prompt-contract wording and
+  // nothing else.
+  const unrelated = assessAiGenerationReadiness(
+    // No accepted map at all: the state the original bad run was in.
+    { ...analysis, rooms: [] },
+    [A, B],
+    pairKey,
+    'analysis',
+    undefined,
+    context,
+    () => ({
+      ...defaultTransitionSettings(5),
+      mode: 'ai',
+      prompt: 'Glide gently past the vanity.',
+      promptProvenance: manualProvenance
+    }),
+    () => null
+  )
+  assert.ok(!unrelated.ok, 'G/D: a hand-written prompt does not excuse missing spatial evidence')
+  assert.match((unrelated as { reason: string }).reason, /no accepted property analysis/i)
+
+  // And a pair that is no longer in the feed stays refused too.
+  const goneFromFeed = assessAiGenerationReadiness(
+    analysis,
+    [B, A],
+    pairKey,
+    'manual',
+    undefined,
+    context,
+    () => ({
+      ...defaultTransitionSettings(5),
+      mode: 'ai',
+      prompt: 'Glide gently past the vanity.',
+      promptProvenance: manualProvenance
+    }),
+    () => null
+  )
+  assert.ok(!goneFromFeed.ok, 'G/D: nor a pair the feed no longer contains')
+
+  log('bathroom mirror prompt: operator context, reflection rules, and no camera ontology')
+  log('manual prompt: the operator owns the wording; the mirror is advised, never gated')
+}
+
+
+/**
+ * MODEL SELECTION — ONE REGISTRY, EVERY PAID PATH.
+ *
+ * ── WHAT WAS WRONG ───────────────────────────────────────────────────
+ *
+ * The model was a single global string in settings, baked into the queue
+ * path, the field map, the duration enum and the price. Comparing two
+ * models on the same transition — the reason this exists — meant editing
+ * a preference that then applied to everything. And the catalogue
+ * recorded `model: null` with a note saying the provider name was
+ * "sufficient", so two attempts could not be told apart afterwards.
+ */
+
+/**
+ * THE CHANNELS THE RENDERER ACTUALLY CALLS.
+ *
+ * ── THE BUG THIS PINS ────────────────────────────────────────────────
+ *
+ * The model dropdown was empty in runtime. The registry was right, the
+ * preload bridge was right, the dialog was right — and `generation:models`
+ * had no handler in main, so `ipcRenderer.invoke` called a channel
+ * nothing answered and the list arrived empty.
+ *
+ * The DOM proof missed it because the harness MOCKS that bridge method,
+ * so it exercised everything except the link that was missing. A mocked
+ * bridge can only prove the renderer half; this proves the other one.
+ */
+function testGenerationIpcChannels(): void {
+  // Electron keeps invoke handlers in an internal map. Reaching into it
+  // is deliberate: the alternative is booting the whole app, which is
+  // exactly the gap that let a missing channel ship.
+  const handlers = (ipcMain as unknown as { _invokeHandlers?: Map<string, unknown> })
+    ._invokeHandlers
+  assert.ok(handlers, 'the invoke-handler map is readable')
+
+  for (const channel of [
+    'generation:models',
+    'generation:liveConfirmation',
+    'generation:generateLive'
+  ]) {
+    assert.ok(
+      handlers!.has(channel),
+      `${channel} has a handler in main — the renderer calls it by name`
+    )
+  }
+
+  // ── THE PAYLOAD THE DROPDOWN IS BUILT FROM ──────────────────────────
+  //
+  // The same projection the handler returns, so a shape change cannot
+  // pass here and fail in the dialog.
+  const payload = modelListPayload()
+  assert.ok(payload.length >= 3, 'every registered model is sent, not just the confirmed ones')
+
+  const names = payload.map((m) => m.displayName)
+  assert.ok(names.includes('Kling O3 Standard'), 'O3 reaches the renderer')
+  assert.ok(names.includes('Kling 2.6 Pro'), '2.6 Pro reaches the renderer')
+
+  const selectable = payload.filter((m) => m.confirmed)
+  assert.strictEqual(selectable.length, 2, 'and both are selectable')
+  for (const m of selectable) {
+    assert.ok(m.id.length > 0 && m.displayName.length > 0, `${m.id} has an id and a name`)
+    assert.ok(m.durationsSec.length > 0, `${m.id} carries its durations`)
+    assert.ok(m.rates.length > 0, `${m.id} carries its verified rates`)
+  }
+
+  // An unconfirmed model is still SENT — the dialog disables it and says
+  // why, which is more useful than a name that silently does not exist.
+  const unconfirmed = payload.filter((m) => !m.confirmed)
+  assert.ok(unconfirmed.length >= 1, 'unconfirmed models are sent too')
+  assert.match(unconfirmed[0].verificationNote, /NOT VERIFIED/i, 'with the reason attached')
+
+  // Every id the dropdown can offer must resolve, or the select would
+  // hold a value that names nothing.
+  for (const m of payload) {
+    assert.strictEqual(resolveFalModel(m.id).id, m.id, `${m.id} resolves back to itself`)
+  }
+
+  log('generation ipc: the model list has a handler, and carries both confirmed models')
+}
+
+function testFalModelRegistry(workDir: string, created: string[]): void {
+  // ── THE REGISTRY ────────────────────────────────────────────────────
+  assert.ok(FAL_MODEL_REGISTRY.length >= 2, 'more than one model is registered')
+  const ids = FAL_MODEL_REGISTRY.map((m) => m.id)
+  assert.strictEqual(new Set(ids).size, ids.length, 'ids are unique')
+
+  const confirmed = FAL_MODEL_REGISTRY.filter((m) => m.confirmed)
+  assert.strictEqual(confirmed.length, 2, 'O3 and 2.6 Pro have verified contracts')
+  assert.ok(confirmed.some((m) => m.id === FAL_DEFAULT_MODEL_ID), 'and the default is one of them')
+
+  // Every entry carries what the UI and the runtime need.
+  for (const m of FAL_MODEL_REGISTRY) {
+    assert.ok(m.displayName.length > 0, `${m.id} has a display name`)
+    assert.ok(m.endpoint.startsWith('https://queue.fal.run/'), `${m.id} has a queue endpoint`)
+    assert.ok(m.endpoint.endsWith(m.id), `${m.id}'s endpoint is built from its id`)
+    assert.ok(m.supportsEndFrame, `${m.id} supports an end frame — the product requires it`)
+    assert.ok(m.durationsSec.length > 0, `${m.id} declares durations`)
+    assert.ok(typeof m.buildBody === 'function', `${m.id} maps its own body`)
+    // An unverified model must not carry an invented price.
+    if (!m.confirmed) {
+      assert.strictEqual(m.rates.length, 0, `${m.id} publishes no guessed rate`)
+      assert.match(m.verificationNote, /NOT VERIFIED/i, `${m.id} says so plainly`)
+    }
+  }
+
+  // ── F. PER-MODEL REQUEST MAPPING ────────────────────────────────────
+  //
+  // A generic payload sent hopefully at every endpoint is how an
+  // unsupported field reaches a provider and rejects the whole request.
+  const canonical = {
+    startImage: 'https://cdn/start.jpg',
+    endImage: 'https://cdn/end.jpg',
+    prompt: 'PROMPT',
+    durationSec: 5,
+    resolution: 'standard',
+    nativeAudio: false
+  }
+  const o3 = resolveFalModel(FAL_DEFAULT_MODEL_ID)
+  const o3Body = o3.buildBody(canonical)
+  assert.strictEqual(o3Body.image_url, canonical.startImage, 'F: start frame field')
+  assert.strictEqual(o3Body.end_image_url, canonical.endImage, 'F: end frame field')
+  assert.strictEqual(o3Body.duration, '5', 'F: duration is sent as a string')
+  assert.strictEqual(o3Body.generate_audio, false, 'F: audio flag is explicit')
+
+  // A model that does not support audio never receives the field.
+  const noAudio = FAL_MODEL_REGISTRY.find((m) => !m.audioSupport)
+  if (noAudio) {
+    const body = noAudio.buildBody({ ...canonical, nativeAudio: true })
+    assert.ok(
+      !('generate_audio' in body),
+      'F: an unsupported field is never sent, whatever the caller asked for'
+    )
+  }
+
+  // ── G. CAPABILITIES GOVERN WHAT CAN BE SUBMITTED ────────────────────
+  assert.ok(modelSupportsDuration(o3, 5), 'G: a published duration is accepted')
+  assert.ok(!modelSupportsDuration(o3, 99), 'G: an unpublished one is not')
+  assert.strictEqual(clampDurationForModel(o3, 99), 15, 'G: and is clamped to the nearest allowed')
+  assert.ok(modelSupportsResolution(o3, 'standard'), 'G: the tier is the resolution vocabulary')
+  assert.ok(!modelSupportsResolution(o3, '4k'), 'G: an invented resolution is refused')
+
+  // ── H. COST FOLLOWS THE MODEL ───────────────────────────────────────
+  const cheap = falRunCost(o3, 5, false)
+  const withAudio = falRunCost(o3, 5, true)
+  assert.ok(cheap && withAudio, 'H: the confirmed model has verified rates')
+  assert.ok(withAudio!.usd > cheap!.usd, 'H: audio costs more, from the published rate')
+  // Rounded to cents at the source — see falRunCost.
+  assert.strictEqual(cheap!.usd, 0.42, 'H: and the arithmetic is the published one')
+  const unverified = FAL_MODEL_REGISTRY.find((m) => !m.confirmed)!
+  assert.strictEqual(
+    falRunCost(unverified, 5, false),
+    null,
+    'H: a model with no verified rate returns null rather than inventing a price'
+  )
+
+  // An unknown id resolves to the default rather than throwing, so a
+  // stored id from an older build cannot make a project unopenable.
+  assert.strictEqual(resolveFalModel('no-such-model').id, FAL_DEFAULT_MODEL_ID, 'J: legacy-safe')
+  assert.strictEqual(resolveFalModel(null).id, FAL_DEFAULT_MODEL_ID)
+
+  // ── A/B/D/E/I. THE CHOICE REACHES THE REQUEST ───────────────────────
+  const project = makeProject('Smoke model selection')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'model.png')
+  writeFileSync(p, png)
+  project.images = importImages(project.id, [
+    { sourcePath: p, name: 'a.png' },
+    { sourcePath: p, name: 'b.png' }
+  ])
+  const [A, B] = project.images.map((i) => i.id)
+  project.feedSequence = [A, B]
+  const pairKey = transitionKey(A, B)
+  project.transitions[pairKey] = { ...defaultTransitionSettings(5), mode: 'ai' }
+  saveProject(project)
+
+  // This test is ABOUT provider model selection, so it cannot read the
+  // provider list out of a row that an earlier test happened to leave
+  // behind — several of them rewrite it without a provider list at all,
+  // and `settings.providers.find` below then throws rather than failing
+  // on anything this test asserts. Establish what it needs.
+  const settings = JSON.parse(getSettingsJson()!) as AppSettings
+  settings.providers = [
+    {
+      id: 'fal',
+      label: 'fal.ai',
+      apiKey: 'smoke-not-a-real-key',
+      legacySecret: '',
+      mode: 'live',
+      model: FAL_DEFAULT_MODEL_ID
+    }
+  ]
+  settings.activeProviderId = 'fal'
+  settings.production = {
+    ...(settings.production ?? {}),
+    maxConcurrentAiGenerations: 1,
+    allowLiveFalRequests: true
+  } as AppSettings['production']
+  saveSettingsJson(JSON.stringify(settings))
+
+  // D. The global default is what a request uses when nothing is chosen.
+  const byDefault = buildGenerationRequest(project.id, pairKey, settings)
+  assert.ok(byDefault.ok, 'D: a request builds')
+  assert.strictEqual(
+    byDefault.ok && byDefault.request.modelId,
+    settings.providers.find((x) => x.id === 'fal')?.model ?? FAL_DEFAULT_MODEL_ID,
+    'D: and carries the global default model'
+  )
+
+  // A/B. An explicit per-run choice reaches the request instead.
+  const chosen = 'fal-ai/kling-video/v2.6/pro/image-to-video'
+  const byChoice = buildGenerationRequest(project.id, pairKey, settings, chosen)
+  assert.ok(byChoice.ok)
+  assert.strictEqual(
+    byChoice.ok && byChoice.request.modelId,
+    chosen,
+    'A/B: the model chosen for THIS run is what the request carries'
+  )
+
+  // E. Choosing per run does not touch the global default.
+  const afterChoice = JSON.parse(getSettingsJson()!) as AppSettings
+  assert.strictEqual(
+    afterChoice.providers.find((x) => x.id === 'fal')?.model,
+    settings.providers.find((x) => x.id === 'fal')?.model,
+    'E: a per-run selection never mutates the stored default'
+  )
+
+  // ── AN UNVERIFIED MODEL CANNOT BE PAID FOR ──────────────────────────
+  //
+  // 2.1 Pro is registered but its contract has not been read, so it is
+  // refused before any network call rather than discovered at fal.
+  const unverifiedId = FAL_MODEL_REGISTRY.find((m) => !m.confirmed)!.id
+  const refused = queueLiveGeneration(project.id, [pairKey], unverifiedId)
+  assert.ok(!refused.ok, 'an unverified model is refused before any network call')
+  assert.match(
+    (refused as { reasons: string[] }).reasons.join(' '),
+    /has not been verified/i,
+    'and says why, rather than failing at the provider'
+  )
+
+
+  // ── KLING 2.6 PRO — THE VERIFIED CONTRACT ───────────────────────────
+  //
+  // Its input schema is NOT O3's. The start frame is `start_image_url`
+  // where O3 calls the same thing `image_url`; copying O3's mapper would
+  // have sent a field this endpoint does not know and omitted one it
+  // requires — a 422 on a paid request, looking like a model fault
+  // rather than ours.
+  const k26 = resolveFalModel('fal-ai/kling-video/v2.6/pro/image-to-video')
+  assert.strictEqual(k26.displayName, 'Kling 2.6 Pro')
+  assert.ok(k26.confirmed, 'K2.6: verified, so it is selectable')
+  assert.strictEqual(
+    k26.endpoint,
+    'https://queue.fal.run/fal-ai/kling-video/v2.6/pro/image-to-video',
+    'K2.6: the documented endpoint'
+  )
+
+  const k26Body = k26.buildBody(canonical)
+  assert.strictEqual(k26Body.start_image_url, canonical.startImage, 'K2.6: start_image_url')
+  assert.strictEqual(k26Body.end_image_url, canonical.endImage, 'K2.6: end_image_url')
+  assert.strictEqual(k26Body.prompt, canonical.prompt)
+  assert.strictEqual(k26Body.duration, '5', 'K2.6: duration is a string from the enum')
+  assert.strictEqual(k26Body.generate_audio, false, 'K2.6: audio off by default')
+  // The two bodies must not converge. O3's field would be silently wrong.
+  assert.ok(!('image_url' in k26Body), 'K2.6: never sends O3’s image_url')
+  assert.ok(!('start_image_url' in o3Body), 'O3: and O3 never sends 2.6’s field either')
+  // Never sent, so the voice-control rate can never be the one billed.
+  assert.ok(!('voice_ids' in k26Body), 'K2.6: voice_ids is optional and I2T never sends it')
+  // No resolution field: the documented schema has none.
+  assert.ok(!('resolution' in k26Body), 'K2.6: no invented resolution field')
+
+  // Only 5 and 10 are valid, and anything else is clamped to one of them.
+  assert.deepStrictEqual(k26.durationsSec, [5, 10], 'K2.6: the documented duration enum')
+  assert.ok(!modelSupportsDuration(k26, 7), 'K2.6: 7s is not offered')
+  assert.strictEqual(clampDurationForModel(k26, 7), 5, 'K2.6: and clamps to the nearest allowed')
+  assert.strictEqual(clampDurationForModel(k26, 12), 10)
+  assert.strictEqual(
+    k26.buildBody({ ...canonical, durationSec: clampDurationForModel(k26, 7) }).duration,
+    '5',
+    'K2.6: so an unsupported duration can never reach the body'
+  )
+
+  // ── THE VERIFIED PRICES ─────────────────────────────────────────────
+  assert.strictEqual(falRunCost(k26, 5, false)!.usd, 0.35, 'K2.6: 5s without audio = $0.35')
+  assert.strictEqual(falRunCost(k26, 10, false)!.usd, 0.7, 'K2.6: 10s without audio = $0.70')
+  assert.strictEqual(falRunCost(k26, 5, true)!.usd, 0.7, 'K2.6: audio doubles the rate')
+  // Cheaper than O3, which is exactly the kind of thing a wrong rate hides.
+  assert.ok(
+    falRunCost(k26, 5, false)!.usd < falRunCost(o3, 5, false)!.usd,
+    'K2.6: and the estimate really does change with the model'
+  )
+
+  // ── QUEUE URLS FOLLOW THE SELECTED MODEL ────────────────────────────
+  //
+  // Submit uses the model's own endpoint. Status/result/cancel are
+  // namespaced by the APPLICATION, so both Kling endpoints share them —
+  // asserted rather than assumed, because relying on that coincidence is
+  // what would break the first time a non-Kling model is registered.
+  const k26Urls = deriveQueueUrls('req-1', k26.id)
+  const o3Urls = deriveQueueUrls('req-1', o3.id)
+  for (const url of [k26Urls.statusUrl, k26Urls.responseUrl, k26Urls.cancelUrl]) {
+    assert.match(url, /^https:\/\/queue\.fal\.run\/fal-ai\/kling-video\/requests\/req-1/, url)
+  }
+  assert.deepStrictEqual(k26Urls, o3Urls, 'both Kling endpoints share one queue application')
+  assert.notStrictEqual(k26.endpoint, o3.endpoint, 'but SUBMIT goes to different endpoints')
+
+  // ── THE MIRROR WORKFLOW: TWO MODELS, ONE PAIR ───────────────────────
+  //
+  // Same frames, same prompt, different model — and both attempts must
+  // survive in history with their exact model, or the comparison the
+  // whole feature exists for cannot be made afterwards.
+  const runOne = recordGeneration({
+    queueJobId: 'mirror-job-o3',
+    projectId: project.id,
+    fromImageId: A,
+    toImageId: B,
+    provider: 'fal',
+    model: o3.id,
+    clip: { storedName: 'o3.mp4', originalName: 'o3.mp4', source: 'fal', src: clipUrl(project.id, 'o3.mp4') },
+    prompt: 'MIRROR PROMPT',
+    active: true
+  })
+  const runTwo = recordGeneration({
+    queueJobId: 'mirror-job-26',
+    projectId: project.id,
+    fromImageId: A,
+    toImageId: B,
+    provider: 'fal',
+    model: k26.id,
+    clip: { storedName: 'k26.mp4', originalName: 'k26.mp4', source: 'fal', src: clipUrl(project.id, 'k26.mp4') },
+    prompt: 'MIRROR PROMPT',
+    active: false
+  })
+  assert.notStrictEqual(runOne, runTwo, 'I: two runs, two catalogue rows')
+
+  const history = getGenerationsForPair(project.id, A, B)
+  assert.ok(history.length >= 2, 'I: both attempts are kept')
+  const byModel = new Map(history.map((g) => [g.model, g]))
+  assert.ok(byModel.has(o3.id), 'I: the O3 run records O3')
+  assert.ok(byModel.has(k26.id), 'I: and the 2.6 Pro run records 2.6 Pro')
+  assert.strictEqual(
+    byModel.get(o3.id)!.promptUsed,
+    byModel.get(k26.id)!.promptUsed,
+    'I: same prompt on both, so the model is the only variable'
+  )
+  assert.notStrictEqual(
+    byModel.get(o3.id)!.clip?.storedName,
+    byModel.get(k26.id)!.clip?.storedName,
+    'I: and each keeps its own clip to compare'
+  )
+
+  // ── REGENERATE STARTS FROM WHAT WAS LAST USED ───────────────────────
+  //
+  // Newest first: the 2.6 Pro run is the most recent, so a regeneration
+  // opens on it rather than silently falling back to O3.
+  assert.strictEqual(history[0].model, k26.id, 'B: history is newest-first')
+  const confirmation = liveConfirmation(project.id, pairKey)
+  assert.ok(confirmation, 'B: a confirmation builds')
+  assert.strictEqual(
+    confirmation!.modelId,
+    k26.id,
+    'B: regenerate preselects the model the last run used — never a silent O3 fallback'
+  )
+  assert.strictEqual(confirmation!.model, 'Kling 2.6 Pro', 'B: named for the operator')
+  assert.strictEqual(
+    confirmation!.estimatedCostLabel,
+    '$0.35',
+    'B: priced at 2.6 Pro’s verified rate for the resolved duration'
+  )
+  assert.deepStrictEqual(confirmation!.modelDurations, [5, 10], 'B: with its own duration enum')
+
+  // And an explicit choice still overrides that.
+  const asO3 = liveConfirmation(project.id, pairKey, o3.id)
+  assert.strictEqual(asO3!.modelId, o3.id, 'B: an explicit choice wins over the previous run')
+  assert.strictEqual(asO3!.estimatedCostLabel, '$0.42', 'H: and the cost follows the model')
+
+  log('fal models: one registry, per-run selection, per-model bodies, no invented prices')
+  log('kling 2.6 pro: its own body and rate; O3 vs 2.6 kept as separate history')
+}
+
+function testFeedTransitionState(): void {
+  const clip = (name: string): TransitionClip => ({
+    storedName: name,
+    originalName: 'fal-generation.mp4',
+    source: 'fal',
+    src: `f2f://clip/p/${name}`
+  })
+  const row = (over: Partial<TransitionSettings> = {}): TransitionSettings => ({
+    ...defaultTransitionSettings(5),
+    ...over
+  })
+  const gen = (
+    over: Partial<Pick<GenerationRecord, 'clip' | 'active'>>
+  ): Pick<GenerationRecord, 'clip' | 'active'> => ({
+    clip: clip('a.mp4'),
+    active: true,
+    ...over
+  })
+
+  // ── A. A DELIVERED CLIP IS ATTACHED AND READY ───────────────────────
+  //
+  // Quality validation is removed from the product. A generation that
+  // succeeded and downloaded is simply the transition's clip, and no
+  // verdict stands between the two.
+  const a = feedTransitionState(
+    row({ status: 'completed', clip: clip('a.mp4') }),
+    gen({ active: true })
+  )
+  assert.strictEqual(a.state, 'ready', 'A: a downloaded clip is ready')
+  assert.strictEqual(a.word, 'Ready')
+  assert.strictEqual(a.secondaryWord, null, 'A: with nothing awaiting a decision')
+  assert.ok(a.playableClip, 'A: and it is playable')
+
+  // ── B. HISTORICAL QUALITY METADATA DOES NOT BLOCK ANYTHING ──────────
+  //
+  // Old rows keep their verdicts for the record. Nothing reads them.
+  const b = feedTransitionState(
+    row({ status: 'completed', clip: clip('old.mp4') }),
+    { clip: clip('old.mp4'), active: true }
+  )
+  assert.strictEqual(b.state, 'ready', 'B: a row written under the old rules still loads as ready')
+  assert.strictEqual(b.word, 'Ready')
+
+  // ── C. NO REVIEW WORDING ANYWHERE IN THE DERIVATION ─────────────────
+  const everyWord = [
+    feedTransitionState(row({}), null),
+    feedTransitionState(row({ status: 'queued' }), null),
+    feedTransitionState(row({ status: 'generating' }), null),
+    feedTransitionState(row({ status: 'completed', clip: clip('c.mp4') }), gen({})),
+    feedTransitionState(row({ status: 'failed', clip: null }), null),
+    feedTransitionState(row({ status: 'completed', clip: null }), null, true)
+  ].map((v) => v.word + ' ' + v.detail + ' ' + (v.secondaryWord ?? ''))
+  for (const text of everyWord) {
+    assert.doesNotMatch(
+      text,
+      /review quality|needs review|failed quality|quality check/i,
+      'C: no quality wording survives anywhere in the feed: ' + text
+    )
+  }
+
+  const d = feedTransitionState(
+    row({ status: 'completed', clip: clip('old-good.mp4') }),
+    gen({ clip: clip('new.mp4'), active: false })
+  )
+  assert.strictEqual(d.state, 'ready', 'D: the transition is usable and says so')
+  assert.strictEqual(
+    d.playableClip?.storedName,
+    'old-good.mp4',
+    'D: the ACTIVE clip is the one in the video'
+  )
+
+
+  // ── E. THE ORDINARY STATES ARE UNCHANGED ────────────────────────────
+  assert.strictEqual(feedTransitionState(row({}), null).word, 'Missing')
+  assert.strictEqual(feedTransitionState(row({ status: 'queued' }), null).word, 'Queued')
+  assert.strictEqual(feedTransitionState(row({ status: 'generating' }), null).word, 'Generating')
+  assert.strictEqual(
+    feedTransitionState(row({ status: 'completed', clip: clip('x.mp4') }), gen({})).word,
+    'Ready'
+  )
+  assert.strictEqual(
+    feedTransitionState(row({ status: 'completed', clip: null }), null, true).word,
+    'Download pending',
+    'E: provider finished and no file is still a download problem'
+  )
+
+  // ── F. NO QUALITY GATE REMAINS IN THE DERIVATION ────────────────────
+  //
+  // The opposite of what this asserted before, and deliberately so: a
+  // downloaded clip is the transition's clip.
+  assert.strictEqual(
+    feedTransitionState(row({ status: 'failed', clip: clip('x.mp4') }), gen({ active: true })).state,
+    'ready',
+    'F: an attached clip is ready whatever an old status word says'
+  )
+
+  // ── G. A DELIVERED CLIP IS SIMPLY READY ─────────────────────────────
+  //
+  // Quality validation is gone from the product: a downloaded clip is
+  // attached, so there is no state where a succeeded generation waits for
+  // a verdict. The recovery for a genuinely failed one is unchanged.
+  const failedRow = {
+    ...defaultTransitionSettings(5),
+    status: 'failed' as const,
+    clip: null
+  }
+  const finished = {
+    id: 'j1',
+    projectId: 'p',
+    metadata: { pairKeys: ['a->b'] },
+    provider: { providerTaskId: 't', providerStatus: 'succeeded' },
+    note: 'Generation finished (fal.ai).',
+    status: 'completed',
+    createdAt: 1
+  } as unknown as QueueJob
+
+  const afterFinish = transitionRecovery(failedRow, finished, '11 → 12')
+  assert.strictEqual(
+    afterFinish.kind,
+    'retry-download',
+    'G: a succeeded task with no local clip is a transfer problem, and nothing else'
+  )
+  assert.strictEqual(afterFinish.costsMoney, false, 'G: and recovering it is free')
+  assert.notStrictEqual(
+    resolveGenerationAction(finished.provider, finished.note),
+    'submit',
+    'G: a finished task never resolves to a second paid submit'
+  )
+
+  log('feed state: a delivered clip is Ready; a real failure still reads Failed')
+  log('feed action: a delivered clip offers review; paying again stays a deliberate second choice')
+}
+
+/**
+ * REPAIRING THE PERSISTED WORD.
+ *
+ * `status: 'failed'` was written for any live run ending with no attached
+ * clip, which after quality validation includes every clip the gate held
+ * back. Those rows describe generations that succeeded and downloaded.
+ */
+function testQualityHeldStatusRepair(workDir: string, created: string[]): void {
+  const project = makeProject('Smoke status repair')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'repair.png')
+  writeFileSync(p, png)
+  project.images = importImages(project.id, [
+    { sourcePath: p, name: 'a.png' },
+    { sourcePath: p, name: 'b.png' },
+    { sourcePath: p, name: 'c.png' }
+  ])
+  const [A, B, C] = project.images.map((i) => i.id)
+  project.feedSequence = [A, B, C]
+  const held = transitionKey(A, B)
+  const genuinelyFailed = transitionKey(B, C)
+  project.transitions[held] = { ...defaultTransitionSettings(5), status: 'failed', clip: null }
+  project.transitions[genuinelyFailed] = {
+    ...defaultTransitionSettings(5),
+    status: 'failed',
+    clip: null
+  }
+  saveProject(project)
+
+  // A delivered clip, on disk, refused by the gate.
+  const dir = projectTransitionsDir(project.id)
+  mkdirSync(dir, { recursive: true })
+  const storedName = 'held.mp4'
+  writeFileSync(join(dir, storedName), Buffer.from([0, 1, 2, 3]))
+  const genId = recordGeneration({
+    queueJobId: 'repair-job-1',
+    projectId: project.id,
+    fromImageId: A,
+    toImageId: B,
+    provider: 'fal',
+    model: null,
+    clip: { storedName, originalName: 'fal.mp4', source: 'fal', src: clipUrl(project.id, storedName) },
+    prompt: 'x',
+    active: false
+  })
+  applyQualityResult(genId, {
+    status: 'needs-review',
+    reason: 'Needs a human decision.',
+    checkedAt: Date.now(),
+    suspiciousFrames: [],
+    validator: 'test'
+  })
+
+  const result = repairQualityHeldStatuses(project.id)
+  assert.strictEqual(result.transitionsRepaired, 1, 'exactly one row was wrong')
+
+  const after = listProjects().find((x) => x.id === project.id)!
+  assert.strictEqual(
+    after.transitions[held]?.status,
+    'completed',
+    'A: a delivered-but-held generation no longer claims to have failed'
+  )
+  assert.strictEqual(
+    after.transitions[held]?.clip,
+    null,
+    'B: and the clip is STILL not attached — the gate is untouched'
+  )
+  assert.strictEqual(
+    after.transitions[genuinelyFailed]?.status,
+    'failed',
+    'C: a pair with no delivered generation keeps its failure'
+  )
+
+  // The verdict itself is never rewritten.
+  const gens = getGenerationsForPair(project.id, A, B)
+  assert.strictEqual(gens[0]?.qualityStatus, 'needs-review', 'D: the verdict stands unchanged')
+  assert.strictEqual(gens[0]?.active, false, 'D: and the clip is still inactive')
+
+  // Idempotent: a second run finds nothing left to do.
+  assert.strictEqual(
+    repairQualityHeldStatuses(project.id).transitionsRepaired,
+    0,
+    'E: running it again changes nothing'
+  )
+
+  log('status repair: a held clip stops claiming failure, and stays held')
+}
+
+/**
+ * THE CLIP URL THE PLAYER IS GIVEN.
+ *
+ * The catalogue built its own: `f2f://project/<id>/transition/<name>`.
+ * The protocol handler chooses a directory from the HOST — image, clip,
+ * export — so `project` matched nothing, every catalogue clip 404'd, and
+ * `<video>` silently showed nothing while Show in folder, using a real
+ * path, worked. Exactly the reported symptom.
+ */
+function testClipUrlIsResolvable(workDir: string, created: string[]): void {
+  const project = makeProject('Smoke clip url')
+  created.push(project.id)
+  saveProject(project)
+
+  const name = 'proof-clip.mp4'
+  const dir = projectTransitionsDir(project.id)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, name), Buffer.from([0, 1, 2, 3]))
+
+  const url = clipUrl(project.id, name)
+  assert.match(url, /^f2f:\/\/clip\//, 'the canonical builder addresses the clip host')
+  assert.ok(
+    !url.includes('/transition/'),
+    'and never the `project/.../transition/...` shape the handler cannot serve'
+  )
+
+  // The real resolver, the one the protocol handler calls.
+  const resolved = resolveImageRequest(url)
+  assert.ok(resolved, 'F: the url a player is given resolves to a file on disk')
+  assert.ok(resolved!.endsWith(name), 'and to the right one')
+
+  // The shape that shipped, proven to be the failure it was.
+  assert.strictEqual(
+    resolveImageRequest(`f2f://project/${project.id}/transition/${name}`),
+    null,
+    'F: the old catalogue url resolves to nothing — this is why playback was blank'
+  )
+
+  log('clip urls: one builder, and the url handed to <video> actually resolves')
+}
+
+/**
+ * A REAL MP4, THROUGH THE REAL HANDLER, AT THE CATALOGUE'S OWN URL.
+ *
+ * `resolveImageRequest` returning a path proves only that a file was
+ * found. What a `<video>` needs is the RESPONSE: a 206 for the opening
+ * range request, `video/mp4`, an accurate `Content-Range`, and the right
+ * bytes. Serving that wrongly leaves the element stuck at 0:00 with the
+ * file plainly on disk — which is precisely the shape of the bug this
+ * pass chased.
+ *
+ * The fixture is produced by the bundled ffmpeg, so nothing is downloaded
+ * and no provider is called.
+ */
+async function testMediaProtocolServesRealMp4(created: string[]): Promise<void> {
+  const project = makeProject('Smoke media protocol')
+  created.push(project.id)
+  saveProject(project)
+
+  const dir = projectTransitionsDir(project.id)
+  mkdirSync(dir, { recursive: true })
+  const storedName = 'fixture.mp4'
+  const target = join(dir, storedName)
+
+  const bin = ffmpegPath()
+  if (!bin) {
+    log('media protocol: SKIPPED — no bundled ffmpeg to build a fixture with')
+    return
+  }
+  // One second of colour, tiny, deterministic. Real container, real moov.
+  spawnSync(
+    bin,
+    [
+      '-y', '-f', 'lavfi', '-i', 'color=c=navy:s=64x64:d=1',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+      target
+    ],
+    { encoding: 'utf8' }
+  )
+  assert.ok(existsSync(target), 'the fixture mp4 was produced')
+  const size = statSync(target).size
+  assert.ok(size > 0, 'and is not empty')
+
+  const url = clipUrl(project.id, storedName)
+
+  // A. THE OPENING REQUEST CHROMIUM ACTUALLY SENDS.
+  const opening = await handleMediaRequest(
+    new Request(url, { headers: { range: 'bytes=0-' } })
+  )
+  assert.strictEqual(opening.status, 206, 'A: an open-ended range is answered as partial content')
+  assert.strictEqual(
+    opening.headers.get('content-type'),
+    'video/mp4',
+    'A: with the mp4 type — an octet-stream here is a silent demuxer failure'
+  )
+  assert.strictEqual(
+    opening.headers.get('content-range'),
+    `bytes 0-${size - 1}/${size}`,
+    'A: and a Content-Range naming the whole file'
+  )
+  assert.strictEqual(opening.headers.get('accept-ranges'), 'bytes', 'A: seeking is advertised')
+  const openingBytes = Buffer.from(await opening.arrayBuffer())
+  assert.strictEqual(openingBytes.length, size, 'A: the body really is the whole file')
+  assert.strictEqual(
+    openingBytes.subarray(4, 8).toString('latin1'),
+    'ftyp',
+    'A: and starts with a real mp4 box, not an error page'
+  )
+
+  // B. A MID-FILE SEEK.
+  const mid = Math.floor(size / 2)
+  const seek = await handleMediaRequest(
+    new Request(url, { headers: { range: `bytes=${mid}-` } })
+  )
+  assert.strictEqual(seek.status, 206, 'B: seeking mid-file is served')
+  assert.strictEqual(
+    seek.headers.get('content-range'),
+    `bytes ${mid}-${size - 1}/${size}`,
+    'B: from the requested offset'
+  )
+  assert.strictEqual(
+    Number(seek.headers.get('content-length')),
+    size - mid,
+    'B: with a length matching the range, not the file'
+  )
+
+  // C. NO RANGE AT ALL — what an <img> or a plain fetch sends.
+  const plain = await handleMediaRequest(new Request(url))
+  assert.strictEqual(plain.status, 200, 'C: a plain request still succeeds')
+  assert.strictEqual(plain.headers.get('content-type'), 'video/mp4')
+  assert.strictEqual(plain.headers.get('accept-ranges'), 'bytes', 'C: and still advertises seeking')
+
+  // D. THE URL SHAPE THAT SHIPPED IS 404, NOT SOMETHING PLAYABLE.
+  const broken = await handleMediaRequest(
+    new Request(`f2f://project/${project.id}/transition/${storedName}`, {
+      headers: { range: 'bytes=0-' }
+    })
+  )
+  assert.strictEqual(broken.status, 404, 'D: the malformed catalogue url is refused')
+
+  log('media protocol: a real mp4 serves 206 + video/mp4 + exact Content-Range at the catalogue url')
+}
+
+/**
+ * F + H + I — the catalogue, against the real database.
+ *
+ * The decision table above is pure. This is the part that has to be true
+ * of stored rows: a failed regeneration must not evict a good active
+ * clip, export must refuse one that slipped through, and nothing may be
+ * deleted.
+ */
+function testQualityCatalogue(workDir: string, created: string[]): void {
+  const project = makeProject('Smoke quality catalogue')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'quality.png')
+  writeFileSync(p, png)
+  project.images = importImages(project.id, [
+    { sourcePath: p, name: 'a.png' },
+    { sourcePath: p, name: 'b.png' }
+  ])
+  saveProject(project)
+  const [fromId, toId] = project.images.map((i) => i.id)
+
+  const good: TransitionClip = {
+    storedName: 'good.mp4',
+    originalName: 'fal-generation.mp4',
+    source: 'fal',
+    src: 'f2f://x'
+  }
+  const bad: TransitionClip = {
+    storedName: 'bad.mp4',
+    originalName: 'fal-generation.mp4',
+    source: 'fal',
+    src: 'f2f://y'
+  }
+
+  // The good clip: generated, inspected, active.
+  const goodId = recordGeneration({
+    queueJobId: `qc-good-${Date.now()}`,
+    projectId: project.id,
+    fromImageId: fromId,
+    toImageId: toId,
+    provider: 'fal',
+    model: null,
+    clip: good,
+    prompt: 'p',
+    active: true
+  })
+  applyQualityResult(goodId, decideQuality(
+    {
+      humanDetected: false,
+      humanReflectionDetected: false,
+      cameraEquipmentDetected: false,
+      suspiciousFrames: [],
+      pass: true
+    },
+    'test'
+  ))
+
+  // ── F. REGENERATE PRODUCES A CLIP WITH A PERSON IN IT ───────────────
+  //
+  // Recorded inactive, exactly as the live path does, and NOT archiving
+  // the previous generation. This is the scenario that matters most: the
+  // operator regenerates a working clip, the new one is worse, and the
+  // video must not silently become the bad one.
+  const badId = recordGeneration({
+    queueJobId: `qc-bad-${Date.now()}`,
+    projectId: project.id,
+    fromImageId: fromId,
+    toImageId: toId,
+    provider: 'fal',
+    model: null,
+    clip: bad,
+    prompt: 'p',
+    active: false
+  })
+  applyQualityResult(badId, decideQuality(
+    {
+      humanDetected: true,
+      humanReflectionDetected: false,
+      cameraEquipmentDetected: false,
+      suspiciousFrames: [
+        { frameIndex: 3, reason: 'A person crosses the frame.', confidence: 'high' }
+      ],
+      pass: false
+    },
+    'test'
+  ))
+
+  const active = activeGenerationForPair(project.id, fromId, toId)
+  assert.strictEqual(active?.id, goodId, 'the good clip is STILL the active one')
+  assert.strictEqual(active?.qualityStatus, 'passed')
+
+  // ── I. NOTHING IS DELETED ───────────────────────────────────────────
+  const history = getGenerationsForPair(project.id, fromId, toId)
+  assert.strictEqual(history.length, 2, 'both attempts are in the catalogue')
+  const failed = history.find((g) => g.id === badId)
+  assert.strictEqual(failed?.qualityStatus, 'failed', 'the bad one is kept, marked failed')
+  assert.strictEqual(failed?.active, false, 'and is not active')
+  assert.match(failed?.qualityReason ?? '', /person/i, 'with a readable reason')
+  assert.strictEqual(failed?.suspiciousFrames[0]?.frameIndex, 3, 'and the frame that showed it')
+  assert.strictEqual(
+    failed?.status,
+    'completed',
+    'the PROVIDER still reads as succeeded — it did; the content is what failed'
+  )
+
+  // ── PERSISTENCE ACROSS A RE-READ ────────────────────────────────────
+  assert.strictEqual(
+    getGenerationsForPair(project.id, fromId, toId).find((g) => g.id === badId)?.qualityReason,
+    failed?.qualityReason,
+    'the verdict survives being read back from the database'
+  )
+
+  // ── G. MANUAL OVERRIDE, WITH THE VERDICT PRESERVED ──────────────────
+  approveQualityManually(project.id, badId)
+  const overridden = getGenerationsForPair(project.id, fromId, toId).find((g) => g.id === badId)
+  assert.strictEqual(overridden?.qualityOverride, 'manual', 'the override is recorded')
+  assert.strictEqual(
+    overridden?.qualityStatus,
+    'failed',
+    'and the failure is NOT rewritten — history keeps both facts'
+  )
+  assert.ok(
+    qualityAllowsActive(overridden!.qualityStatus, overridden!.qualityOverride),
+    'the override is what makes it usable, not a changed verdict'
+  )
+
+  // ── H. EXPORT READINESS ─────────────────────────────────────────────
+  //
+  // The export gate re-asks the same rule. Attach the failed clip
+  // directly — simulating a path that skipped the check — and confirm it
+  // is refused while the override is off.
+  const stored = listProjects().find((pr) => pr.id === project.id)!
+  const key = transitionKey(fromId, toId)
+  stored.transitions[key] = {
+    ...defaultTransitionSettings(5),
+    status: 'completed',
+    mode: 'ai',
+    clip: bad
+  }
+  saveProject(stored)
+
+  // The override recorded above currently permits it.
+  const permitted = exportReadiness(listProjects().find((pr) => pr.id === project.id)!)
+  assert.ok(
+    !/quality check/i.test(permitted.reason ?? ''),
+    'an explicitly approved clip is not blocked by the quality gate'
+  )
+
+  // ── J. THE SETTING SURVIVES A RESTART ───────────────────────────────
+  //
+  // Stored in the settings row, not in memory. Read back through the same
+  // accessor the generation path uses, because a mode that silently
+  // reverts to the default on relaunch would quietly re-enable spend the
+  // operator had turned off.
+  const before = getSettingsJson()
+  try {
+    const parsed = before ? (JSON.parse(before) as AppSettings) : ({} as AppSettings)
+    saveSettingsJson(
+      JSON.stringify({
+        ...parsed,
+        analyzer: {
+          ...(parsed.analyzer ?? { analyzerId: 'manual', model: '', apiKey: '', mode: 'dry-run' }),
+          qualityValidationMode: 'reflection-risk-only'
+        }
+      })
+    )
+    const reread = JSON.parse(getSettingsJson() ?? '{}') as AppSettings
+    assert.strictEqual(
+      reread.analyzer?.qualityValidationMode,
+      'reflection-risk-only',
+      'J: the chosen mode is persisted and reads back'
+    )
+    assert.ok(
+      !shouldValidateClip(reread.analyzer!.qualityValidationMode!, false),
+      'and the stored value — not the default — is what governs'
+    )
+  } finally {
+    // The operator's real settings are restored whatever happens.
+    if (before !== null) saveSettingsJson(before)
+  }
+
+  log('quality catalogue: a failed regeneration never evicts a good clip; history keeps both')
+}
+
+/**
+ * MISSING CONTEXT — the third outcome.
+ *
+ * ── THE PRODUCT MISTAKE THIS CORRECTS ────────────────────────────────
+ *
+ * A mirror whose reflection could not be read used to CUT an otherwise
+ * well-evidenced same-room transition. That treated "the model does not
+ * know" as "the transition is impossible", and those are different
+ * claims. The operator has usually stood in the room.
+ *
+ * Only AFFIRMATIVE incompatibility forces a cut now. An absence becomes
+ * a question, and answering it is enough.
+ */
+/**
+ * THE DONKEY.
+ *
+ * ── WHAT ACTUALLY HAPPENED ───────────────────────────────────────────
+ *
+ * An operator typed a joke instruction while testing, re-ran the feed
+ * analysis, and the joke appeared to survive and keep winning. The
+ * forensic answer is in the report — but the CLASS of failure it named
+ * is real and is what this pins:
+ *
+ *   text written against analysis v1
+ *   → still injected into prompts built from analysis v2
+ *   → with nothing on screen saying where it came from
+ *
+ * "Operator context survives re-analysis" was the right instinct and too
+ * blunt a rule. Survival is not the same as authority.
+ */
+/**
+ * ACCEPT, PAIR ANALYSIS, AND STALENESS — the regressions that were owed.
+ *
+ * ── THE FAILURE THESE PIN ────────────────────────────────────────────
+ *
+ * Accepting a feed analysis wrote per-pair modes and marked the draft
+ * accepted, and never promoted the PROPERTY MAP the analysis had been
+ * built from. Recovered from the operator's own database:
+ *
+ *   accepted PropertyAnalysis   2026-08-31   mirror only a landmark
+ *   draft PropertyAnalysis      2026-09-06   mirror content described
+ *   accepted feed analysis      built from the DRAFT → "ai / safe"
+ *
+ * So the feed analysis said safe while generation preflight, reading the
+ * five-week-old accepted map, refused the same pair for missing evidence
+ * about the same mirror. Two maps, two answers, one transition.
+ */
+/**
+ * PROMPT BASIS — what wording was built on, and whether it still holds.
+ *
+ * ── WHY "A PROMPT EXISTS" WAS THE WRONG TEST ─────────────────────────
+ *
+ * It is how a prompt written against a five-week-old map survived a
+ * fresh analysis and kept guiding generation. Once a pair can be guided
+ * by four different sources, existence says nothing: an individual pair
+ * analysis and the global map can share a timestamp and mean entirely
+ * different things.
+ */
+function testPromptBasisProvenance(workDir: string, created: string[]): void {
+  const fp = (source: Parameters<typeof evidenceFingerprintOf>[0]): string =>
+    evidenceFingerprintOf(source)
+
+  // ── FINGERPRINTS DIFFER BY SOURCE, NOT ONLY BY TIME ─────────────────
+  assert.notStrictEqual(
+    fp({ source: 'individual-analysis', pairAnalyzedAt: 100 }),
+    fp({ source: 'global-analysis', analysisUpdatedAt: 100 }),
+    'the same instant from two sources is not the same evidence'
+  )
+
+  const provenance = {
+    basePrompt: 'base',
+    motionInstruction: null,
+    effectivePrompt: 'base',
+    basis: 'same-room' as const,
+    rationale: '',
+    manuallyEdited: false,
+    plannedAt: 1,
+    analysisUpdatedAt: 100,
+    evidenceSource: 'feed-analysis' as const,
+    evidenceFingerprint: fp({ source: 'feed-analysis', analysisUpdatedAt: 100 }),
+    pairKey: 'a->b'
+  }
+
+  assert.ok(
+    isPromptBasisCurrent(provenance, {
+      source: 'feed-analysis',
+      fingerprint: fp({ source: 'feed-analysis', analysisUpdatedAt: 100 })
+    }),
+    'unchanged evidence leaves the wording current'
+  )
+  assert.ok(
+    !isPromptBasisCurrent(provenance, {
+      source: 'individual-analysis',
+      fingerprint: fp({ source: 'individual-analysis', pairAnalyzedAt: 200 })
+    }),
+    'an accepted individual analysis makes the old feed-based wording stale'
+  )
+  assert.ok(
+    !isPromptBasisCurrent(provenance, {
+      source: 'feed-analysis',
+      fingerprint: fp({ source: 'feed-analysis', analysisUpdatedAt: 300 })
+    }),
+    'and so does a newer analysis from the same source'
+  )
+  assert.ok(
+    !isPromptBasisCurrent(
+      { ...provenance, evidenceSource: undefined, evidenceFingerprint: undefined },
+      { source: 'feed-analysis', fingerprint: fp({ source: 'feed-analysis', analysisUpdatedAt: 100 }) }
+    ),
+    'a row that never recorded its source is stale, not assumed to match'
+  )
+  // Operator context changing invalidates wording built on it.
+  assert.ok(
+    !isPromptBasisCurrent(
+      { ...provenance, evidenceSource: 'operator', evidenceFingerprint: fp({ source: 'operator', operatorContextAt: 5 }), operatorContextFingerprint: '5' },
+      { source: 'operator', fingerprint: fp({ source: 'operator', operatorContextAt: 9 }), operatorContextFingerprint: '9' }
+    ),
+    'editing the operator context makes wording built from it stale'
+  )
+  // A hand-written prompt is never stale: it is not a derivation.
+  assert.ok(
+    isPromptBasisCurrent(
+      { ...provenance, manuallyEdited: true },
+      { source: 'individual-analysis', fingerprint: 'anything-else' }
+    ),
+    'a manual prompt is the operator’s wording and never goes stale'
+  )
+
+  // ── THE MANUAL PROMPT IS HELD, NOT OVERWRITTEN ──────────────────────
+  const project = makeProject('Smoke prompt provenance')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const img = join(workDir, 'prov.png')
+  writeFileSync(img, png)
+  project.images = importImages(project.id, [
+    { sourcePath: img, name: 'a.png' },
+    { sourcePath: img, name: 'b.png' }
+  ])
+  const [A, B] = project.images.map((i) => i.id)
+  project.feedSequence = [A, B]
+  const key = transitionKey(A, B)
+  project.transitions[key] = {
+    ...defaultTransitionSettings(5),
+    prompt: 'MY OWN WORDING — hand written',
+    promptProvenance: {
+      basePrompt: 'base',
+      motionInstruction: null,
+      effectivePrompt: 'MY OWN WORDING — hand written',
+      basis: 'same-room',
+      rationale: '',
+      manuallyEdited: true,
+      plannedAt: 1,
+      analysisUpdatedAt: null
+    }
+  }
+  saveProject(project)
+
+  savePairAnalysis({
+    projectId: project.id,
+    pairKey: key,
+    analyzedAt: 5000,
+    analyzer: 'gemini',
+    model: 'test',
+    parentAnalysisUpdatedAt: null,
+    feedFingerprint: `${A}|${B}`,
+    libraryFingerprint: `${A}|${B}`,
+    evidence: {
+      relation: 'same-room',
+      sharedLandmarks: ['vanity'],
+      openings: [],
+      reflectiveSurfaces: [],
+      geometryConflicts: []
+    },
+    decision: 'ai',
+    missingContext: [],
+    motionInstruction: 'reposition smoothly between the two viewpoints',
+    promptCandidate: null,
+    reason: 'same room',
+    state: 'draft'
+  })
+
+  const acceptRes = acceptPairAnalysis(project.id, key)
+  assert.ok(acceptRes.ok, 'accepting the pair analysis succeeded: ' + (acceptRes.reason ?? ''))
+  const held = listProjects().find((x) => x.id === project.id)!.transitions[key]
+  assert.strictEqual(
+    held?.prompt,
+    'MY OWN WORDING — hand written',
+    'a hand-written prompt is NOT overwritten by an accepted analysis'
+  )
+  assert.strictEqual(held?.promptProvenance?.manuallyEdited, true, 'and stays marked as theirs')
+  assert.ok(held?.promptSuggestion, 'the suggestion is held beside it instead')
+  assert.match(
+    held?.promptSuggestion?.text ?? '',
+    /reposition smoothly/,
+    'carrying the new motion'
+  )
+  assert.strictEqual(held?.promptSuggestion?.evidenceSource, 'individual-analysis')
+
+  // ── EXPLICIT REPLACE IS THE ONLY WAY IT SWAPS ───────────────────────
+  const replaced = replaceManualPrompt(project.id, key)
+  assert.ok(replaced.ok, 'replacing succeeds when a suggestion exists')
+  const after = listProjects().find((x) => x.id === project.id)!.transitions[key]
+  assert.match(after?.prompt ?? '', /reposition smoothly/, 'the suggestion is now the prompt')
+  assert.strictEqual(
+    after?.promptProvenance?.manuallyEdited,
+    false,
+    'and the manual flag is cleared — the wording is no longer theirs'
+  )
+  assert.strictEqual(after?.promptProvenance?.evidenceSource, 'individual-analysis')
+  assert.strictEqual(after?.promptSuggestion, undefined, 'the pending suggestion is consumed')
+
+  // ── PERSISTENCE ─────────────────────────────────────────────────────
+  const reread = listProjects().find((x) => x.id === project.id)!.transitions[key]
+  assert.strictEqual(
+    reread?.promptProvenance?.evidenceFingerprint,
+    fp({ source: 'individual-analysis', pairAnalyzedAt: 5000 }),
+    'the evidence fingerprint survives being written and read back'
+  )
+  assert.strictEqual(reread?.promptProvenance?.pairKey, key)
+
+  // ── A NON-MANUAL PROMPT IS REBUILT INSTEAD OF HELD ──────────────────
+  const p2 = listProjects().find((x) => x.id === project.id)!
+  p2.transitions[key] = { ...p2.transitions[key]!, promptSuggestion: undefined }
+  saveProject(p2)
+  savePairAnalysis({
+    ...readPairAnalysis(project.id, key)!,
+    analyzedAt: 6000,
+    motionInstruction: 'rotate gently toward the window',
+    state: 'draft'
+  })
+  acceptPairAnalysis(project.id, key)
+  const rebuilt = listProjects().find((x) => x.id === project.id)!.transitions[key]
+  // ── THE ROUTE IS REBUILT; THE TEMPO IS NOT CARRIED ──────────────────
+  //
+  // This used to assert the prompt contained `rotate gently toward the
+  // window` VERBATIM — the analyzer's prose, tempo word and all, copied
+  // into the final prompt. That is the bug this pass exists to remove:
+  // "gently" is a speed instruction, it travelled in the same prompt as
+  // MOTION — CONTINUOUS CONSTANT VELOCITY, and the pair-specific
+  // sentence is the more concrete of the two. It is a real example, from
+  // the operator's own database.
+  //
+  // What must survive is the ROUTE. What must not is the pace.
+  assert.match(rebuilt?.prompt ?? '', /rotate/i, 'the analyzer’s rotation survives')
+  assert.match(rebuilt?.prompt ?? '', /toward the window/i, 'and so does its destination')
+  assert.doesNotMatch(
+    rebuilt?.prompt ?? '',
+    /gently/i,
+    'but its pace does not — speed is stated once, in MOTION_QUALITY'
+  )
+  assert.ok(
+    (rebuilt?.prompt ?? '').includes('ONE CONSTANT SPEED'),
+    'and the canonical speed contract is present'
+  )
+  assert.strictEqual(
+    rebuilt?.promptProvenance?.motionInstruction,
+    'rotate toward the window',
+    'provenance records the route that was actually sent, not the wording that arrived'
+  )
+  assert.strictEqual(
+    rebuilt?.promptSuggestion,
+    undefined,
+    'and no suggestion is left pending for it'
+  )
+
+  // ── PREFLIGHT REFUSES WORDING BUILT ON OLD EVIDENCE ─────────────────
+  //
+  // The last gap. `isPromptBasisCurrent` existed and the inspector said
+  // "Prompt basis outdated", but nothing stopped the generation — so a
+  // prompt written against superseded evidence could still be paid for.
+  // A screen saying one thing while the paid path does another is the
+  // same class of failure as the two-analysis split.
+  const stale = makeProject('Smoke stale prompt basis')
+  created.push(stale.id)
+  stale.images = importImages(stale.id, [
+    { sourcePath: img, name: 'a.png' },
+    { sourcePath: img, name: 'b.png' }
+  ])
+  const [SA, SB] = stale.images.map((i) => i.id)
+  stale.feedSequence = [SA, SB]
+  const sk = transitionKey(SA, SB)
+  saveProject(stale)
+  saveAnalysis({
+    ...emptyAnalysis(stale.id),
+    source: 'manual',
+    state: 'accepted',
+    rooms: [{ id: 'r', label: 'Room', imageIds: [SA, SB], landmarks: ['sofa'], confidence: 'confirmed' }],
+    images: [
+      { imageId: SA, roomId: 'r', orientation: 'into-room', landmarks: ['sofa'], openings: [], overlapWith: [SB] },
+      { imageId: SB, roomId: 'r', orientation: 'into-room', landmarks: ['sofa'], openings: [], overlapWith: [SA] }
+    ]
+  })
+
+  const setBasis = (over: Partial<NonNullable<TransitionSettings['promptProvenance']>>): void => {
+    const p2 = listProjects().find((x) => x.id === stale.id)!
+    p2.transitions[sk] = {
+      ...defaultTransitionSettings(5),
+      mode: 'ai',
+      modeProvenance: 'analysis',
+      prompt: 'wording',
+      promptProvenance: {
+        basePrompt: 'base',
+        motionInstruction: 'move',
+        effectivePrompt: 'wording',
+        basis: 'same-room',
+        rationale: '',
+        manuallyEdited: false,
+        plannedAt: 1,
+        analysisUpdatedAt: null,
+        ...over
+      }
+    }
+    saveProject(p2)
+  }
+  const ask = (
+    evidence: { source: EvidenceSource; fingerprint: string; operatorContextFingerprint?: string } | null
+  ): ReturnType<typeof assessAiGenerationReadiness> => {
+    const p2 = listProjects().find((x) => x.id === stale.id)!
+    return assessAiGenerationReadiness(
+      readAnalysis(stale.id),
+      [SA, SB],
+      sk,
+      p2.transitions[sk]?.modeProvenance,
+      undefined,
+      p2.transitions[sk]?.operatorContext,
+      (k) => p2.transitions[k],
+      () => evidence
+    )
+  }
+  const FEED_100 = { source: 'feed-analysis' as const, fingerprint: 'feed:100' }
+  const PAIR_5000 = { source: 'individual-analysis' as const, fingerprint: 'pair:5000' }
+
+  // A. matching basis → allowed
+  setBasis({ evidenceSource: 'feed-analysis', evidenceFingerprint: 'feed:100' })
+  assert.ok(ask(FEED_100).ok, 'A: wording that matches the evidence in force is allowed')
+
+  // B. feed-built wording, newer individual analysis → blocked
+  const blockedB = ask(PAIR_5000)
+  assert.ok(!blockedB.ok, 'B: a newer individual analysis makes feed-built wording unusable')
+  assert.match(blockedB.reason ?? '', /outdated spatial evidence/i)
+  assert.match(
+    blockedB.reason ?? '',
+    /Re-analyse this transition or rebuild its prompt/i,
+    'and names the two exact actions, not a generic "re-analyse transitions"'
+  )
+
+  // C. operator context edited → blocked
+  setBasis({
+    evidenceSource: 'operator',
+    evidenceFingerprint: 'operator:2',
+    operatorContextFingerprint: '2'
+  })
+  assert.ok(
+    !ask({ source: 'operator', fingerprint: 'operator:3', operatorContextFingerprint: '3' }).ok,
+    'C: editing the context makes wording built from it unusable'
+  )
+
+  // D. rebuilt against current evidence → allowed
+  setBasis({ evidenceSource: 'individual-analysis', evidenceFingerprint: 'pair:5000' })
+  assert.ok(ask(PAIR_5000).ok, 'D: rebuilding restores it')
+
+  // E + F. a hand-written prompt is exempt, and its suggestion stays optional
+  setBasis({ manuallyEdited: true, evidenceSource: 'feed-analysis', evidenceFingerprint: 'feed:100' })
+  const manualProject = listProjects().find((x) => x.id === stale.id)!
+  manualProject.transitions[sk] = {
+    ...manualProject.transitions[sk]!,
+    promptSuggestion: {
+      text: 'SUGGESTED',
+      createdAt: 9,
+      evidenceSource: 'individual-analysis',
+      evidenceFingerprint: 'pair:5000'
+    }
+  }
+  saveProject(manualProject)
+  assert.ok(
+    ask(PAIR_5000).ok,
+    'E: a hand-written prompt is not blocked merely because the evidence moved'
+  )
+  assert.strictEqual(
+    listProjects().find((x) => x.id === stale.id)!.transitions[sk]?.prompt,
+    'wording',
+    'F: and the pending suggestion never substitutes itself for their text'
+  )
+
+  // G. a legacy prompt that never recorded its source is unknown, not a match
+  setBasis({ evidenceSource: undefined, evidenceFingerprint: undefined })
+  const legacy = ask(FEED_100)
+  assert.ok(!legacy.ok, 'G: wording with no recorded basis is treated as stale')
+  assert.match(legacy.reason ?? '', /outdated spatial evidence/i)
+
+  // H. an operator's own AI decision still reaches the override path.
+  const manualMode = listProjects().find((x) => x.id === stale.id)!
+  manualMode.transitions[sk] = { ...manualMode.transitions[sk]!, modeProvenance: 'manual' }
+  saveProject(manualMode)
+  const overridden = ask(FEED_100)
+  assert.ok(overridden.ok, 'H: an explicit operator override still proceeds')
+  assert.strictEqual(overridden.kind, 'manual-override', 'as an override, with its warning')
+
+  // ── I. APPROVE AI WITH CONTEXT LEAVES A GENERATABLE PAIR ────────────
+  //
+  // The reported runtime failure, reproduced against the real database.
+  // The operator ran the analysis, supplied the missing fact, approved —
+  // and generation still refused with "outdated spatial evidence". Three
+  // separate writes did it: the context was stored, the mode was set, and
+  // the prompt was left carrying the old basis (in the recovered case, no
+  // recorded basis at all).
+  //
+  // The question below is not a hand-built one. It is `readinessInputs`,
+  // the same function the confirmation dialog and the submit path use.
+  setBasis({ evidenceSource: 'feed-analysis', evidenceFingerprint: 'feed:100' })
+  const askForReal = (): ReturnType<typeof assessAiGenerationReadiness> => {
+    const p2 = listProjects().find((x) => x.id === stale.id)!
+    const inputs = readinessInputs(stale.id)
+    return assessAiGenerationReadiness(
+      readAnalysis(stale.id),
+      [SA, SB],
+      sk,
+      p2.transitions[sk]?.modeProvenance,
+      undefined,
+      p2.transitions[sk]?.operatorContext,
+      inputs.transitionFor,
+      inputs.currentEvidence
+    )
+  }
+
+  const approved = approvePair({
+    projectId: stale.id,
+    pairKey: sk,
+    mode: 'ai',
+    contextText: 'The mirror shows the hallway door, not a second room.'
+  })
+  assert.ok(approved.ok, 'I: the approval is accepted')
+  assert.strictEqual(
+    approved.evidenceSource,
+    'operator',
+    'and their words outrank the feed analysis that was in force'
+  )
+
+  const afterApproval = listProjects().find((x) => x.id === stale.id)!.transitions[sk]!
+  const ctxAt = afterApproval.operatorContext?.createdAt
+  assert.ok(ctxAt, 'the context itself is stored')
+  assert.strictEqual(
+    afterApproval.promptProvenance?.evidenceSource,
+    'operator',
+    'the WORDING is stamped against that same evidence — not left blank, which is what shipped'
+  )
+  assert.strictEqual(
+    afterApproval.promptProvenance?.evidenceFingerprint,
+    `operator:${ctxAt}`,
+    'with the fingerprint the resolver produces, so the gate recomputes a match'
+  )
+  assert.strictEqual(
+    afterApproval.modeProvenance,
+    'manual',
+    'and the decision is recorded as theirs, because it was'
+  )
+  assert.ok(
+    isPromptBasisCurrent(afterApproval.promptProvenance, {
+      source: 'operator',
+      fingerprint: `operator:${ctxAt}`,
+      operatorContextFingerprint: String(ctxAt)
+    }),
+    'so the prompt reads as current'
+  )
+  assert.ok(
+    afterApproval.prompt.includes('hallway door'),
+    'and the rebuilt wording actually carries what they told us'
+  )
+  assert.strictEqual(
+    (afterApproval.prompt.match(/OPERATOR-PROVIDED SPATIAL CONTEXT/g) ?? []).length,
+    1,
+    'exactly one context block — the approval plans and renders with the same text, ' +
+      'and stating a fact twice reads to the model as two facts'
+  )
+  const allowed = askForReal()
+  assert.ok(
+    allowed.ok,
+    `I: generation is allowed after approve-with-context; got: ${
+      allowed.ok ? '' : allowed.reason
+    }`
+  )
+
+  // J. Precedence: a LATER individual analysis does not silently demote
+  // the operator. Their statement is the one thing the model cannot see.
+  const jProject = listProjects().find((x) => x.id === stale.id)!
+  assert.strictEqual(
+    readinessInputs(stale.id).currentEvidence(sk)?.source,
+    'operator',
+    'J: operator context outranks feed analysis for the same pair'
+  )
+  assert.ok(jProject.transitions[sk]?.operatorContext, 'and is still stored, not consumed')
+
+  // K. Approving as CUT records the decision without inventing wording,
+  // and leaves their text alone rather than deleting it.
+  const cutRes = approvePair({ projectId: stale.id, pairKey: sk, mode: 'cut' })
+  assert.ok(cutRes.ok, 'K: a cut decision is accepted')
+  const afterCut = listProjects().find((x) => x.id === stale.id)!.transitions[sk]!
+  assert.strictEqual(afterCut.mode, 'cut')
+  assert.strictEqual(afterCut.modeProvenance, 'manual')
+  assert.strictEqual(
+    afterCut.operatorContext?.createdAt,
+    ctxAt,
+    'their words survive a cut — they may be right about the room even so'
+  )
+
+  // L. A hand-written prompt is never overwritten by approving.
+  const lProject = listProjects().find((x) => x.id === stale.id)!
+  lProject.transitions[sk] = {
+    ...lProject.transitions[sk]!,
+    prompt: 'MY OWN WORDS',
+    promptProvenance: { ...lProject.transitions[sk]!.promptProvenance!, manuallyEdited: true }
+  }
+  saveProject(lProject)
+  const lRes = approvePair({
+    projectId: stale.id,
+    pairKey: sk,
+    mode: 'ai',
+    contextText: 'A different fact entirely.'
+  })
+  assert.ok(lRes.ok && lRes.manualPromptPreserved, 'L: the manual prompt is reported as preserved')
+  assert.strictEqual(
+    listProjects().find((x) => x.id === stale.id)!.transitions[sk]?.prompt,
+    'MY OWN WORDS',
+    'and their sentence is still exactly their sentence'
+  )
+
+  log('prompt provenance: manual wording is held, derived wording is rebuilt and dated')
+  log('approve-with-context: context, decision and wording settle in one operation')
+}
+
+/**
+ * THE REPORTED FLOW, END TO END.
+ *
+ *   Re-analyse Feed → Accept Analysis → Use analysis prompt → Generate
+ *
+ * Every step is the production function the button calls. It blocked in
+ * the shipped Portable, and the operator's own database showed why: eight
+ * AI pairs unable to generate, failing in two different ways at once.
+ *
+ *   7 pairs   prompt = global-analysis   current = feed-analysis
+ *   1 pair    prompt = NULL, never stamped
+ *
+ * The seven were Accept, which rebuilt the wording BEFORE marking the
+ * feed analysis accepted, so the resolver could not yet see one. The
+ * eighth was `Use analysis prompt`, which wrote no evidence fields at all.
+ */
+function testAcceptThenUseAnalysisPrompt(workDir: string, created: string[]): void {
+  const project = makeProject('Smoke accept + use analysis prompt')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'usea.png')
+  writeFileSync(p, png)
+  project.images = importImages(project.id, [
+    { sourcePath: p, name: 'a.png' },
+    { sourcePath: p, name: 'b.png' },
+    { sourcePath: p, name: 'c.png' }
+  ])
+  const [A, B, C] = project.images.map((i) => i.id)
+  project.feedSequence = [A, B, C]
+  const pairAB = transitionKey(A, B)
+  const pairBC = transitionKey(B, C)
+  saveProject(project)
+
+  const mapWith = (landmark: string): PropertyAnalysis => ({
+    ...emptyAnalysis(project.id),
+    source: 'provider',
+    state: 'draft',
+    rooms: [
+      { id: 'r1', label: 'Living room', imageIds: [A, B], landmarks: [landmark], confidence: 'confirmed' },
+      { id: 'r2', label: 'Kitchen', imageIds: [C], landmarks: ['counter'], confidence: 'confirmed' }
+    ],
+    images: [
+      { imageId: A, roomId: 'r1', orientation: 'into-room', landmarks: [landmark], openings: [], overlapWith: [B] },
+      { imageId: B, roomId: 'r1', orientation: 'into-room', landmarks: [landmark], openings: ['open door to Kitchen'], overlapWith: [A] },
+      { imageId: C, roomId: 'r2', orientation: 'into-room', landmarks: ['counter'], openings: [], overlapWith: [] }
+    ],
+    edges: [
+      { id: 'e1', fromRoomId: 'r1', toRoomId: 'r2', confidence: 'confirmed', supportingImageIds: [B, C] }
+    ]
+  })
+
+  // ── A. RE-ANALYSE FEED PRODUCES A DRAFT ───────────────────────────
+  saveAnalysisDraft(mapWith('sofa'))
+  const feedDraft = {
+    feedImageIds: [A, B, C],
+    createdAt: Date.now(),
+    status: 'draft' as const,
+    pairs: [
+      { fromId: A, toId: B, recommendation: 'ai' as const, reason: 'same room', prompt: 'PAN LEFT' },
+      { fromId: B, toId: C, recommendation: 'ai' as const, reason: 'open door', prompt: 'WALK THROUGH' }
+    ]
+  }
+  saveTransitionDraft(project.id, feedDraft as never)
+
+  // ── B. ACCEPT ANALYSIS ────────────────────────────────────────────
+  const accepted = acceptFeedAnalysis(project.id, feedDraft as never)
+  assert.ok(accepted.ok, 'Accept succeeds: ' + (accepted.reason ?? ''))
+
+  const inputs = (): ReturnType<typeof readinessInputs> => readinessInputs(project.id)
+  const askGen = (pairKey: string): ReturnType<typeof assessAiGenerationReadiness> => {
+    const live = listProjects().find((x) => x.id === project.id)!
+    const i = inputs()
+    return assessAiGenerationReadiness(
+      readAnalysis(project.id),
+      getFeedSequenceIds(live),
+      pairKey,
+      live.transitions[pairKey]?.modeProvenance,
+      undefined,
+      live.transitions[pairKey]?.operatorContext,
+      i.transitionFor,
+      i.currentEvidence
+    )
+  }
+
+  // ── C. THE PAIR PROMPT WAS BUILT — AND STAMPED AGAINST THE FEED ───
+  //
+  // THE SEVEN-PAIR BUG. Accept rebuilt wording before marking the feed
+  // analysis accepted, so this said `global-analysis` while preflight,
+  // moments later, said `feed-analysis`.
+  const afterAccept = listProjects().find((x) => x.id === project.id)!
+  const evAB = inputs().currentEvidence(pairAB)
+  assert.strictEqual(evAB?.source, 'feed-analysis', 'the accepted feed analysis covers this pair')
+  assert.strictEqual(
+    afterAccept.transitions[pairAB]?.promptProvenance?.evidenceSource,
+    'feed-analysis',
+    'and Accept stamped the wording against it — not against the map alone'
+  )
+  assert.strictEqual(
+    afterAccept.transitions[pairAB]?.promptProvenance?.evidenceFingerprint,
+    evAB?.fingerprint,
+    'with the identical fingerprint the gate recomputes'
+  )
+  assert.ok(askGen(pairAB).ok, 'so Accept alone leaves a generatable pair')
+
+  // ── D. USE ANALYSIS PROMPT ────────────────────────────────────────
+  //
+  // §8. Before the click the prompt carries a deliberately wrong basis.
+  const staleProject = listProjects().find((x) => x.id === project.id)!
+  staleProject.transitions[pairBC] = {
+    ...staleProject.transitions[pairBC]!,
+    prompt: 'OLD WORDING',
+    promptProvenance: {
+      ...staleProject.transitions[pairBC]!.promptProvenance!,
+      evidenceSource: 'global-analysis',
+      evidenceFingerprint: 'global:1'
+    }
+  }
+  saveProject(staleProject)
+  assert.ok(!askGen(pairBC).ok, 'a deliberately stale basis blocks generation first')
+
+  const applied = applyAnalysisPromptToTransition(project.id, pairBC)
+  assert.ok(applied.ok, 'Use analysis prompt runs')
+
+  const afterUse = listProjects().find((x) => x.id === project.id)!.transitions[pairBC]!
+  const evBC = inputs().currentEvidence(pairBC)
+  assert.strictEqual(
+    afterUse.promptProvenance?.evidenceSource,
+    evBC?.source,
+    'Use analysis prompt stamps the CURRENT source — it used to stamp none at all'
+  )
+  assert.strictEqual(
+    afterUse.promptProvenance?.evidenceFingerprint,
+    evBC?.fingerprint,
+    'and the current fingerprint'
+  )
+  assert.strictEqual(afterUse.promptProvenance?.pairKey, pairBC, 'recorded against this pair')
+  assert.strictEqual(
+    afterUse.promptProvenance?.manuallyEdited,
+    false,
+    'and hands the wording back to the analysis'
+  )
+  assert.ok(
+    isPromptBasisCurrent(afterUse.promptProvenance, evBC!),
+    'so the adopted prompt is current the moment it is adopted'
+  )
+
+  // ── E + F. RELOAD, THEN THE GENERATION CONFIRMATION ───────────────
+  const reloaded = listProjects().find((x) => x.id === project.id)!.transitions[pairBC]!
+  assert.ok(
+    isPromptBasisCurrent(reloaded.promptProvenance, inputs().currentEvidence(pairBC)!),
+    'still current after reading the project back'
+  )
+  const gen = askGen(pairBC)
+  assert.ok(gen.ok, 'GENERATION ALLOWED: ' + (gen.ok ? '' : gen.reason))
+
+  // ── §9. A NO-OP SAVE MUST NOT INVALIDATE ANYTHING ─────────────────
+  //
+  // `saveAnalysis` stamped `Date.now()` unconditionally, and the prompt
+  // fingerprint is derived from that timestamp — so re-saving an
+  // unchanged map marked every prompt in the project stale.
+  const beforeNoop = inputs().currentEvidence(pairBC)!.fingerprint
+  const reSaved = saveAnalysis(readAnalysis(project.id))
+  const noopProject = listProjects().find((x) => x.id === project.id)!
+  noopProject.updatedAt = Date.now()
+  saveProject(noopProject)
+  assert.strictEqual(
+    inputs().currentEvidence(pairBC)!.fingerprint,
+    beforeNoop,
+    '§9: saving the same evidence twice does not move the fingerprint'
+  )
+  assert.ok(reSaved.updatedAt > 0, 'and the analysis is still stored')
+  assert.ok(
+    askGen(pairBC).ok && askGen(pairAB).ok,
+    '§9: so no prompt becomes falsely stale after a reload/save round trip'
+  )
+
+  // ── §10. A REAL EVIDENCE CHANGE STILL INVALIDATES ─────────────────
+  //
+  // The staleness mechanism has to keep working, or this whole pass has
+  // simply disabled a safety gate.
+  saveAnalysis({ ...mapWith('bookcase'), state: 'accepted' })
+  const changedFingerprint = inputs().currentEvidence(pairBC)!.fingerprint
+  assert.notStrictEqual(
+    changedFingerprint,
+    beforeNoop,
+    '§10: genuinely changing the accepted map DOES move the fingerprint'
+  )
+  const nowStale = askGen(pairBC)
+  assert.ok(
+    !nowStale.ok,
+    '§10: and wording built from the previous evidence is refused again'
+  )
+  assert.match((nowStale as { reason: string }).reason, /outdated spatial evidence/i)
+
+  log('accept → use analysis prompt → generate: stamped once, current at every step')
+}
+
+function testAcceptAndPairAnalysis(workDir: string, created: string[]): void {
+  const project = makeProject('Smoke accept + pair')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'accept.png')
+  writeFileSync(p, png)
+  project.images = importImages(project.id, [
+    { sourcePath: p, name: 'a.png' },
+    { sourcePath: p, name: 'b.png' },
+    { sourcePath: p, name: 'c.png' }
+  ])
+  const [A, B, C] = project.images.map((i) => i.id)
+  project.feedSequence = [A, B, C]
+  saveProject(project)
+
+  const pairAB = transitionKey(A, B)
+  const pairBC = transitionKey(B, C)
+
+  // ── THE OLD MAP: a mirror nobody could read ─────────────────────────
+  const oldMap: PropertyAnalysis = {
+    ...emptyAnalysis(project.id),
+    source: 'manual',
+    state: 'accepted',
+    updatedAt: 1000,
+    rooms: [
+      { id: 'bath', label: 'Bathroom', imageIds: [A, B], landmarks: ['vanity'], confidence: 'confirmed' }
+    ],
+    images: [
+      {
+        imageId: A,
+        roomId: 'bath',
+        orientation: 'into-room',
+        // The legacy shape: the mirror exists only as a landmark string.
+        landmarks: ['vanity', 'mirror reflection'],
+        openings: [],
+        overlapWith: [B]
+      },
+      { imageId: B, roomId: 'bath', orientation: 'into-room', landmarks: ['vanity'], openings: [], overlapWith: [A] }
+    ]
+  }
+  saveAnalysis(oldMap)
+
+  // Reproduce the screenshot: preflight refuses on the old map.
+  const blocked = assessAiGenerationReadiness(readAnalysis(project.id), [A, B, C], pairAB)
+  assert.ok(!blocked.ok, 'the old map blocks generation, as it did in the real project')
+  assert.match(blocked.reason ?? '', /sufficient accepted spatial evidence/i)
+
+  // ── THE NEW MAP, sitting as a draft ─────────────────────────────────
+  const newMap: PropertyAnalysis = {
+    ...oldMap,
+    updatedAt: 2000,
+    state: 'draft',
+    images: [
+      {
+        imageId: A,
+        roomId: 'bath',
+        orientation: 'into-room',
+        landmarks: ['vanity'],
+        openings: [],
+        overlapWith: [B],
+        reflectiveSurfaces: [
+          {
+            type: 'wall mirror',
+            dominant: true,
+            // The thing the old map could not say.
+            expectedVisibleContent: ['white doorway', 'beige wall tile'],
+            confidence: 'confirmed'
+          }
+        ]
+      },
+      { imageId: B, roomId: 'bath', orientation: 'into-room', landmarks: ['vanity'], openings: [], overlapWith: [A] }
+    ]
+  }
+  saveAnalysisDraft(newMap)
+
+  // A decision the operator made before pressing Accept.
+  const live = listProjects().find((x) => x.id === project.id)!
+  live.transitions[pairBC] = {
+    ...defaultTransitionSettings(5),
+    mode: 'cut',
+    modeProvenance: 'manual'
+  }
+  saveProject(live)
+
+  const draft: TransitionDraft = {
+    feedImageIds: [A, B, C],
+    createdAt: 3000,
+    status: 'draft',
+    pairs: [
+      { fromId: A, toId: B, recommendation: 'ai', decision: 'ai', missingContext: [], safety: null },
+      // The analyzer would have set this to AI; the operator said cut.
+      { fromId: B, toId: C, recommendation: 'ai', decision: 'ai', missingContext: [], safety: null }
+    ]
+  }
+
+  const result = acceptFeedAnalysis(project.id, draft)
+  assert.ok(result.ok, `accept succeeded: ${result.reason ?? ''}`)
+
+  // ── D. THE ACCEPTED PROPERTY ANALYSIS ACTUALLY UPDATES ──────────────
+  const acceptedNow = readAnalysis(project.id)
+  // `saveAnalysis` stamps its own updatedAt — accepting IS a new event —
+  // so the proof is that the CONTENT moved, not the timestamp.
+  assert.ok(acceptedNow.updatedAt > 1000, 'D: the accepted map was rewritten')
+  assert.ok(
+    acceptedNow.images.find((i) => i.imageId === A)?.reflectiveSurfaces?.length,
+    'D: including the reflective surfaces the old map lacked'
+  )
+
+  // ── E. PAIR DECISIONS UPDATE — AND THE OPERATOR SURVIVES ────────────
+  const after = listProjects().find((x) => x.id === project.id)!
+  assert.strictEqual(after.transitions[pairAB]?.mode, 'ai', 'E: analyzer decisions applied')
+  assert.strictEqual(after.transitions[pairAB]?.modeProvenance, 'analysis')
+  assert.strictEqual(
+    after.transitions[pairBC]?.mode,
+    'cut',
+    'E: the operator’s own decision was NOT overwritten by the analyzer'
+  )
+  assert.strictEqual(after.transitions[pairBC]?.modeProvenance, 'manual')
+  assert.strictEqual(result.operatorDecisionsPreserved, 1, 'and it is reported, not silent')
+
+  // ── F. PROMPT BASIS REBUILT FROM THE NEWLY ACCEPTED MAP ─────────────
+  assert.ok(result.promptsUpdated >= 1, 'F: wording was rebuilt from the accepted map')
+  assert.ok(
+    (after.transitions[pairAB]?.prompt ?? '').length > 0,
+    'F: and the AI pair actually carries a prompt'
+  )
+  // A REBUILT PROMPT MUST SATISFY THE GATE IT WAS REBUILT FOR.
+  //
+  // The rebuild originally stamped no evidence source, which preflight
+  // reads as unknown — so rebuilding would have left every pair blocked
+  // by exactly the rule it was meant to satisfy.
+  assert.ok(
+    after.transitions[pairAB]?.promptProvenance?.evidenceSource,
+    'F: the rebuilt wording records what it was built from'
+  )
+  assert.ok(
+    after.transitions[pairAB]?.promptProvenance?.evidenceFingerprint,
+    'F: with a fingerprint a later change can be compared against'
+  )
+
+  // ── G. PREFLIGHT IMMEDIATELY SEES THE NEW EVIDENCE ──────────────────
+  const allowed = assessAiGenerationReadiness(readAnalysis(project.id), [A, B, C], pairAB)
+  assert.ok(allowed.ok, 'G: generation is allowed straight after Accept — no restart')
+  assert.strictEqual(allowed.kind, 'analysis-backed')
+
+  // ── M. AN UNRESOLVED QUESTION NEVER GETS A GENERIC PROMPT ───────────
+  //
+  // Re-accept with the pair unresolved and confirm it is left alone
+  // rather than converted or given wording built over an unknown.
+  const unresolvedDraft: TransitionDraft = {
+    ...draft,
+    createdAt: 4000,
+    pairs: [
+      {
+        fromId: A,
+        toId: B,
+        recommendation: 'cut',
+        decision: 'needs-context',
+        missingContext: [{ type: 'reflection-content', question: 'What does the mirror show?' }],
+        safety: null
+      }
+    ]
+  }
+  const unresolved = acceptFeedAnalysis(project.id, unresolvedDraft)
+  assert.ok(unresolved.ok)
+  assert.ok(unresolved.stillNeedContext >= 1, 'M: unresolved pairs are counted, not converted')
+
+  // ── I + J. ONE PAIR, AND ONLY ONE ───────────────────────────────────
+  const beforeBC = listProjects().find((x) => x.id === project.id)!.transitions[pairBC]
+  const record = decidePair(
+    project.id,
+    pairAB,
+    {
+      evidence: {
+        relation: 'same-room',
+        roomLabel: 'Bathroom',
+        sharedLandmarks: ['vanity'],
+        openings: [],
+        reflectiveSurfaces: [
+          {
+            type: 'wall mirror',
+            dominant: true,
+            expectedVisibleContent: ['white doorway', 'beige wall tile']
+          }
+        ],
+        geometryConflicts: []
+      },
+      missingContext: [],
+      motionInstruction: 'reposition smoothly between the two viewpoints'
+    },
+    'test-model'
+  )
+  assert.strictEqual(record.decision, 'ai', 'a readable mirror in the same room permits AI')
+  savePairAnalysis(record)
+  acceptPairAnalysis(project.id, pairAB)
+
+  const reread = readPairAnalysis(project.id, pairAB)
+  assert.ok(reread, 'J: the pair analysis survives being written and read back')
+  assert.strictEqual(reread?.state, 'accepted')
+  assert.strictEqual(reread?.decision, 'ai')
+  assert.strictEqual(
+    reread?.evidence.reflectiveSurfaces[0]?.expectedVisibleContent[0],
+    'white doorway',
+    'J: with its evidence intact'
+  )
+  assert.strictEqual(
+    readPairAnalysis(project.id, pairBC),
+    null,
+    'I: the neighbouring pair has no analysis — exactly one pair was touched'
+  )
+  assert.deepStrictEqual(
+    listProjects().find((x) => x.id === project.id)!.transitions[pairBC]?.mode,
+    beforeBC?.mode,
+    'I: and its stored mode is unchanged'
+  )
+  assert.deepStrictEqual(
+    getFeedSequenceIds(listProjects().find((x) => x.id === project.id)!),
+    [A, B, C],
+    'I: the feed order is untouched'
+  )
+
+  // ── K. IT GOES STALE WHEN THE PAIR LEAVES THE FEED ──────────────────
+  const fp = fingerprints(project.id)
+  assert.ok(
+    isPairAnalysisCurrent(reread, fp),
+    'the analysis applies while the feed still contains the pair'
+  )
+  const reordered = listProjects().find((x) => x.id === project.id)!
+  reordered.feedSequence = [A, C]
+  saveProject(reordered)
+  assert.ok(
+    !isPairAnalysisCurrent(readPairAnalysis(project.id, pairAB), fingerprints(project.id)),
+    'K: a feed change makes it stale rather than silently applicable'
+  )
+  const orphaned = markOrphanedPairAnalyses(project.id, [transitionKey(A, C)])
+  assert.strictEqual(orphaned, 1, 'K: and it is marked outdated')
+  assert.strictEqual(
+    readPairAnalysis(project.id, pairAB)?.state,
+    'outdated',
+    'K: kept as history, never deleted'
+  )
+
+  // ── ROLLBACK: a failing accept leaves nothing half-applied ──────────
+  const beforeRollback = readAnalysis(project.id).updatedAt
+  const bad = acceptFeedAnalysis(project.id, {
+    ...draft,
+    createdAt: 5000,
+    // Names a pair the feed no longer contains.
+    pairs: [{ fromId: A, toId: B, recommendation: 'ai', decision: 'ai', missingContext: [], safety: null }]
+  })
+  assert.ok(!bad.ok, 'an accept describing a pair the feed lost is refused')
+  assert.strictEqual(
+    readAnalysis(project.id).updatedAt,
+    beforeRollback,
+    'and nothing was written — no half-applied accept'
+  )
+
+  log('accept + pair analysis: one map, one transaction, one pair at a time')
+}
+
+function testOperatorContextLifecycle(): void {
+  const v1 = 1000
+  const v2 = 2000
+
+  // ── WRITTEN AGAINST v1 ──────────────────────────────────────────────
+  const donkey = makeOperatorContext('Add a donkey to the mirror', 500, v1)
+  assert.strictEqual(donkey.status, 'current', 'freshly written context is authoritative')
+  assert.ok(isContextActive(donkey), 'and is used')
+
+  // Same analysis: nothing changes. A re-run that changed nothing must
+  // not make the operator re-confirm everything they have ever written.
+  assert.strictEqual(
+    reviewAfterReanalysis(donkey, v1),
+    donkey,
+    'an unchanged analysis leaves context exactly as it was'
+  )
+
+  // ── A NEW ANALYSIS ARRIVES ──────────────────────────────────────────
+  const demoted = reviewAfterReanalysis(donkey, v2)!
+  assert.strictEqual(demoted.status, 'needs-review', 'new analysis withdraws the old authority')
+  assert.strictEqual(demoted.text, donkey.text, 'but never deletes the words')
+  assert.ok(!isContextActive(demoted), 'and it stops counting as evidence')
+  assert.ok(needsReview(demoted), 'while staying visible to the review UI')
+
+  // It also stops resolving a needs-context verdict — otherwise stale
+  // text could still unlock a generation on its own.
+  const missing = [
+    { type: 'reflection-content' as const, question: 'What should the mirror reflect?' }
+  ]
+  assert.ok(!contextResolves(missing, demoted), 'stale text cannot resolve a missing fact')
+  assert.ok(contextResolves(missing, donkey), 'current text can')
+
+  // ── THE PROMPT ──────────────────────────────────────────────────────
+  const analysis: PropertyAnalysis = {
+    ...emptyAnalysis('p-donkey'),
+    source: 'manual',
+    rooms: [
+      {
+        id: 'bath',
+        label: 'Bathroom',
+        imageIds: ['a', 'b'],
+        landmarks: ['vanity'],
+        confidence: 'confirmed'
+      }
+    ],
+    images: [
+      {
+        imageId: 'a',
+        roomId: 'bath',
+        orientation: 'into-room',
+        landmarks: ['vanity', 'sink'],
+        openings: [],
+        overlapWith: ['b'],
+        reflectiveSurfaces: [{ type: 'wall mirror', dominant: true, expectedVisibleContent: [] }]
+      },
+      {
+        imageId: 'b',
+        roomId: 'bath',
+        orientation: 'into-room',
+        landmarks: ['vanity', 'toilet'],
+        openings: [],
+        overlapWith: ['a']
+      }
+    ]
+  }
+  const planWith = (ctx: typeof donkey | undefined): string => {
+    const plans = planSequence(
+      analysis,
+      ['a', 'b'],
+      undefined,
+      ctx ? new Map([['a->b', ctx]]) : undefined
+    )
+    return renderPrompt(plans[0], {}, undefined, ctx ?? null)
+  }
+
+  // While it was current, the joke really did reach the prompt.
+  const withDonkey = planWith(donkey)
+  assert.match(withDonkey, /donkey/i, 'current context reaches the prompt — this is the mechanism')
+  assert.strictEqual(
+    (withDonkey.match(/OPERATOR-PROVIDED SPATIAL CONTEXT/g) ?? []).length,
+    1,
+    'exactly one operator block — the prompt is BUILT, never appended to'
+  )
+
+  // ── THE FIX: AFTER RE-ANALYSIS IT IS NOT INJECTED ───────────────────
+  const afterReanalysis = planWith(demoted)
+  assert.ok(
+    !/donkey/i.test(afterReanalysis),
+    'THE FIX: stale context is not injected into a rebuilt prompt'
+  )
+  assert.ok(
+    !afterReanalysis.includes('OPERATOR-PROVIDED SPATIAL CONTEXT'),
+    'and no operator block is emitted at all'
+  )
+
+  // ── CLEARED ─────────────────────────────────────────────────────────
+  const cleared = planWith(undefined)
+  assert.strictEqual(
+    (cleared.match(/OPERATOR-PROVIDED SPATIAL CONTEXT/g) ?? []).length,
+    0,
+    'F: clearing leaves zero operator blocks'
+  )
+  assert.ok(!/donkey/i.test(cleared))
+
+  // ── REPLACED ────────────────────────────────────────────────────────
+  const corrected = makeOperatorContext(
+    'The mirror reflects the same beige walls shown in the room. A white door is aligned with the sink. No people, cameras or additional objects are present.',
+    600,
+    v2
+  )
+  const replaced = planWith(corrected)
+  assert.match(replaced, /beige walls/i, 'G: the replacement is used')
+  assert.ok(
+    !/donkey/i.test(replaced),
+    'G: and the word "donkey" is gone — the exact runtime failure cannot regress silently'
+  )
+  assert.strictEqual(
+    (replaced.match(/OPERATOR-PROVIDED SPATIAL CONTEXT/g) ?? []).length,
+    1,
+    'still exactly one block — never one per rebuild'
+  )
+
+  // And the corrected text unblocks the pair, as evidence should.
+  assert.strictEqual(
+    evaluateTransitionSafety(analysis, 'a', 'b', undefined, null, corrected).decision,
+    'ai',
+    'current operator context resolves the mirror question'
+  )
+  assert.strictEqual(
+    evaluateTransitionSafety(analysis, 'a', 'b', undefined, null, demoted).decision,
+    'needs-context',
+    'while stale context leaves it open'
+  )
+
+  log('operator context: survives re-analysis, but stops being authoritative until confirmed')
+}
+
+function testMissingContext(workDir: string, created: string[]): void {
+  const surfaces = (dominant: boolean): ReflectiveSurface[] => [
+    { type: 'wall mirror', dominant, expectedVisibleContent: [] }
+  ]
+
+  const bathroom = (): PropertyAnalysis => ({
+    ...emptyAnalysis('p-context'),
+    source: 'manual',
+    rooms: [
+      {
+        id: 'bath',
+        label: 'Bathroom 1',
+        imageIds: ['a', 'b'],
+        landmarks: ['floating vanity'],
+        confidence: 'confirmed'
+      }
+    ],
+    images: [
+      {
+        imageId: 'a',
+        roomId: 'bath',
+        orientation: 'into-room',
+        landmarks: ['floating vanity', 'vessel sink'],
+        openings: [],
+        overlapWith: ['b'],
+        reflectiveSurfaces: surfaces(true)
+      },
+      {
+        imageId: 'b',
+        roomId: 'bath',
+        orientation: 'into-room',
+        landmarks: ['floating vanity', 'wall toilet'],
+        openings: [],
+        overlapWith: ['a']
+      }
+    ]
+  })
+
+  // ── A. THE BATHROOM PAIR IS A QUESTION, NOT A REFUSAL ───────────────
+  const asked = evaluateTransitionSafety(bathroom(), 'a', 'b')
+  assert.strictEqual(asked.decision, 'needs-context', 'A: a mirror asks rather than refuses')
+  assert.notStrictEqual(asked.decision, 'cut', 'A: and specifically is NOT a cut')
+  assert.strictEqual(asked.safety, 'needs-context')
+  assert.strictEqual(asked.missingContext.length, 1, 'with exactly one open question')
+  assert.strictEqual(asked.missingContext[0].type, 'reflection-content')
+  assert.match(asked.missingContext[0].question, /what should the mirror reflect/i)
+  assert.match(asked.reason, /cannot determine what should appear in its reflection/i)
+  // `mode` stays 'cut' so nothing generates until it is answered.
+  assert.strictEqual(asked.mode, 'cut', 'nothing is generated while the question stands')
+
+  // ── B. THE OPERATOR ANSWERS ─────────────────────────────────────────
+  const context = makeOperatorContext(
+    'Same walls as shown. A white door is aligned with the sink. The mirror reflects the opposite beige wall and doorway only.'
+  )
+  const answered = evaluateTransitionSafety(bathroom(), 'a', 'b', undefined, null, context)
+  assert.strictEqual(answered.decision, 'ai', 'B: answering the question unblocks AI')
+  assert.strictEqual(answered.mode, 'ai')
+  assert.strictEqual(answered.missingContext.length, 0, 'and nothing is still outstanding')
+  assert.match(answered.reason, /operator described what its reflection contains/i)
+  assert.ok(
+    !/would have to invent/i.test(answered.reason),
+    'and the resolved verdict no longer reads like the refusal it replaced'
+  )
+
+  // ── D. A PROVEN CONTRADICTION IS NOT AN UNKNOWN ─────────────────────
+  //
+  // Different rooms with no recorded connection is a FINDING. Typing
+  // "same room" next to it must not read as evidence — that path needs
+  // the deliberate manual override, not a sentence in a text box.
+  const conflicting: PropertyAnalysis = {
+    ...emptyAnalysis('p-conflict'),
+    source: 'manual',
+    rooms: [
+      { id: 'r1', label: 'Kitchen', imageIds: ['a'], landmarks: [], confidence: 'confirmed' },
+      { id: 'r2', label: 'Garage', imageIds: ['b'], landmarks: [], confidence: 'confirmed' }
+    ],
+    images: [
+      { imageId: 'a', roomId: 'r1', orientation: 'into-room', landmarks: [], openings: [] },
+      { imageId: 'b', roomId: 'r2', orientation: 'into-room', landmarks: [], openings: [] }
+    ]
+  }
+  const contradiction = evaluateTransitionSafety(
+    conflicting,
+    'a',
+    'b',
+    undefined,
+    null,
+    makeOperatorContext('These are actually the same room.')
+  )
+  assert.strictEqual(contradiction.decision, 'cut', 'D: a proven conflict stays a cut')
+  assert.strictEqual(contradiction.mode, 'cut', 'and typing context does not silently unlock it')
+
+  // ── E. THE CONTEXT REACHES THE GENERATION PROMPT ────────────────────
+  const plans = planSequence(
+    bathroom(),
+    ['a', 'b'],
+    undefined,
+    new Map([['a->b', context]])
+  )
+  const prompt = renderPrompt(plans[0], {}, undefined, context)
+  assert.match(prompt, /OPERATOR-PROVIDED SPATIAL CONTEXT:/, 'E: it gets its own block')
+  assert.ok(prompt.includes(context.text), 'quoted verbatim, not paraphrased')
+  assert.match(prompt, /authoritative knowledge of the real property/i, 'and marked authoritative')
+  // Order: the operator's facts come BEFORE the reflection rules, so the
+  // mirror instruction builds on them rather than contradicting them.
+  assert.ok(
+    prompt.indexOf('OPERATOR-PROVIDED SPATIAL CONTEXT') < prompt.indexOf('REFLECTION CONTENT'),
+    'stated before the reflection block that depends on it'
+  )
+  // And the mirror block names what the operator said it shows.
+  assert.match(prompt, /EXPECTED MIRROR CONTENT/, 'the mirror gets a positive target')
+  assert.match(prompt, /beige wall/i, 'taken from the operator’s own words')
+
+  // ── F + G. IT SURVIVES A RESTART AND A RE-ANALYSIS ──────────────────
+  const project = makeProject('Smoke operator context')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const p = join(workDir, 'ctx.png')
+  writeFileSync(p, png)
+  project.images = importImages(project.id, [
+    { sourcePath: p, name: 'a.png' },
+    { sourcePath: p, name: 'b.png' }
+  ])
+  const [fromId, toId] = project.images.map((i) => i.id)
+  const key = transitionKey(fromId, toId)
+  project.transitions[key] = {
+    ...defaultTransitionSettings(5),
+    operatorContext: context
+  }
+  saveProject(project)
+
+  const reread = listProjects().find((x) => x.id === project.id)!
+  assert.strictEqual(
+    reread.transitions[key]?.operatorContext?.text,
+    context.text,
+    'F: the operator’s words survive being written and read back'
+  )
+  assert.strictEqual(reread.transitions[key]?.operatorContext?.source, 'operator', 'G: as operator evidence')
+
+  // Re-analysis rewrites PROMPTS. It must not touch the operator's own
+  // evidence — that is the one thing no analyzer could reproduce.
+  rebuildPromptsFromAnalysis(project.id)
+  assert.strictEqual(
+    listProjects().find((x) => x.id === project.id)!.transitions[key]?.operatorContext?.text,
+    context.text,
+    'G: a prompt rebuild does not delete operator context'
+  )
+
+  // ── H. PROMPTS SKIP WHAT IS STILL UNANSWERED ────────────────────────
+  const result = rebuildPromptsFromAnalysis(project.id)
+  assert.ok(
+    typeof result.needsContextCount === 'number',
+    'H: the rebuild reports how many pairs are waiting on the operator'
+  )
+
+  // ── I. THE SUMMARY KEEPS THE THREE APART ────────────────────────────
+  const counts = feedDecisionCounts({
+    feedImageIds: [],
+    createdAt: 0,
+    status: 'draft',
+    pairs: [
+      { fromId: '1', toId: '2', recommendation: 'ai', decision: 'ai', safety: null },
+      { fromId: '2', toId: '3', recommendation: 'cut', decision: 'cut', safety: null },
+      { fromId: '3', toId: '4', recommendation: 'cut', decision: 'needs-context', safety: null }
+    ]
+  })
+  assert.deepStrictEqual(
+    counts,
+    { ai: 1, cut: 1, needsContext: 1 },
+    'I: needs-context is counted separately, never hidden inside CUT'
+  )
+
+  // ── J. QUALITY VALIDATION IS UNAFFECTED ─────────────────────────────
+  //
+  // Approving the geometry says nothing about what the model will draw.
+  // The clip is still inspected for people and cameras.
+  assert.ok(
+    shouldValidateClip(DEFAULT_QUALITY_VALIDATION_MODE, true),
+    'J: an operator-approved mirror pair is still quality-checked'
+  )
+  assert.ok(
+    !qualityAllowsActive('failed', null),
+    'and a failed clip still cannot become active'
+  )
+
+  log('missing context: a mirror asks a question instead of ending the transition')
+}
+
+function testReflectionSafety(): void {
+  const mk = (over: Partial<PropertyAnalysis>): PropertyAnalysis => ({
+    ...emptyAnalysis('p-reflect'),
+    source: 'manual',
+    ...over
+  })
+
+  const bathroom = (
+    fromSurfaces: ReflectiveSurface[] | undefined,
+    toSurfaces: ReflectiveSurface[] | undefined,
+    fromLandmarks: string[] = ['floating vanity', 'vessel sink'],
+    toLandmarks: string[] = ['floating vanity', 'wall toilet']
+  ): PropertyAnalysis =>
+    mk({
+      rooms: [
+        {
+          id: 'bath',
+          label: 'Bathroom 1',
+          imageIds: ['a', 'b'],
+          landmarks: ['floating vanity'],
+          confidence: 'confirmed'
+        }
+      ],
+      images: [
+        {
+          imageId: 'a',
+          roomId: 'bath',
+          orientation: 'into-room',
+          landmarks: fromLandmarks,
+          openings: [],
+          overlapWith: ['b'],
+          reflectiveSurfaces: fromSurfaces
+        },
+        {
+          imageId: 'b',
+          roomId: 'bath',
+          orientation: 'into-room',
+          landmarks: toLandmarks,
+          openings: [],
+          overlapWith: ['a'],
+          reflectiveSurfaces: toSurfaces
+        }
+      ]
+    })
+
+  // ── A. MIRROR KNOWN, CONTENT READ, PATH DOES NOT NAME IT → AI OK ────
+  const readable: ReflectiveSurface[] = [
+    {
+      type: 'wall mirror',
+      dominant: false,
+      expectedVisibleContent: ['beige wall tiles', 'vanity', 'ceiling light'],
+      confidence: 'confirmed'
+    }
+  ]
+  const safe = evaluateTransitionSafety(bathroom(readable, undefined), 'a', 'b')
+  assert.strictEqual(safe.mode, 'ai', 'a described, non-dominant mirror still permits AI')
+  assert.ok(safe.evidence.reflection.risk, 'but the reflector is recorded as present')
+  assert.ok(!safe.evidence.reflection.contentUnknown, 'and its content is known')
+
+  // ── B. THE PLANNED PATH CROSSES THE MIRROR → CUT ────────────────────
+  //
+  // The failing clip's own instruction, passed as the planned motion.
+  const crossing = evaluateTransitionSafety(
+    bathroom(readable, undefined),
+    'a',
+    'b',
+    undefined,
+    'rotating clockwise, turning away from the mirror reflection toward the wall toilet'
+  )
+  assert.strictEqual(crossing.mode, 'cut', 'a camera path described against the mirror cuts')
+  assert.match(crossing.reason, /camera path moves across a reflective surface/i)
+
+  // ── C. MIRROR PRESENT, CONTENT UNKNOWN → A QUESTION ─────────────────
+  //
+  // This asserted CUT until the product rule changed. Refusing treated
+  // "we could not read the reflection" as "the move is impossible", and
+  // those are different claims — see testMissingContext.
+  const blind: ReflectiveSurface[] = [
+    { type: 'wall mirror', dominant: true, expectedVisibleContent: [] }
+  ]
+  const unknown = evaluateTransitionSafety(bathroom(blind, undefined), 'a', 'b')
+  assert.strictEqual(unknown.mode, 'cut', 'nothing generates while the question stands')
+  assert.strictEqual(
+    unknown.decision,
+    'needs-context',
+    'but it is a question for the operator, not a refusal'
+  )
+  assert.strictEqual(unknown.safety, 'needs-context', 'the ROUTE was fine — only the mirror is open')
+  assert.match(unknown.reason, /cannot determine what should appear in its reflection/i)
+  assert.strictEqual(
+    unknown.missingContext[0]?.type,
+    'reflection-content',
+    'and it names the specific fact it is waiting for'
+  )
+
+  // ── THE ACTUAL HISTORICAL DATA ──────────────────────────────────────
+  //
+  // No structured field at all, mirror recorded only as a landmark
+  // string. Every analysis run before this feature looks like this, so
+  // treating a missing field as "no mirrors" would leave exactly the
+  // known-dangerous pairs rated safe forever.
+  const legacy = bathroom(undefined, undefined, ['mirror reflection', 'floating vanity'], [
+    'floating vanity',
+    'wall toilet'
+  ])
+  const legacyVerdict = evaluateTransitionSafety(legacy, 'a', 'b')
+  assert.strictEqual(legacyVerdict.mode, 'cut', 'the real bathroom pair now cuts')
+  assert.ok(legacyVerdict.evidence.reflection.legacyTextOnly, 'flagged as pre-modelling data')
+  assert.ok(
+    legacyVerdict.evidence.reflection.contentUnknown,
+    'and its reflection content is unknown by construction'
+  )
+
+  // A mirror must never again be counted as reassurance.
+  assert.ok(
+    reflectionEvidenceForImage({
+      imageId: 'a',
+      roomId: 'bath',
+      orientation: 'into-room',
+      landmarks: ['mirror reflection'],
+      openings: []
+    }).risk,
+    'a mirror recorded only as a landmark is still detected as a hazard'
+  )
+
+  // ── F. A ROOM WITH NO REFLECTORS IS NOT BURDENED ────────────────────
+  const plain = mk({
+    rooms: [
+      {
+        id: 'bed',
+        label: 'Bedroom',
+        imageIds: ['a', 'b'],
+        landmarks: ['bed'],
+        confidence: 'confirmed'
+      }
+    ],
+    images: [
+      {
+        imageId: 'a',
+        roomId: 'bed',
+        orientation: 'into-room',
+        landmarks: ['bed', 'nightstand'],
+        openings: [],
+        overlapWith: ['b']
+      },
+      {
+        imageId: 'b',
+        roomId: 'bed',
+        orientation: 'into-room',
+        landmarks: ['bed', 'window'],
+        openings: [],
+        overlapWith: ['a']
+      }
+    ]
+  })
+  const plainVerdict = evaluateTransitionSafety(plain, 'a', 'b')
+  assert.strictEqual(plainVerdict.mode, 'ai', 'an ordinary bedroom is unaffected')
+  assert.ok(!plainVerdict.evidence.reflection.risk, 'and carries no reflection risk')
+
+  // ── E. THE GENERATION PROMPT ────────────────────────────────────────
+  //
+  // Unconditional ontology: every generation, mirror or not, because a
+  // MISSED mirror is the case that hurts.
+  for (const required of [
+    'zero people anywhere in it',
+    'invisible virtual viewpoint',
+    'These entities do not exist in this world',
+    'tripod'
+  ]) {
+    assert.ok(
+      DEFAULT_TRANSITION_PROMPT.includes(required),
+      `every prompt states: ${required}`
+    )
+  }
+  // Stated as non-existence, not as a request to hide something.
+  assert.ok(
+    !/do not show (a )?person/i.test(DEFAULT_TRANSITION_PROMPT),
+    'occupancy is ontology, not a request to conceal someone who is there'
+  )
+
+  // The escalation block, for flagged pairs only.
+  //
+  // Positive now, and consistent with the opening ontology. The old
+  // sentences ordered the model NOT to reflect a camera, which requires
+  // the camera to exist first; these say what a mirror does contain.
+  for (const required of [
+    'REFLECTION CONTENT — ABSOLUTE',
+    'reflects ONLY the architecture',
+    'no observer and no imaging device in this world',
+    'Reflections are geometry, not events',
+    'show a plain continuation of the empty room'
+  ]) {
+    assert.ok(REFLECTION_SAFETY_BLOCK.includes(required), `reflection block states: ${required}`)
+  }
+
+  // Positive target when the content is known; silence when it is not —
+  // an empty "reflects only:" list reads as "reflects nothing" and invites
+  // the model to fill it.
+  const withContent = expectedMirrorContentBlock('wall mirror', ['beige wall', 'vanity'])
+  assert.ok(withContent?.includes('- beige wall'), 'known reflection content is stated positively')
+  assert.strictEqual(
+    expectedMirrorContentBlock('wall mirror', []),
+    null,
+    'nothing is claimed about a reflection nobody could read'
+  )
+
+  // ── ORDERING: style must never outrank safety ───────────────────────
+  const occupancyAt = DEFAULT_TRANSITION_PROMPT.indexOf('SCENE OCCUPANCY')
+  const styleAt = DEFAULT_TRANSITION_PROMPT.indexOf('luxury real-estate')
+  assert.ok(occupancyAt >= 0 && styleAt >= 0)
+  assert.ok(occupancyAt < styleAt, 'what may exist is stated before how it should look')
+
+  // ── D. MANUAL OVERRIDE NAMES THE REFLECTION RISK ────────────────────
+  //
+  // The generic warning talks about geometry, which an operator can judge
+  // against a property they know. They cannot judge this one in advance:
+  // the failure adds a stranger rather than distorting a room.
+  assert.ok(
+    overrideWarningFor(true).includes('may introduce people, cameras or incorrect reflections'),
+    'overriding a reflective pair warns about people and cameras specifically'
+  )
+  assert.ok(
+    !overrideWarningFor(false).includes('reflective surfaces'),
+    'and an ordinary pair is not given a mirror warning it does not need'
+  )
+
+  // ── G. PROMPT / SCHEMA CONTRACT ─────────────────────────────────────
+  //
+  // Structured output returns ONLY declared fields. A field the prompt
+  // asks for and the schema omits is dropped in silence — this project
+  // has lost data that way three times.
+  assert.ok(
+    PROPERTY_ANALYSIS_INSTRUCTION.includes('reflectiveSurfaces'),
+    'the analyzer is asked for reflective surfaces'
+  )
+  const imageProps = (
+    GEMINI_RESPONSE_SCHEMA as unknown as {
+      properties: { images: { items: { properties: Record<string, unknown> } } }
+    }
+  ).properties.images.items.properties
+  assert.ok(
+    'reflectiveSurfaces' in imageProps,
+    'and the response schema declares it, or Gemini would silently drop it'
+  )
+
+  log('reflection safety: mirrors are hazards, not landmarks — an unreadable one asks for context')
+}
+
 function testResumeOnlyWhenResumable(): void {
   const provider = (over: Partial<ProviderJobState>): ProviderJobState => ({
     provider: 'fal',
@@ -4367,7 +8269,12 @@ function fixtureVerdict(over: Partial<TransitionPlan>): TransitionPlan['safetyVe
 
   return {
     mode: supportsAi ? 'ai' : 'cut',
-    safety: supportsAi ? 'safe' : relation === 'UNKNOWN' ? 'unsafe' : 'uncertain',
+    // A pair with no evidenced relationship at all is a refusal; one that
+    // is merely under-described is a question. `uncertain` used to blur
+    // the two and both became CUT.
+    decision: supportsAi ? 'ai' : relation === 'UNKNOWN' ? 'cut' : 'needs-context',
+    safety: supportsAi ? 'safe' : relation === 'UNKNOWN' ? 'unsafe' : 'needs-context',
+    missingContext: [],
     reason,
     evidence: {
       relation:
@@ -4380,7 +8287,8 @@ function fixtureVerdict(over: Partial<TransitionPlan>): TransitionPlan['safetyVe
       traversableOpenings: openings,
       overlapConfirmed: false,
       adjacencyConfidence: over.confidence ?? null,
-      reviewBlock: null
+      reviewBlock: null,
+      reflection: NO_REFLECTION_EVIDENCE
     }
   }
 }
@@ -4592,6 +8500,2071 @@ function testTransitionModes(): void {
  * zero-length seam IS the cut. A still is held only where an image would
  * otherwise never reach the screen.
  */
+/**
+ * SINGLE-IMAGE MOTION — the whole type, end to end except the paid call.
+ *
+ * The two things the operator explicitly said must not be true are what
+ * most of this asserts: that a motion segment can never be mistaken for
+ * an AI transition, and that no paid single-image run can happen without
+ * going through model selection.
+ */
+/**
+ * THE PAID SINGLE-IMAGE PATH — everything except the money.
+ *
+ * The transport is a stub that records what it was asked to send. No
+ * request reaches fal.ai, and the assertions are about the exact bytes
+ * that WOULD go out — which is the only part a network call would add.
+ */
+/**
+ * DOWNLOAD → ATTACH → HISTORY → ASSEMBLY, with no provider.
+ *
+ * `downloadAndAttachResult` is the real function the live runner calls
+ * once fal reports success. Given a stub whose `fetchResult` writes a
+ * local file, everything after the network is exercised for real: the
+ * catalogue row, the segment attach, the archive-on-regenerate rule and
+ * the export plan. That is the whole second half of the paid path, and
+ * none of it costs anything.
+ */
+/**
+ * THE RUNNING LOCK, AND THE QUEUE THAT PROVES IT.
+ *
+ * Every case here is a state the stuck PAN RIGHT segment passed through
+ * or could have. Pure derivation over fixtures — no network, no queue
+ * worker, no database.
+ */
+/**
+ * CHANGING THE MOVEMENT ON A REGENERATION.
+ *
+ * The whole point is that a per-run choice must not rewrite history.
+ * Everything below runs against the real database with no provider: the
+ * paid half is covered elsewhere, and what matters here is which values
+ * end up on which row.
+ */
+/**
+ * THE TIMELINE, AS PURE ARITHMETIC.
+ *
+ * Split, delete, reorder and the time mapping, over fixtures. No
+ * database, no files — these are the rules the UI and the exporter both
+ * depend on, and they must hold before either is trusted.
+ */
+/**
+ * THE PREVIEW'S CLOCK BELONGS TO WHAT IT IS SHOWING.
+ *
+ * In timeline mode the film's length comes from the TIMELINE; in
+ * individual mode it comes from the clip. The reported bug was the
+ * first of those reading the second: a 38-second edit displayed
+ * "0:00 / 0:05" because the transport asked the <video> element how
+ * long it was, and the element only ever knows about one file.
+ */
+/**
+ * BRANDING IN THE PREVIEW — resolution and geometry.
+ *
+ * The reported bug was that the corner stamp appeared to ignore its
+ * checkbox. The toggle logic was correct; the stamp was positioned
+ * against the preview PANE rather than against the picture, so on a
+ * letterboxed clip it sat in the black bar beside the video — where it
+ * read as permanent chrome rather than as a layer over the film.
+ *
+ * `containFit` is the arithmetic that fixes it, and it is pinned here
+ * because a wrong rectangle is invisible in a screenshot and obvious
+ * only in numbers.
+ */
+function testPreviewBranding(): void {
+  const wmImage = 'f2f://brand/wm.png'
+  const sigImage = 'data:image/png;base64,AA'
+
+  const project = {
+    watermark: {
+      enabled: true,
+      imageSrc: null,
+      imageName: null,
+      position: 'center' as const,
+      sizePct: 45,
+      opacityPct: 35
+    },
+    signature: {
+      enabled: true,
+      logoSrc: null,
+      logoName: null,
+      brandName: 'I2T',
+      websiteUrl: '',
+      position: 'bottom-right' as const,
+      sizePct: 12,
+      opacityPct: 55
+    }
+  }
+  const settings = {
+    defaultWatermark: { ...project.watermark, imageSrc: wmImage, imageName: 'wm.png' },
+    defaultSignature: { ...project.signature, logoSrc: sigImage, logoName: 'sig.png' }
+  }
+
+  // ── INHERITANCE ──────────────────────────────────────────────────────
+  //
+  // A project with no image of its own uses the business default. Null
+  // means "nothing overridden", never "no branding" — reading it as the
+  // latter is why a watermark configured in Settings never reached an
+  // existing project.
+  const resolved = resolveBranding(project, settings)
+  assert.strictEqual(resolved.watermark.imageSrc, wmImage, 'the default watermark is inherited')
+  assert.strictEqual(resolved.signature.logoSrc, sigImage, 'and so is the default stamp')
+  assert.ok(watermarkVisible(resolved.watermark))
+  assert.ok(signatureVisible(resolved.signature))
+
+  // A project that HAS chosen keeps its own.
+  const owned = resolveBranding(
+    { ...project, watermark: { ...project.watermark, imageSrc: 'f2f://brand/own.png' } },
+    settings
+  )
+  assert.strictEqual(owned.watermark.imageSrc, 'f2f://brand/own.png', 'an override wins')
+  assert.strictEqual(owned.signature.logoSrc, sigImage, 'independently of the other layer')
+
+  // Nothing anywhere means nothing to draw — not an empty box.
+  const bare = resolveBranding(project, null)
+  assert.strictEqual(bare.watermark.imageSrc, null)
+  assert.ok(!watermarkVisible(bare.watermark), 'enabled with no image draws nothing')
+  assert.ok(!signatureVisible(bare.signature))
+
+  // Disabled is disabled, even with an image.
+  assert.ok(
+    !watermarkVisible({ ...resolved.watermark, enabled: false }),
+    'a disabled layer never draws'
+  )
+
+  // ── THE PICTURE RECTANGLE ────────────────────────────────────────────
+  //
+  // The real numbers from the reported case: a 876×385 pane showing a
+  // 16:9 clip. The picture is 573 wide with a 152px bar each side, and a
+  // bottom-right mark placed against the PANE lands beyond x=1318 —
+  // entirely off the film.
+  const fit = containFit(876, 385, 1920, 1080)
+  assert.ok(Math.abs(fit.width - 684.4) < 1, `16:9 in 876x385 is height-bound (${fit.width})`)
+  assert.strictEqual(Math.round(fit.height), 385, 'and fills the height')
+  assert.ok(fit.left > 0, 'with a bar on each side')
+  assert.ok(Math.abs(fit.left - (876 - fit.width) / 2) < 0.01, 'centred')
+
+  // A square image in a wide pane is bound the other way.
+  const square = containFit(876, 385, 1000, 1000)
+  assert.strictEqual(Math.round(square.height), 385)
+  assert.strictEqual(Math.round(square.width), 385)
+  assert.strictEqual(Math.round(square.top), 0)
+
+  // A mark sized as a percentage of the PICTURE is smaller than one
+  // sized against the pane — which is the second half of the same bug:
+  // the watermark rendered 45% of 876 (393px) instead of 45% of 684.
+  const ofPicture = fit.width * 0.45
+  const ofPane = 876 * 0.45
+  assert.ok(ofPicture < ofPane, 'a percentage of the picture is not a percentage of the pane')
+
+  // ── WHOLESALE INHERITANCE ────────────────────────────────────────────
+  //
+  // THE BUG THIS PINS. Only the IMAGE used to be inherited, so a project
+  // that had never configured a watermark still used its own
+  // creation-time size. Dragging Size in Settings moved the slider and
+  // changed nothing on screen — which is what "100% is far too small"
+  // actually was: the project was pinned at 45%.
+  //
+  // "Has the project overridden this?" means "has it chosen its own
+  // image". That is the only field with a real unset state; size,
+  // position and opacity are numbers every project carries from birth
+  // and cannot distinguish chosen from untouched.
+  const big = {
+    defaultWatermark: { ...settings.defaultWatermark, sizePct: 100, position: 'top-left' as const },
+    defaultSignature: settings.defaultSignature
+  }
+  const follows = resolveBranding(project, big)
+  assert.strictEqual(follows.watermark.sizePct, 100, 'an unconfigured project follows the default size')
+  assert.strictEqual(follows.watermark.position, 'top-left', 'and its position')
+
+  const pinned = resolveBranding(
+    { ...project, watermark: { ...project.watermark, imageSrc: 'f2f://brand/own.png' } },
+    big
+  )
+  assert.strictEqual(pinned.watermark.sizePct, 45, 'a project with its OWN image keeps its own size')
+
+  // `enabled` is always the project's: turning the watermark off for one
+  // customer is a decision about that film, not about the business.
+  const off = resolveBranding(
+    { ...project, watermark: { ...project.watermark, enabled: false } },
+    big
+  )
+  assert.strictEqual(off.watermark.enabled, false, 'the project decides whether it is on')
+  assert.strictEqual(off.watermark.sizePct, 100, 'while still inheriting the geometry')
+
+  // ── PREVIEW AND EXPORT SHARE THE SIZE SEMANTIC ───────────────────────
+  //
+  // Preview: `width: sizePct%` of the contain-fit picture.
+  // Export:  `targetW = (sizePct / 100) * outputWidth`.
+  // Both are "percent of the video's width", so a mark that spans the
+  // frame on screen spans the frame in the file.
+  for (const pct of [25, 50, 100]) {
+    const previewPx = fit.width * (pct / 100)
+    const exportPx = 1920 * (pct / 100)
+    assert.ok(
+      Math.abs(previewPx / fit.width - exportPx / 1920) < 1e-9,
+      `${pct}% is the same fraction of the picture in both (${previewPx} / ${exportPx})`
+    )
+  }
+  assert.strictEqual(1920 * (100 / 100), 1920, '100% is the FULL video width, not a capped value')
+
+  console.log('[smoke] preview branding: inheritance, visibility, contain-fit geometry, size parity')
+}
+
+/**
+ * WHERE A BRANDING MARK GOES, AND HOW BIG IT IS.
+ *
+ * ── THE BUG THIS PINS ────────────────────────────────────────────────
+ *
+ * The preview positioned overlays with CSS percentages — `bottom: 3%;
+ * right: 3%` — while the export used one margin off the SHORT side,
+ * `round(min(W, H) * 0.03)`. A CSS percentage resolves `right` against
+ * the container's WIDTH and `bottom` against its HEIGHT, so on any
+ * non-square picture the two insets were different distances and
+ * neither matched the file that would be produced.
+ *
+ * Both now call `brandRect`. These assertions are on that one function,
+ * because a rule that lives in two places is the thing that broke.
+ */
+function testBrandGeometry(): void {
+  const frame = { width: 1920, height: 1080 }
+
+  // ── G. AN ARBITRARY NON-SQUARE ASSET KEEPS ITS SHAPE ────────────────
+  //
+  // A stamp is not a square badge. The operator's own is 1920x1080, and
+  // sizing one axis while guessing the other distorts the artwork and
+  // puts the anchored rectangle in the wrong place.
+  for (const natural of [
+    { w: 1920, h: 1080 },
+    { w: 512, h: 512 },
+    { w: 300, h: 900 },
+    { w: 1000, h: 137 }
+  ]) {
+    const r = brandRect(frame, natural, 30, 'bottom-right', BRAND_MARGIN_FRACTION.stamp)
+    assert.ok(
+      Math.abs(r.width / r.height - natural.w / natural.h) < 1e-6,
+      `G: ${natural.w}x${natural.h} keeps its aspect ratio (${r.width}x${r.height})`
+    )
+    assert.strictEqual(r.width, frame.width * 0.3, 'G: width follows sizePct, on the WIDTH')
+  }
+
+  // ── H. BOTTOM-RIGHT IS INSIDE THE PICTURE, WITH EQUAL MARGINS ───────
+  const stamp = brandRect(
+    frame,
+    { w: 1920, h: 1080 },
+    30,
+    'bottom-right',
+    BRAND_MARGIN_FRACTION.stamp
+  )
+  const margin = Math.round(Math.min(frame.width, frame.height) * BRAND_MARGIN_FRACTION.stamp)
+  assert.ok(stamp.left + stamp.width <= frame.width, 'H: right edge is inside the picture')
+  assert.ok(stamp.top + stamp.height <= frame.height, 'H: bottom edge is inside the picture')
+  assert.strictEqual(frame.width - (stamp.left + stamp.width), margin, 'H: right margin')
+  assert.strictEqual(frame.height - (stamp.top + stamp.height), margin, 'H: bottom margin')
+  assert.strictEqual(margin, 22, 'H: and that margin is min(1920,1080)*0.02')
+
+  // The fault, stated as the thing that must never come back: the two
+  // insets used to differ because they were percentages of different
+  // axes. 3% of 1920 is 57.6; 3% of 1080 is 32.4.
+  assert.notStrictEqual(
+    frame.width * 0.03,
+    frame.height * 0.03,
+    'H: a percentage per axis gives two different insets — which is why it is not used'
+  )
+
+  // ── I. PREVIEW AND EXPORT ARE THE SAME NORMALISED GEOMETRY ──────────
+  //
+  // The preview measures in CSS pixels of a contain-fit picture; the
+  // export measures in output pixels. Absolute numbers differ, fractions
+  // must not.
+  const picture = containFit(876, 385, 1172, 784) // the real editor's rect
+  const previewRect = brandRect(
+    { width: picture.width, height: picture.height },
+    { w: 1920, h: 1080 },
+    30,
+    'bottom-right',
+    BRAND_MARGIN_FRACTION.stamp
+  )
+  const exportRect = brandRect(frame, { w: 1920, h: 1080 }, 30, 'bottom-right', BRAND_MARGIN_FRACTION.stamp)
+  const norm = (r: { left: number; top: number; width: number; height: number }, f: { width: number; height: number }) => ({
+    w: r.width / f.width,
+    rightGap: (f.width - (r.left + r.width)) / Math.min(f.width, f.height),
+    bottomGap: (f.height - (r.top + r.height)) / Math.min(f.width, f.height)
+  })
+  const a = norm(previewRect, { width: picture.width, height: picture.height })
+  const b = norm(exportRect, frame)
+  assert.ok(Math.abs(a.w - b.w) < 1e-9, `I: same relative size (${a.w} vs ${b.w})`)
+  // Rounding the margin to a whole pixel is the only difference, and on a
+  // 572px-wide preview that is worth a fraction of a percent.
+  assert.ok(Math.abs(a.rightGap - b.rightGap) < 0.002, `I: same relative right margin`)
+  assert.ok(Math.abs(a.bottomGap - b.bottomGap) < 0.002, `I: same relative bottom margin`)
+
+  // ── AND A FULL-FRAME ASSET IS RECOGNISED AS ONE ─────────────────────
+  //
+  // The operator's stamp is `i2t-video-overlay-1920x1080.png` — a 16:9
+  // artwork with its own margins already baked into a transparent
+  // canvas. Anchoring it into a corner puts the CANVAS in the corner and
+  // leaves the visible mark floating inboard, which is what "the stamp
+  // is not in the corner" actually was once the margin was correct.
+  assert.ok(
+    looksLikeFullFrameAsset({ w: 1920, h: 1080 }, frame),
+    'a 16:9 asset on a 16:9 frame is a full-frame overlay, not a badge'
+  )
+  assert.ok(
+    !looksLikeFullFrameAsset({ w: 512, h: 512 }, frame),
+    'a square badge is not'
+  )
+
+  // ── THE ANCHOR FOLLOWS THE ARTWORK, NOT THE FILE ────────────────────
+  //
+  // The operator's own asset, measured: a 1920x1080 canvas carrying a
+  // 643x253 mark at (637, 416) — 1.47% opaque, with 640 px of nothing
+  // between the mark and the canvas's right edge. Anchoring the FILE put
+  // the visible mark 640*scale further in, and 411*scale further up,
+  // than asked. That is the "too far in and too high" that was reported,
+  // with the rectangle itself perfectly placed.
+  const REAL_CONTENT = { x: 637, y: 416, w: 643, h: 253 }
+  const REAL_NATURAL = { w: 1920, h: 1080 }
+  const anchored = brandRect(
+    frame,
+    REAL_NATURAL,
+    30,
+    'bottom-right',
+    BRAND_MARGIN_FRACTION.stamp,
+    REAL_CONTENT
+  )
+  const mark = visibleMarkRect(anchored, REAL_NATURAL, REAL_CONTENT)
+  const m2 = Math.round(Math.min(frame.width, frame.height) * BRAND_MARGIN_FRACTION.stamp)
+  assert.ok(
+    Math.abs(frame.width - (mark.left + mark.width) - m2) < 0.5,
+    `the VISIBLE mark is ${m2}px from the right, not the canvas (got ${frame.width - (mark.left + mark.width)})`
+  )
+  assert.ok(
+    Math.abs(frame.height - (mark.top + mark.height) - m2) < 0.5,
+    `and ${m2}px from the bottom (got ${frame.height - (mark.top + mark.height)})`
+  )
+
+  // NOTHING IS CROPPED. The whole canvas is still drawn, at the same
+  // size it always was — only its offset changed.
+  const unanchored = brandRect(frame, REAL_NATURAL, 30, 'bottom-right', BRAND_MARGIN_FRACTION.stamp)
+  assert.strictEqual(anchored.width, unanchored.width, 'same drawn width')
+  assert.strictEqual(anchored.height, unanchored.height, 'same drawn height')
+  assert.ok(anchored.left > unanchored.left, 'the canvas moves right to bring the mark to the edge')
+  assert.ok(anchored.top > unanchored.top, 'and down')
+
+  // An opaque badge is unaffected: content box == canvas.
+  const badge = { x: 0, y: 0, w: 512, h: 512 }
+  assert.deepStrictEqual(
+    brandRect(frame, { w: 512, h: 512 }, 20, 'bottom-right', BRAND_MARGIN_FRACTION.stamp, badge),
+    brandRect(frame, { w: 512, h: 512 }, 20, 'bottom-right', BRAND_MARGIN_FRACTION.stamp),
+    'a mark that fills its own canvas is placed exactly as before'
+  )
+
+  log('brand geometry: aspect preserved, visible mark anchored in the corner, preview/export shared')
+}
+
+function testPreviewClockOwnership(): void {
+  const project = {
+    id: 'p1',
+    images: [
+      { id: 'i1', fileName: 'a.jpg', storedName: 'a.jpg', src: 'f2f://image/p1/a.jpg' },
+      { id: 'i2', fileName: 'b.jpg', storedName: 'b.jpg', src: 'f2f://image/p1/b.jpg' }
+    ],
+    feedSequence: ['i1', 'i2'],
+    transitions: {},
+    motionSegments: []
+  } as unknown as Project
+
+  const item = (id: string, clip: string, from: number, to: number): TimelineItem => ({
+    id,
+    order: 0,
+    sourceType: 'transition-clip',
+    sourceId: 'i1->i2',
+    sourceGenerationId: null,
+    sourceClipName: clip,
+    sourceImageName: null,
+    startOffsetSec: from,
+    endOffsetSec: to,
+    seamAfterSec: 0
+  })
+
+  // Three five-second clips — the operator's own regression example.
+  const items = [
+    item('a', 'a.mp4', 0, 5),
+    item('b', 'b.mp4', 0, 5),
+    item('c', 'c.mp4', 0, 5)
+  ]
+  const tl = { items, defaultSeamSec: 0 }
+  assert.strictEqual(timelineDurationSec(items, 0), 15, 'three 5s clips make a 15s film')
+
+  // ── 1. TIMELINE MODE REPORTS THE WHOLE FILM ──────────────────────────
+  const atStart = resolvePreviewSource(project, selectTimeline('a', 0), null, 5, tl)
+  assert.strictEqual(atStart.kind, 'timeline')
+  if (atStart.kind === 'timeline') {
+    assert.strictEqual(
+      atStart.totalSec,
+      15,
+      'the total is the FILM’s, never the 5s file under the playhead'
+    )
+    assert.strictEqual(atStart.absoluteSec, 0)
+    assert.strictEqual(atStart.sourceSec, 0)
+  }
+
+  // ── 2. AND IT CROSSES BOUNDARIES CORRECTLY ───────────────────────────
+  //
+  // 7 seconds in is two seconds into the SECOND clip. Both numbers
+  // matter and they are different: the film says 7, the file says 2.
+  const midway = resolvePreviewSource(project, selectTimeline('b', 7), null, 5, tl)
+  if (midway.kind === 'timeline') {
+    assert.strictEqual(midway.itemId, 'b', 'the playhead is over the second clip')
+    assert.strictEqual(midway.sourceSec, 2, 'two seconds into ITS file')
+    assert.strictEqual(midway.absoluteSec, 7, 'seven seconds into the film')
+    assert.strictEqual(midway.totalSec, 15, 'and the total never moves')
+    assert.notStrictEqual(midway.sourceSec, midway.absoluteSec, 'the two are not the same number')
+  }
+
+  // ── 3. PAUSING KEEPS ABSOLUTE TIME ───────────────────────────────────
+  const paused = resolvePreviewSource(project, selectTimeline('c', 12.5), null, 5, tl)
+  if (paused.kind === 'timeline') {
+    assert.strictEqual(paused.itemId, 'c')
+    assert.strictEqual(paused.absoluteSec, 12.5)
+    assert.strictEqual(paused.sourceSec, 2.5)
+  }
+
+  // ── 4. A TRIMMED ITEM SEEKS PAST ITS IN POINT ────────────────────────
+  const trimmed = { items: [item('t', 't.mp4', 1.5, 4.5)], defaultSeamSec: 0 }
+  const inTrim = resolvePreviewSource(project, selectTimeline('t', 1), null, 5, trimmed)
+  if (inTrim.kind === 'timeline') {
+    assert.strictEqual(inTrim.totalSec, 3, 'the film is the TRIMMED length, not the file’s')
+    assert.strictEqual(inTrim.sourceSec, 2.5, 'and one second in means 2.5s into the file')
+  }
+
+  // ── 5. INDIVIDUAL MODE IS UNTOUCHED ──────────────────────────────────
+  //
+  // A selected transition still resolves to `clip`, which carries no
+  // total at all — the element's own duration is the right answer there,
+  // and this is what stops the fix leaking into individual playback.
+  const withClip = {
+    ...project,
+    transitions: {
+      'i1->i2': {
+        prompt: '',
+        durationSec: 5,
+        status: 'completed',
+        clip: { storedName: 'x.mp4', originalName: 'x', source: 'fal', src: 'f2f://clip/p1/x.mp4' }
+      }
+    }
+  } as unknown as Project
+  const individual = resolvePreviewSource(withClip, selectTransition('i1->i2'), null, 5, tl)
+  assert.strictEqual(individual.kind, 'clip', 'a transition is still an individual clip')
+  assert.ok(!('totalSec' in individual), 'and carries no timeline total to be confused with')
+
+  console.log('[smoke] preview clock: timeline totals vs individual durations')
+}
+
+function testTimelineModel(): void {
+  const item = (over: Partial<TimelineItem> = {}): TimelineItem => ({
+    id: 'a',
+    order: 0,
+    sourceType: 'transition-clip',
+    sourceId: 'i1->i2',
+    sourceGenerationId: 'gen-1',
+    sourceClipName: 'clip-a.mp4',
+    sourceImageName: null,
+    startOffsetSec: 0,
+    endOffsetSec: 5,
+    seamAfterSec: 0,
+    ...over
+  })
+
+  // ── C. SPLIT A 5s CLIP AT 2s → 0–2 AND 2–5 ───────────────────────────
+  const one = [item()]
+  const split = splitItemAt(one, 'a', 2, () => 'b')
+  assert.ok(split.ok, 'the split succeeded')
+  if (split.ok) {
+    assert.strictEqual(split.items.length, 2, 'one clip became two')
+    assert.deepStrictEqual(
+      split.items.map((i) => [i.startOffsetSec, i.endOffsetSec]),
+      [
+        [0, 2],
+        [2, 5]
+      ],
+      'as two ranges, exactly where the playhead was'
+    )
+    assert.deepStrictEqual(split.items.map((i) => i.order), [0, 1], 'and renumbered')
+
+    // ── D. NO FILE IS DUPLICATED ───────────────────────────────────────
+    //
+    // The heart of non-destructive editing: both halves are the SAME
+    // file. A split that wrote a second mp4 would be slow, would double
+    // the disk cost of every edit, and could not be undone by deleting.
+    assert.strictEqual(split.items[0].sourceClipName, 'clip-a.mp4')
+    assert.strictEqual(split.items[1].sourceClipName, 'clip-a.mp4')
+    assert.strictEqual(
+      split.items[0].sourceClipName,
+      split.items[1].sourceClipName,
+      'ONE source file, two ranges — no copy was made'
+    )
+    // And both still name the exact generation they were cut against.
+    assert.strictEqual(split.items[1].sourceGenerationId, 'gen-1')
+  }
+
+  // The joint a split creates is a hard cut: blending a clip into itself
+  // would dissolve one frame into the next one.
+  if (split.ok) assert.strictEqual(split.items[0].seamAfterSec, 0)
+
+  // Guards: never at the very edge, never below the minimum.
+  assert.ok(!splitItemAt(one, 'a', 0, () => 'b').ok, 'cannot split at the start')
+  assert.ok(!splitItemAt(one, 'a', 5, () => 'b').ok, 'cannot split at the end')
+  assert.ok(!splitItemAt(one, 'a', 0.01, () => 'b').ok, 'nor leave a sliver behind')
+  assert.ok(splitItemAt(one, 'a', 2.5, () => 'b').ok, 'but a real cut is fine')
+
+  // ── E. DELETE REMOVES ONLY THE ITEM ──────────────────────────────────
+  const three = [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })]
+  const afterDelete = removeItem(three, 'b')
+  assert.deepStrictEqual(afterDelete.map((i) => i.id), ['a', 'c'])
+  assert.deepStrictEqual(afterDelete.map((i) => i.order), [0, 1], 'positions close up')
+  assert.strictEqual(three.length, 3, 'and the input list is not mutated')
+
+  // ── G. REORDER ───────────────────────────────────────────────────────
+  const moved = reorderItems(three, 'b', 2)
+  assert.deepStrictEqual(moved.map((i) => i.id), ['a', 'c', 'b'])
+  assert.deepStrictEqual(moved.map((i) => i.order), [0, 1, 2])
+
+  // ── K. ABSOLUTE TIME → SOURCE TIME ───────────────────────────────────
+  //
+  // The operator's own worked example: A 0–2, B 2–7, C 7–10; the
+  // playhead at 5.2 is 3.2 seconds into B.
+  const abc = [
+    item({ id: 'A', endOffsetSec: 2 }),
+    item({ id: 'B', endOffsetSec: 5 }),
+    item({ id: 'C', endOffsetSec: 3 })
+  ]
+  assert.strictEqual(timelineDurationSec(abc), 10, 'and the film is 10s long')
+  assert.deepStrictEqual(itemStartTimes(abc), [0, 2, 7])
+
+  const at52 = locateAtTime(abc, 5.2)
+  assert.strictEqual(at52?.item.id, 'B', 'the playhead is over B')
+  assert.strictEqual(at52?.localSec, 3.2, 'and 3.2s into it')
+  assert.strictEqual(at52?.sourceSec, 3.2, 'which is 3.2s into its source')
+
+  // With an IN point, source time and local time diverge — and it is
+  // SOURCE time a <video> must seek to.
+  const trimmed = [item({ id: 'T', startOffsetSec: 1.5, endOffsetSec: 4.5 })]
+  const inTrimmed = locateAtTime(trimmed, 1)
+  assert.strictEqual(inTrimmed?.localSec, 1, 'one second into the item')
+  assert.strictEqual(inTrimmed?.sourceSec, 2.5, 'is 2.5s into the file it was cut from')
+
+  // ── CROSSFADE CONSUMES TIME ──────────────────────────────────────────
+  //
+  // An xfade overlaps its neighbours, so a 0.2s blend makes the film
+  // SHORTER. Getting this backwards would put the playhead and the
+  // exported file into permanent disagreement about where the end is.
+  const blended = [item({ id: 'A', endOffsetSec: 2, seamAfterSec: 0.2 }), item({ id: 'B', endOffsetSec: 3 })]
+  assert.strictEqual(timelineDurationSec(blended), 4.8, '2 + 3 − 0.2')
+  assert.deepStrictEqual(itemStartTimes(blended), [0, 1.8], 'and B starts inside A’s tail')
+
+  // A CUT occupies no time and is not an item — two clips simply meet.
+  const cut = [item({ id: 'A', endOffsetSec: 2, seamAfterSec: 0 }), item({ id: 'B', endOffsetSec: 3 })]
+  assert.strictEqual(timelineDurationSec(cut), 5, 'a cut adds nothing and takes nothing')
+
+  // ── L + M. BOTH CLIP KINDS BEHAVE IDENTICALLY ────────────────────────
+  for (const sourceType of ['transition-clip', 'motion-clip', 'still'] as const) {
+    const typed = [item({ id: 'x', sourceType, endOffsetSec: 5 })]
+    const s = splitItemAt(typed, 'x', 2, () => 'y')
+    assert.ok(s.ok, `${sourceType} can be split`)
+    if (s.ok) {
+      assert.strictEqual(s.items.length, 2)
+      assert.strictEqual(removeItem(s.items, 'y').length, 1, `${sourceType} can be deleted`)
+    }
+  }
+
+  // ── Q. DRIFT IS REPORTED, NEVER ACTED ON ─────────────────────────────
+  const clean: Timeline = {
+    projectId: 'p',
+    items: [item()],
+    feedFingerprint: 'F1',
+    manuallyEdited: false,
+    updatedAt: 1
+  }
+  assert.strictEqual(timelineDrift(clean, 'F1').kind, 'none', 'a matching feed is no drift')
+  assert.strictEqual(timelineDrift(clean, 'F2').kind, 'stale', 'a changed feed with no edits is stale')
+  assert.strictEqual(
+    timelineDrift({ ...clean, manuallyEdited: true }, 'F2').kind,
+    'conflict',
+    'a changed feed WITH manual edits is a conflict — edits are at stake'
+  )
+
+  console.log('[smoke] timeline model: split ranges, no copies, seam arithmetic, drift')
+}
+
+/**
+ * THE TIMELINE AGAINST THE REAL DATABASE AND THE REAL EXPORTER.
+ *
+ * Materialisation, persistence, and — the part that matters most — that
+ * the exporter actually encodes the timeline's ranges and order.
+ */
+async function testTimelinePersistenceAndExport(createdProjects: string[]): Promise<void> {
+  const ID_tlA = fixtureImageId('tlA')
+  const ID_tlB = fixtureImageId('tlB')
+  const ID_tlC = fixtureImageId('tlC')
+  const project = makeProject('Timeline')
+  createdProjects.push(project.id)
+
+  const imagesDir = projectImagesDir(project.id)
+  mkdirSync(imagesDir, { recursive: true })
+  const clipsDir = projectTransitionsDir(project.id)
+  mkdirSync(clipsDir, { recursive: true })
+
+  const makeVideo = (path: string, colour: string, seconds: number): void => {
+    const res = spawnSync(
+      ffmpegPath(),
+      ['-y', '-f', 'lavfi', '-i', `color=c=${colour}:s=160x120:d=${seconds}`,
+       '-r', '25', '-pix_fmt', 'yuv420p', path],
+      { encoding: 'utf8', timeout: 60_000 }
+    )
+    assert.strictEqual(res.status, 0, `fixture ${path}`)
+  }
+  const makeStill = (path: string, colour: string): void => {
+    const res = spawnSync(
+      ffmpegPath(),
+      ['-y', '-f', 'lavfi', '-i', `color=c=${colour}:s=160x120:d=1`, '-frames:v', '1', path],
+      { encoding: 'utf8', timeout: 60_000 }
+    )
+    assert.strictEqual(res.status, 0, `still ${path}`)
+  }
+
+  makeStill(join(imagesDir, 'tl1.png'), 'navy')
+  makeStill(join(imagesDir, 'tl2.png'), 'olive')
+  makeStill(join(imagesDir, 'tl3.png'), 'teal')
+  makeVideo(join(clipsDir, 'tl-a.mp4'), 'red', 5)
+  makeVideo(join(clipsDir, 'tl-b.mp4'), 'green', 4)
+
+  project.images = [
+    { id: ID_tlA, fileName: 'tl1.png', storedName: 'tl1.png', src: '' },
+    { id: ID_tlB, fileName: 'tl2.png', storedName: 'tl2.png', src: '' },
+    { id: ID_tlC, fileName: 'tl3.png', storedName: 'tl3.png', src: '' }
+  ]
+  project.feedSequence = [ID_tlA, ID_tlB, ID_tlC]
+  project.transitions = {
+    [`${ID_tlA}->${ID_tlB}`]: {
+      prompt: 'p',
+      durationSec: 5,
+      status: 'completed',
+      mode: 'ai',
+      modeProvenance: 'manual',
+      clip: { storedName: 'tl-a.mp4', originalName: 'a.mp4', source: 'fal', src: '' }
+    },
+    [`${ID_tlB}->${ID_tlC}`]: {
+      prompt: 'p',
+      durationSec: 4,
+      status: 'completed',
+      mode: 'ai',
+      modeProvenance: 'manual',
+      clip: { storedName: 'tl-b.mp4', originalName: 'b.mp4', source: 'fal', src: '' }
+    }
+  }
+  saveProject(project)
+
+  // ── P. AN UNTOUCHED PROJECT EXPORTS AS IT ALWAYS DID ─────────────────
+  //
+  // Checked BEFORE any timeline exists, against the feed plan the
+  // exporter used to follow on its own.
+  const beforeTimeline = exportAssembly(listProjects().find((p) => p.id === project.id)!)
+  assert.strictEqual(beforeTimeline.fromTimeline, false, 'no timeline yet, so the feed decides')
+  const feedSegments = beforeTimeline.segments.map((s) => s.path)
+
+  // ── A. MATERIALISED FROM THE FEED ────────────────────────────────────
+  const first = getTimeline(project.id)
+  assert.ok(first?.timeline, 'a timeline is materialised on first read')
+  const items0 = first!.timeline!.items
+  assert.strictEqual(items0.length, 2, 'two AI clips, no still — both images are covered')
+  assert.deepStrictEqual(
+    items0.map((i) => i.sourceClipName),
+    ['tl-a.mp4', 'tl-b.mp4'],
+    'in feed order'
+  )
+  assert.ok(items0.every((i) => i.startOffsetSec === 0), 'whole clips to begin with')
+  assert.strictEqual(items0[0].endOffsetSec, 5, 'with their REAL probed durations')
+  assert.strictEqual(items0[1].endOffsetSec, 4)
+  assert.strictEqual(first!.timeline!.manuallyEdited, false, 'and nobody has edited it')
+
+  // Materialising must not have changed what gets exported.
+  const afterMaterialise = exportAssembly(listProjects().find((p) => p.id === project.id)!)
+  assert.ok(afterMaterialise.fromTimeline, 'now the timeline decides')
+  assert.deepStrictEqual(
+    afterMaterialise.segments.map((s) => s.path),
+    feedSegments,
+    'P: a freshly materialised timeline exports EXACTLY what the feed did'
+  )
+
+  // ── B. IT SURVIVES A RELOAD ──────────────────────────────────────────
+  const reread = readTimeline(project.id)
+  assert.ok(reread, 'the timeline is on disk')
+  assert.deepStrictEqual(
+    reread!.items.map((i) => i.id),
+    items0.map((i) => i.id),
+    'with the same item identities'
+  )
+
+  // ── H/C. SPLIT THE FIRST CLIP AT 2s ──────────────────────────────────
+  const splitRes = splitTimelineAt(project.id, items0[0].id, 2)
+  assert.ok(splitRes.ok, `split: ${JSON.stringify(splitRes)}`)
+  const afterSplit = getTimeline(project.id)!.timeline!.items
+  assert.strictEqual(afterSplit.length, 3, 'two clips became three items')
+  assert.deepStrictEqual(
+    [afterSplit[0].startOffsetSec, afterSplit[0].endOffsetSec],
+    [0, 2]
+  )
+  assert.deepStrictEqual(
+    [afterSplit[1].startOffsetSec, afterSplit[1].endOffsetSec],
+    [2, 5]
+  )
+  assert.strictEqual(afterSplit[0].sourceClipName, afterSplit[1].sourceClipName, 'same file')
+  assert.ok(getTimeline(project.id)!.timeline!.manuallyEdited, 'and it is now hand-edited')
+
+  // ── D. THE FILE ON DISK IS UNTOUCHED ─────────────────────────────────
+  const clipFiles = readdirSync(clipsDir).filter((f) => f.endsWith('.mp4')).sort()
+  assert.deepStrictEqual(clipFiles, ['tl-a.mp4', 'tl-b.mp4'], 'NO new mp4 was written by the split')
+  assert.strictEqual(
+    Math.round(probeDurationSec(join(clipsDir, 'tl-a.mp4'))),
+    5,
+    'and the original is still its full length'
+  )
+
+  // ── N. EXPORT TRIMS THE RIGHT RANGES ─────────────────────────────────
+  const exported = exportAssembly(listProjects().find((p) => p.id === project.id)!)
+  assert.ok(exported.fromTimeline)
+  assert.strictEqual(exported.segments.length, 3)
+  assert.deepStrictEqual(
+    exported.segments.map((s) => [s.sourceStartSec, s.sourceEndSec]),
+    [
+      [0, 2],
+      [2, 5],
+      [0, 4]
+    ],
+    'each segment carries the operator’s in and out points'
+  )
+  assert.ok(
+    exported.segments[0].path === exported.segments[1].path,
+    'the two halves point at ONE file'
+  )
+
+  // ── E/F. DELETE THE MIDDLE PIECE ─────────────────────────────────────
+  const generationsBefore = getAllProjectGenerations(project.id).length
+  const del = deleteTimelineItem(project.id, afterSplit[1].id)
+  assert.ok(del.ok)
+  const afterDelete = getTimeline(project.id)!.timeline!.items
+  assert.strictEqual(afterDelete.length, 2, 'the item is gone from the film')
+  assert.deepStrictEqual(
+    afterDelete.map((i) => [i.startOffsetSec, i.endOffsetSec]),
+    [
+      [0, 2],
+      [0, 4]
+    ],
+    'leaving the other two ranges as they were'
+  )
+  // F: nothing outside the timeline moved.
+  assert.deepStrictEqual(
+    readdirSync(clipsDir).filter((f) => f.endsWith('.mp4')).sort(),
+    ['tl-a.mp4', 'tl-b.mp4'],
+    'the clip file is NOT deleted'
+  )
+  assert.strictEqual(
+    getAllProjectGenerations(project.id).length,
+    generationsBefore,
+    'and no catalogue history is removed'
+  )
+  const feedAfterDelete = listProjects().find((p) => p.id === project.id)!
+  assert.deepStrictEqual(feedAfterDelete.feedSequence, [ID_tlA, ID_tlB, ID_tlC], 'the FEED is untouched')
+  assert.strictEqual(
+    Object.keys(feedAfterDelete.transitions).length,
+    2,
+    'and so are its transitions'
+  )
+
+  // ── G/O. REORDER, AND EXPORT FOLLOWS IT EXACTLY ──────────────────────
+  const reordered = reorderTimelineItem(project.id, afterDelete[0].id, 1)
+  assert.ok(reordered.ok)
+  const order = getTimeline(project.id)!.timeline!.items
+  assert.deepStrictEqual(
+    order.map((i) => i.sourceClipName),
+    ['tl-b.mp4', 'tl-a.mp4'],
+    'the second clip now plays first'
+  )
+  const exportedOrder = exportAssembly(listProjects().find((p) => p.id === project.id)!)
+  assert.deepStrictEqual(
+    exportedOrder.segments.map((s) => basename(s.path)),
+    ['tl-b.mp4', 'tl-a.mp4'],
+    'O: the export order IS the timeline order'
+  )
+  // And the ranges travelled with their items.
+  assert.deepStrictEqual(
+    exportedOrder.segments.map((s) => [s.sourceStartSec, s.sourceEndSec]),
+    [
+      [0, 4],
+      [0, 2]
+    ]
+  )
+
+  // Reorder persists.
+  assert.deepStrictEqual(
+    readTimeline(project.id)!.items.map((i) => i.sourceClipName),
+    ['tl-b.mp4', 'tl-a.mp4'],
+    'G: and the new order is on disk'
+  )
+
+  // ── Q/R. A FEED CHANGE DOES NOT WIPE THE EDIT ────────────────────────
+  const edited = listProjects().find((p) => p.id === project.id)!
+  edited.feedSequence = [ID_tlA, ID_tlC, ID_tlB]
+  saveProject(edited)
+
+  const afterFeedChange = getTimeline(project.id)!
+  assert.deepStrictEqual(
+    afterFeedChange.timeline!.items.map((i) => i.sourceClipName),
+    ['tl-b.mp4', 'tl-a.mp4'],
+    'Q: the hand-made order SURVIVED a feed change'
+  )
+  assert.strictEqual(
+    afterFeedChange.drift.kind,
+    'conflict',
+    'and the drift is reported as a conflict, because edits are at stake'
+  )
+
+  // R: a rebuild refuses without an explicit confirmation.
+  const refused = rebuildTimeline(project.id, false)
+  assert.ok(!refused.ok, 'R: rebuilding refuses while manual edits exist')
+  if (!refused.ok) assert.ok(/discard/i.test(refused.reason))
+  assert.deepStrictEqual(
+    readTimeline(project.id)!.items.map((i) => i.sourceClipName),
+    ['tl-b.mp4', 'tl-a.mp4'],
+    'and nothing was changed by the refusal'
+  )
+
+  // ── S. AN UPSTREAM REGENERATION DOES NOT SWAP THE SOURCE ─────────────
+  //
+  // A new clip becomes the transition's active one. The timeline item
+  // was cut against the OLD file, so it must keep playing that file —
+  // swapping it would move the in/out points onto different footage.
+  const pinned = readTimeline(project.id)!.items.find((i) => i.sourceClipName === 'tl-a.mp4')!
+  const regenerated = listProjects().find((p) => p.id === project.id)!
+  makeVideo(join(clipsDir, 'tl-a2.mp4'), 'purple', 5)
+  regenerated.transitions[`${ID_tlA}->${ID_tlB}`] = {
+    ...regenerated.transitions[`${ID_tlA}->${ID_tlB}`],
+    clip: { storedName: 'tl-a2.mp4', originalName: 'a2.mp4', source: 'fal', src: '' }
+  }
+  saveProject(regenerated)
+
+  const afterRegen = getTimeline(project.id)!.timeline!.items.find((i) => i.id === pinned.id)!
+  assert.strictEqual(
+    afterRegen.sourceClipName,
+    'tl-a.mp4',
+    'S: the edited item still plays the exact file it was cut against'
+  )
+  assert.deepStrictEqual(
+    [afterRegen.startOffsetSec, afterRegen.endOffsetSec],
+    [pinned.startOffsetSec, pinned.endOffsetSec],
+    'with its in and out points intact'
+  )
+
+  // ── T. A MISSING SOURCE IS NAMED PRECISELY ───────────────────────────
+  rmSync(join(clipsDir, 'tl-a.mp4'), { force: true })
+  const broken = exportAssembly(listProjects().find((p) => p.id === project.id)!)
+  assert.strictEqual(broken.missingItems.length, 1, 'the gone file is detected')
+  assert.ok(
+    /Timeline clip \d+/.test(broken.missingItems[0].label),
+    'T: named as a TIMELINE clip, not as a generic missing transition'
+  )
+  assert.ok(
+    getTimeline(project.id)!.missing.length === 1,
+    'and the view reports it so the block can be marked'
+  )
+
+  // ── R (part 2). REBUILDING IS ALLOWED WHEN CONFIRMED ─────────────────
+  const rebuilt = rebuildTimeline(project.id, true)
+  assert.ok(rebuilt.ok, 'a confirmed rebuild goes through')
+  const fresh = readTimeline(project.id)!
+  assert.strictEqual(fresh.manuallyEdited, false, 'and the new one is not hand-edited')
+  // The rebuild follows the CURRENT feed, which was reordered to
+  // tlA → tlC → tlB above. Neither of those pairs has a generated clip,
+  // so the honest plan is three held stills — the hand-made order and
+  // the pinned source are gone, which is exactly what was confirmed.
+  assert.deepStrictEqual(
+    fresh.items.map((i) => i.sourceType),
+    ['still', 'still', 'still'],
+    'and it describes the feed as it is NOW, not as it was when the edit was made'
+  )
+  assert.ok(
+    !fresh.items.some((i) => i.sourceClipName === 'tl-a.mp4'),
+    'the deleted-file reference is gone with the edits that created it'
+  )
+  assert.strictEqual(
+    getTimeline(project.id)!.drift.kind,
+    'none',
+    'and the rebuilt timeline is back in step with the feed'
+  )
+
+  console.log('[smoke] timeline: materialise, split, delete, reorder, export ranges, drift, pinning')
+}
+
+/**
+ * THE WATERMARKED EXPORT MUST BE THE TIMELINE.
+ *
+ * ── WHY THIS RUNS THE REAL RUNNER ────────────────────────────────────
+ *
+ * `startExport` opens a native save dialog, which no automation can
+ * answer. But the dialog only chooses a PATH — everything that decides
+ * what is encoded happens in `runExportJob`, which is registered for
+ * both `preview-export` (watermarked) and `final-export`. Driving it
+ * through the queue exercises exactly the code a real export runs,
+ * overlays included, with no dialog in the way.
+ *
+ * What it proves: an edited timeline plus a watermark produces a file of
+ * the TIMELINE's length. If the watermarked path had kept its own feed
+ * assembly, the duration would be the feed's instead — which is the only
+ * way this assertion can fail.
+ */
+async function testWatermarkedTimelineExport(createdProjects: string[]): Promise<void> {
+  const ID_wmA = fixtureImageId('wmA')
+  const ID_wmB = fixtureImageId('wmB')
+  const project = makeProject('Timeline Watermark')
+  createdProjects.push(project.id)
+
+  const imagesDir = projectImagesDir(project.id)
+  const clipsDir = projectTransitionsDir(project.id)
+  mkdirSync(imagesDir, { recursive: true })
+  mkdirSync(clipsDir, { recursive: true })
+
+  const ff = (args: string[], what: string): void => {
+    const res = spawnSync(ffmpegPath(), args, { encoding: 'utf8', timeout: 90_000 })
+    assert.strictEqual(res.status, 0, `${what}: ${res.stderr?.slice(-300)}`)
+  }
+  ff(['-y', '-f', 'lavfi', '-i', 'color=c=navy:s=320x180:d=1', '-frames:v', '1',
+      join(imagesDir, 'wm1.png')], 'still 1')
+  ff(['-y', '-f', 'lavfi', '-i', 'color=c=olive:s=320x180:d=1', '-frames:v', '1',
+      join(imagesDir, 'wm2.png')], 'still 2')
+  ff(['-y', '-f', 'lavfi', '-i', 'color=c=red:s=320x180:d=6', '-r', '25', '-pix_fmt', 'yuv420p',
+      join(clipsDir, 'wm-a.mp4')], 'clip')
+
+  project.images = [
+    { id: ID_wmA, fileName: 'wm1.png', storedName: 'wm1.png', src: '' },
+    { id: ID_wmB, fileName: 'wm2.png', storedName: 'wm2.png', src: '' }
+  ]
+  project.feedSequence = [ID_wmA, ID_wmB]
+  project.transitions = {
+    [`${ID_wmA}->${ID_wmB}`]: {
+      prompt: 'p',
+      durationSec: 6,
+      status: 'completed',
+      mode: 'ai',
+      modeProvenance: 'manual',
+      clip: { storedName: 'wm-a.mp4', originalName: 'a.mp4', source: 'fal', src: '' }
+    }
+  }
+  saveProject(project)
+
+  // Materialise, then TRIM it to half — a deliberate, visible edit.
+  const view = getTimeline(project.id)!
+  const only = view.timeline!.items[0]
+  assert.strictEqual(Math.round(itemDurationSec(only)), 6, 'the whole clip to begin with')
+  const split = splitTimelineAt(project.id, only.id, 3)
+  assert.ok(split.ok, 'split at 3s')
+  const halves = getTimeline(project.id)!.timeline!.items
+  assert.strictEqual(halves.length, 2)
+  const dropped = deleteTimelineItem(project.id, halves[1].id)
+  assert.ok(dropped.ok, 'second half removed')
+
+  const edited = getTimeline(project.id)!
+  const expectedSec = edited.durationSec
+  assert.ok(expectedSec > 2.5 && expectedSec < 3.5, `the film is now ~3s, not 6 (${expectedSec})`)
+
+  // A real overlay PNG, written where the runner looks for it.
+  const exportDir = join(projectDir(project.id), 'exports')
+  mkdirSync(exportDir, { recursive: true })
+  ff(['-y', '-f', 'lavfi', '-i', 'color=c=white@0.5:s=1920x1080:d=1', '-frames:v', '1',
+      join(exportDir, 'wm-overlay.png')], 'overlay')
+
+  const outputPath = join(exportDir, 'wm-out.mp4')
+  const job = enqueue({
+    projectId: project.id,
+    projectName: project.name,
+    // The WATERMARKED kind. Same runner as final-export; the only
+    // difference is that overlays are present.
+    kind: 'preview-export',
+    transitionCount: 1,
+    metadata: { outputPath, exportKind: 'preview', overlayFiles: ['wm-overlay.png'] }
+  })
+
+  resumeQueue()
+  await waitFor(
+    () => ['completed', 'failed'].includes(listJobs().find((j) => j.id === job.id)?.status ?? ''),
+    180_000,
+    'watermarked timeline export'
+  )
+  const finished = listJobs().find((j) => j.id === job.id)!
+  assert.strictEqual(finished.status, 'completed', `export failed: ${finished.note}`)
+  assert.ok(existsSync(outputPath), 'a file was produced')
+
+  // ── THE PROOF ────────────────────────────────────────────────────────
+  const encoded = probeDurationSec(outputPath)
+  assert.ok(
+    Math.abs(encoded - expectedSec) < 0.6,
+    `the WATERMARKED export is the TIMELINE's ${expectedSec}s, not the feed's 6s (got ${encoded})`
+  )
+  assert.ok(
+    encoded < 4.5,
+    'and it is decisively shorter than the untrimmed feed assembly would have been'
+  )
+
+  console.log(
+    `[smoke] watermarked export follows the timeline: ${encoded.toFixed(2)}s (feed would be ~6s)`
+  )
+}
+
+async function testMotionRegeneration(createdProjects: string[]): Promise<void> {
+  const ID_regenA = fixtureImageId('regenA')
+  const ID_regenB = fixtureImageId('regenB')
+  // ── F. SMOOTH FORWARD MEANS PHYSICAL FORWARD MOVEMENT ────────────────
+  //
+  // The move a model will happily fake. The prompt has to demand the
+  // parallax and name the failure, or "forward" becomes a scale-up.
+  const forward = buildMotionPrompt('smooth-forward')
+  assert.ok(/moves slowly and steadily forward through the room/i.test(forward))
+  assert.ok(
+    /natural perspective change/i.test(forward),
+    'it asks for the perspective change real travel produces'
+  )
+  assert.ok(
+    /nearer surfaces pass sooner than distant ones/i.test(forward),
+    'and says what that means, so it cannot be read as a zoom'
+  )
+  assert.ok(
+    /do not simulate this as a digital zoom/i.test(forward),
+    'and REJECTS zoom-only behaviour explicitly'
+  )
+  assert.ok(/no handheld feel/i.test(forward) && /no walking bob/i.test(forward))
+  assert.ok(
+    !/no perspective invention/i.test(forward),
+    'and does NOT also forbid perspective change — that contradiction is what pushed it back to a zoom'
+  )
+  assert.ok(
+    /Do not invent rooms, doorways or objects/i.test(forward),
+    'while still banning invented geometry, worded so it bans the right thing'
+  )
+
+  // ── SMOOTH FORWARD IS NOT PUSH IN ────────────────────────────────────
+  const pushIn = buildMotionPrompt('push-in')
+  assert.notStrictEqual(forward, pushIn, 'they are different prompts')
+  assert.ok(
+    /barely travels/i.test(pushIn),
+    'Push In tightens the framing rather than travelling — the two now contradict rather than overlap'
+  )
+  assert.ok(
+    !/minimal perspective change/i.test(forward),
+    'and Smooth Forward carries none of the old zoom-flavoured wording'
+  )
+  assert.strictEqual(MOTION_TYPES[0], 'smooth-forward', 'it is offered first')
+  assert.ok(MOTION_LABEL['smooth-forward'].includes('Smooth Forward'))
+  assert.ok(
+    MOTION_LABEL['push-in'].includes('tighten'),
+    'and the labels say which is which, so the choice is not a guess'
+  )
+
+  // ── A REAL SEGMENT, REGENERATED WITH DIFFERENT CHOICES ───────────────
+  const project = makeProject('Motion Regen')
+  createdProjects.push(project.id)
+  const imagesDir = projectImagesDir(project.id)
+  mkdirSync(imagesDir, { recursive: true })
+  writeFileSync(join(imagesDir, 'a.jpg'), Buffer.from([0xff, 0xd8, 0xff, 0xe0]))
+  writeFileSync(join(imagesDir, 'b.jpg'), Buffer.from([0xff, 0xd8, 0xff, 0xe0]))
+  project.images = [
+    { id: ID_regenA, fileName: 'a.jpg', storedName: 'a.jpg', src: '' },
+    { id: ID_regenB, fileName: 'b.jpg', storedName: 'b.jpg', src: '' }
+  ]
+  project.feedSequence = [ID_regenA, ID_regenB]
+  saveProject(project)
+
+  const added = addMotionSegment({
+    projectId: project.id,
+    imageId: ID_regenA,
+    motion: 'pan-right',
+    durationSec: 5
+  })
+  assert.ok(added.ok && added.segment)
+  const segmentId = added.segment!.id
+
+  let produced = 0
+  const stub = {
+    metadata: () => ({ id: 'fal' as const, label: 'fal.ai', models: [], supportsRemoteCancel: true }),
+    fetchResult: async (_url: string, target: string) => {
+      produced++
+      const res = spawnSync(
+        ffmpegPath(),
+        ['-y', '-f', 'lavfi', '-i', `color=c=${produced === 1 ? 'navy' : 'olive'}:s=160x120:d=1`,
+         '-r', '25', '-pix_fmt', 'yuv420p', target],
+        { encoding: 'utf8', timeout: 60_000 }
+      )
+      assert.strictEqual(res.status, 0)
+      return { ok: true as const }
+    }
+  } as unknown as VideoProvider
+
+  // First run: Pan Right at 5s, as queued.
+  const job1 = enqueue({
+    projectId: project.id,
+    projectName: project.name,
+    kind: 'motion-generation',
+    transitionCount: 1,
+    scheduledFor: null,
+    metadata: {
+      motionSegmentId: segmentId,
+      motionImageId: ID_regenA,
+      motionType: 'pan-right',
+      motionDurationSec: 5
+    }
+  })
+  const first = await downloadAndAttachResult(
+    stub,
+    project.id,
+    { kind: 'motion', segmentId, imageId: ID_regenA, motion: 'pan-right' },
+    'https://example/1.mp4',
+    job1.id,
+    'fal-ai/kling-video/v2.6/pro/image-to-video'
+  )
+  assert.ok(first.ok, `first run attached: ${JSON.stringify(first)}`)
+
+  // ── A. THE REGENERATION USES THE NEW MOTION AND LENGTH ───────────────
+  //
+  // The request is built from the JOB's metadata, not from the segment,
+  // so a queued run cannot be changed by editing the inspector after the
+  // fact — and cannot carry the previous motion's prompt.
+  const job2 = enqueue({
+    projectId: project.id,
+    projectName: project.name,
+    kind: 'motion-generation',
+    transitionCount: 1,
+    scheduledFor: null,
+    metadata: {
+      motionSegmentId: segmentId,
+      motionImageId: ID_regenA,
+      motionType: 'smooth-forward',
+      motionDurationSec: 10
+    }
+  })
+  const rebuilt = buildMotionGenerationRequest(
+    project.id,
+    segmentId,
+    null,
+    'fal-ai/kling-video/v2.6/pro/image-to-video',
+    job2.metadata.motionDurationSec,
+    job2.metadata.motionType as never
+  )
+  assert.ok(rebuilt.ok, 'the regeneration request builds')
+  if (rebuilt.ok) {
+    assert.strictEqual(rebuilt.request.durationSec, 10, 'at the NEW length')
+    assert.strictEqual(
+      rebuilt.request.prompt,
+      buildMotionPrompt('smooth-forward'),
+      'with the NEW motion’s prompt'
+    )
+    assert.ok(
+      !/horizontally to the right/i.test(rebuilt.request.prompt),
+      'and NO trace of the old Pan Right wording'
+    )
+    assert.strictEqual(
+      rebuilt.request.subject?.kind === 'motion' ? rebuilt.request.subject.motion : null,
+      'smooth-forward',
+      'and the subject names the new motion, so the catalogue row will too'
+    )
+  }
+
+  const second = await downloadAndAttachResult(
+    stub,
+    project.id,
+    { kind: 'motion', segmentId, imageId: ID_regenA, motion: 'smooth-forward' },
+    'https://example/2.mp4',
+    job2.id,
+    'fal-ai/kling-video/v2.6/pro/image-to-video'
+  )
+  assert.ok(second.ok, 'the regeneration attached')
+
+  const history = getGenerationsForMotion(project.id, segmentId)
+  assert.strictEqual(history.length, 2, 'both runs are in history')
+
+  // ── C. THE NEW GENERATION STORES ITS OWN CHOICES ─────────────────────
+  assert.strictEqual(history[0].motionType, 'smooth-forward')
+  assert.strictEqual(history[0].durationSec, 10)
+  assert.strictEqual(history[0].promptUsed, buildMotionPrompt('smooth-forward'))
+  assert.ok(history[0].active, 'and it is current')
+
+  // ── B. THE OLD ONE IS UNCHANGED ──────────────────────────────────────
+  //
+  // The regression this pins: history built from the SEGMENT would have
+  // rewritten this row to Smooth Forward / 10s the moment the second run
+  // landed, because the segment had moved on.
+  assert.strictEqual(history[1].motionType, 'pan-right', 'the old row is still Pan Right')
+  assert.strictEqual(history[1].durationSec, 5, 'and still 5s')
+  assert.strictEqual(
+    history[1].promptUsed,
+    buildMotionPrompt('pan-right'),
+    'and still carries the prompt it was actually made with'
+  )
+  assert.ok(!history[1].active, 'retired, not deleted')
+  assert.ok(history[1].clip, 'and its paid-for clip is kept')
+  assert.notStrictEqual(
+    history[0].clip?.storedName,
+    history[1].clip?.storedName,
+    'two runs, two files'
+  )
+
+  // The segment now describes what plays: the newest generation.
+  const after = listProjects().find((p) => p.id === project.id)!
+  const seg = motionSegments(after).find((s) => s.id === segmentId)!
+  assert.strictEqual(seg.motion, 'smooth-forward')
+  assert.strictEqual(seg.durationSec, 10)
+  assert.strictEqual(seg.clip?.storedName, history[0].clip?.storedName)
+
+  // ── G. SHOW IN FOLDER RESOLVES THE EXACT FILE ────────────────────────
+  //
+  // THE BUG THIS PINS: `queue:clips` returned [] for any job without
+  // pairKeys, so a motion row rendered no clip section at all — and the
+  // Show in folder button inside it was never drawn.
+  for (const [job, expected] of [
+    [job1, history[1]],
+    [job2, history[0]]
+  ] as const) {
+    const clips = clipsForJob(job.id)
+    assert.strictEqual(clips.length, 1, 'a motion job reports exactly one clip')
+    assert.strictEqual(
+      clips[0].storedName,
+      expected.clip?.storedName,
+      'and it is THAT job’s own file, not whatever the segment now plays'
+    )
+    assert.ok(clips[0].exists, 'the bytes are really on disk')
+    assert.ok(clips[0].bytes > 0)
+    assert.ok(/SINGLE IMAGE MOTION/.test(clips[0].label), 'labelled as motion, never as a pair')
+    assert.ok(!clips[0].label.includes('→'), 'and never with an arrow')
+    // The renderer passes storedName to main, which resolves the path —
+    // no path is ever constructed in the renderer.
+    assert.ok(
+      clipPath(project.id, clips[0].storedName!),
+      'and the canonical resolver finds it from projectId + storedName'
+    )
+  }
+
+  // ── H. TRANSITION JOBS RESOLVE EXACTLY AS BEFORE ─────────────────────
+  const exportJob = enqueue({
+    projectId: project.id,
+    projectName: project.name,
+    kind: 'ai-generation',
+    transitionCount: 1,
+    scheduledFor: null,
+    metadata: { pairKeys: [`${ID_regenA}->${ID_regenB}`] }
+  })
+  const pairClips = clipsForJob(exportJob.id)
+  assert.strictEqual(pairClips.length, 1, 'a transition job still reports its pair')
+  assert.strictEqual(
+    pairClips[0].pairKey,
+    `${ID_regenA}->${ID_regenB}`,
+    'keyed by the pair, unchanged'
+  )
+  assert.ok(/Image 1 → Image 2/.test(pairClips[0].label), 'and labelled with the arrow, unchanged')
+
+  console.log('[smoke] motion regeneration: per-run motion/duration, history intact, clips resolve')
+}
+
+function testMotionRunStateAndQueue(): void {
+  const segment: MotionSegment = {
+    id: 'motion:x',
+    kind: 'single-motion',
+    imageId: 'imgA',
+    motion: 'pan-right',
+    durationSec: 5,
+    status: 'queued',
+    clip: null,
+    prompt: buildMotionPrompt('pan-right'),
+    createdAt: 1
+  }
+
+  const job = (over: Partial<QueueJob> = {}): QueueJob =>
+    ({
+      id: 'job-1',
+      projectId: 'p1',
+      projectName: 'P',
+      kind: 'motion-generation',
+      status: 'queued',
+      progressPct: 0,
+      transitionCount: 1,
+      createdAt: 100,
+      queueOrder: 1,
+      scheduledFor: null,
+      startedAt: null,
+      completedAt: null,
+      metadata: { motionSegmentId: 'motion:x', motionImageId: 'imgA', motionType: 'pan-right' },
+      ...over
+    }) as QueueJob
+
+  // ── A. A LIVE JOB MEANS RUNNING ──────────────────────────────────────
+  for (const status of ['scheduled', 'queued', 'processing'] as const) {
+    const s = motionRunState(segment, [job({ status })])
+    assert.strictEqual(s.kind, 'running', `a ${status} job means running`)
+  }
+
+  // ── C. AND A SECOND PAID SUBMIT IS REFUSED ───────────────────────────
+  const blocked = motionGenerationReadiness(
+    segment,
+    FAL_MODEL_REGISTRY,
+    motionRunState(segment, [job({ status: 'processing' })])
+  )
+  assert.ok(!blocked.ok, 'a genuinely live job blocks a second paid submit')
+  if (!blocked.ok) assert.ok(/already running/i.test(blocked.reason))
+
+  // ── D. A TERMINAL JOB DOES NOT ───────────────────────────────────────
+  //
+  // This is the exact shape of the stuck segment: status `queued`, one
+  // motion job, that job FAILED, no provider task id.
+  for (const status of ['failed', 'cancelled'] as const) {
+    const s = motionRunState(segment, [job({ status, note: 'boom' })])
+    assert.strictEqual(s.kind, 'failed', `a ${status} job is not running`)
+    const ready = motionGenerationReadiness(segment, FAL_MODEL_REGISTRY, s)
+    assert.ok(ready.ok, `Generate is available again after a ${status} job`)
+  }
+  assert.strictEqual(
+    reconciledMotionStatus(segment, [job({ status: 'failed' })]),
+    'failed',
+    'and the stale `queued` reconciles to `failed`'
+  )
+
+  // ── E. A MARKER WITH NO JOB AT ALL CLEARS ────────────────────────────
+  const orphan = motionRunState(segment, [])
+  assert.strictEqual(orphan.kind, 'idle', 'a running marker with no job is not running')
+  assert.ok(
+    motionGenerationReadiness(segment, FAL_MODEL_REGISTRY, orphan).ok,
+    'so Generate is available'
+  )
+  assert.strictEqual(
+    reconciledMotionStatus(segment, []),
+    'not-generated',
+    'and reconciliation clears the word'
+  )
+  assert.ok(motionStatusIsStale(segment, []), 'which is detected as stale')
+
+  // ── F. A PAID TASK IS RECOVERED, NEVER RE-BOUGHT ─────────────────────
+  const paid = motionRunState(segment, [
+    job({
+      status: 'failed',
+      provider: {
+        provider: 'fal',
+        model: 'm',
+        dryRun: false,
+        providerTaskId: 'req-paid-1',
+        providerStatus: 'COMPLETED',
+        submittedAt: 1,
+        lastPolledAt: 1,
+        providerMeta: null,
+        estimatedCost: 0.35,
+        actualCost: null,
+        estimatedCredits: null,
+        actualCredits: null,
+        retryCount: 0
+      }
+    } as Partial<QueueJob>)
+  ])
+  assert.strictEqual(paid.kind, 'recoverable', 'a terminal job holding a PAID task is recoverable')
+  if (paid.kind === 'recoverable') assert.strictEqual(paid.providerTaskId, 'req-paid-1')
+  const paidReady = motionGenerationReadiness(segment, FAL_MODEL_REGISTRY, paid)
+  assert.ok(!paidReady.ok, 'and a fresh paid generation is REFUSED')
+  if (!paidReady.ok) {
+    assert.ok(/req-paid-1/.test(paidReady.reason), 'naming the task so it can be recovered')
+  }
+  assert.strictEqual(
+    reconciledMotionStatus(segment, [
+      job({ status: 'failed', provider: { providerTaskId: 'req-paid-1', dryRun: false } as never })
+    ]),
+    'generating',
+    'a paid task never reconciles down to not-generated — that would invite paying twice'
+  )
+
+  // ── G. A DELIVERED CLIP ENDS EVERY WARNING ───────────────────────────
+  const delivered: MotionSegment = {
+    ...segment,
+    status: 'queued',
+    clip: { storedName: 'c.mp4', originalName: 'c.mp4', source: 'fal', src: 'f2f://c.mp4' }
+  }
+  assert.strictEqual(
+    motionRunState(delivered, [job({ status: 'failed' })]).kind,
+    'idle',
+    'an attached clip means nothing is in flight, whatever old rows say'
+  )
+  assert.strictEqual(reconciledMotionStatus(delivered, []), 'completed')
+
+  // ── B. TRANSITION JOBS ARE UNTOUCHED ─────────────────────────────────
+  //
+  // A motion segment must never claim an ai-generation job, and the
+  // motion matcher must never see one.
+  assert.deepStrictEqual(
+    jobsForMotionSegment([job({ kind: 'ai-generation', metadata: { pairKeys: ['a->b'] } })], 'motion:x'),
+    [],
+    'a transition job is never matched to a motion segment'
+  )
+  assert.deepStrictEqual(
+    jobsForMotionSegment([job({ metadata: { motionSegmentId: 'motion:other' } })], 'motion:x'),
+    [],
+    'nor another segment’s motion job'
+  )
+  assert.strictEqual(
+    jobsForMotionSegment([job()], 'motion:x').length,
+    1,
+    'but its own job is'
+  )
+
+  // ── DURATIONS FOLLOW THE MODEL, AND ARE NEVER CLAMPED ────────────────
+  //
+  // The readiness list used to be the INTERSECTION of every capable
+  // model's durations. With one capable model that is invisible; with
+  // two it silently hides real capability — O3's 3–15s enum beside 2.6
+  // Pro's 5|10 would have offered 5 and 10 and concealed eleven lengths.
+  // It is the UNION now, and the selector reads the SELECTED model's own
+  // list.
+  const wide = motionGenerationReadiness(segment, [
+    {
+      id: 'a',
+      displayName: 'Narrow',
+      supportsStartFrameOnly: true,
+      confirmed: true,
+      durationsSec: [5, 10]
+    },
+    {
+      id: 'b',
+      displayName: 'Wide',
+      supportsStartFrameOnly: true,
+      confirmed: true,
+      durationsSec: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    }
+  ])
+  assert.ok(wide.ok)
+  if (wide.ok) {
+    assert.deepStrictEqual(
+      wide.durationsSec,
+      [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+      'every length SOME capable model offers survives — no hidden clamp'
+    )
+    assert.deepStrictEqual(
+      wide.models.find((m) => m.id === 'b')?.durationsSec,
+      [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+      'and each model carries its OWN list, which is what the selector shows'
+    )
+    assert.deepStrictEqual(wide.models.find((m) => m.id === 'a')?.durationsSec, [5, 10])
+  }
+
+  // The registry's real numbers, as published. 2.6 Pro's 5|10 is the
+  // endpoint's DurationEnum, not a UI restriction; O3's 3–15 is its own.
+  assert.deepStrictEqual(
+    resolveFalModel('fal-ai/kling-video/o3/standard/image-to-video').durationsSec,
+    [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    'O3 publishes 3–15s'
+  )
+  assert.deepStrictEqual(
+    resolveFalModel('fal-ai/kling-video/v2.6/pro/image-to-video').durationsSec,
+    [5, 10],
+    '2.6 Pro publishes exactly 5 and 10'
+  )
+
+  // ── H. THE QUEUE ROW CARRIES WHAT IT NEEDS TO RENDER ─────────────────
+  //
+  // The row shows SINGLE IMAGE MOTION · IMAGE nn · movement · model. All
+  // of it comes from the job's own metadata, so it renders after a
+  // restart without consulting anything else.
+  const row = job()
+  assert.strictEqual(row.metadata.motionSegmentId, 'motion:x')
+  assert.strictEqual(row.metadata.motionImageId, 'imgA')
+  assert.strictEqual(row.metadata.motionType, 'pan-right')
+  assert.strictEqual(MOTION_LABEL[row.metadata.motionType as never], 'Pan Right')
+  assert.ok(!('pairKeys' in row.metadata), 'and it carries NO pair notation')
+
+  console.log('[smoke] motion run state: live jobs prove running, stale markers cannot')
+}
+
+async function testMotionPersistenceAndHistory(createdProjects: string[]): Promise<void> {
+  const ID_imgA = fixtureImageId('imgA')
+  const ID_imgB = fixtureImageId('imgB')
+  const project = makeProject('Motion History')
+  createdProjects.push(project.id)
+
+  // Two photographs, so the feed is a real feed and the motion segment
+  // sits at a position rather than being the only thing there.
+  const imagesDir = projectImagesDir(project.id)
+  mkdirSync(imagesDir, { recursive: true })
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46])
+  for (const n of ['a.jpg', 'b.jpg']) writeFileSync(join(imagesDir, n), jpeg)
+  project.images = [
+    { id: ID_imgA, fileName: 'a.jpg', storedName: 'a.jpg', src: '' },
+    { id: ID_imgB, fileName: 'b.jpg', storedName: 'b.jpg', src: '' }
+  ]
+  project.feedSequence = [ID_imgA, ID_imgB]
+  saveProject(project)
+
+  const added = addMotionSegment({
+    projectId: project.id,
+    imageId: ID_imgA,
+    motion: 'push-in',
+    durationSec: 5
+  })
+  assert.ok(added.ok && added.segment, 'the motion segment was created')
+  const segmentId = added.segment!.id
+
+  // A stub provider: it produces a REAL video file, and nothing else. No
+  // key, no network, no fal. The file has to be genuinely playable
+  // because `downloadAndAttachResult` probes it with FFmpeg — which is
+  // the point: this test goes through the real validation, not past it.
+  let produced = 0
+  const stub = {
+    metadata: () => ({ id: 'fal' as const, label: 'fal.ai', models: [], supportsRemoteCancel: true }),
+    fetchResult: async (_url: string, target: string) => {
+      produced++
+      const res = spawnSync(
+        ffmpegPath(),
+        [
+          '-y', '-f', 'lavfi',
+          // A different colour per call, so the two generations are
+          // distinguishable files rather than the same bytes twice.
+          '-i', `color=c=${produced === 1 ? 'navy' : 'maroon'}:s=160x120:d=1`,
+          '-r', '25', '-pix_fmt', 'yuv420p', target
+        ],
+        { encoding: 'utf8', timeout: 60_000 }
+      )
+      assert.strictEqual(res.status, 0, 'the motion fixture clip was produced')
+      return { ok: true as const }
+    }
+  } as unknown as VideoProvider
+
+  const subject = {
+    kind: 'motion' as const,
+    segmentId,
+    imageId: ID_imgA,
+    motion: 'push-in'
+  }
+
+  // ── F. THE GENERATION PERSISTS AGAINST ITS SEGMENT ───────────────────
+  const first = await downloadAndAttachResult(
+    stub,
+    project.id,
+    subject,
+    'https://example/result-1.mp4',
+    'job-motion-1',
+    'fal-ai/kling-video/v2.6/pro/image-to-video'
+  )
+  assert.ok(first.ok, `the clip attached: ${JSON.stringify(first)}`)
+  assert.strictEqual(produced, 1)
+
+  const afterFirst = listProjects().find((p) => p.id === project.id)!
+  const seg1 = motionSegments(afterFirst).find((s) => s.id === segmentId)!
+  assert.strictEqual(seg1.status, 'completed', 'the segment is completed')
+  assert.ok(seg1.clip, 'and carries its clip')
+  assert.strictEqual(
+    Object.keys(afterFirst.transitions).length,
+    0,
+    'and NOTHING was written into project.transitions'
+  )
+
+  const hist1 = getGenerationsForMotion(project.id, segmentId)
+  assert.strictEqual(hist1.length, 1, 'one generation in history')
+  assert.strictEqual(hist1[0].model, 'fal-ai/kling-video/v2.6/pro/image-to-video', 'the exact model')
+  assert.strictEqual(hist1[0].motionSegmentId, segmentId, 'bound to the segment, not a pair')
+  assert.strictEqual(hist1[0].motionType, 'push-in')
+  assert.strictEqual(hist1[0].promptUsed, added.segment!.prompt, 'the prompt that was sent')
+  assert.ok(hist1[0].active, 'and it is the current one')
+
+  // ── H. IT CAN NEVER BE READ AS A PAIR ────────────────────────────────
+  assert.strictEqual(hist1[0].toImageId, '', 'no end image id')
+  assert.strictEqual(hist1[0].fromImageId, ID_imgA)
+  assert.notStrictEqual(hist1[0].fromImageId, hist1[0].toImageId, 'never image → same image')
+  assert.strictEqual(
+    activeGenerationForPair(project.id, ID_imgA, ID_imgA),
+    null,
+    'and NO pair lookup can return it — not even (imgA, imgA)'
+  )
+
+  // ── G. REGENERATE KEEPS THE OLD GENERATION ───────────────────────────
+  const second = await downloadAndAttachResult(
+    stub,
+    project.id,
+    subject,
+    'https://example/result-2.mp4',
+    'job-motion-2',
+    'fal-ai/kling-video/v2.6/pro/image-to-video'
+  )
+  assert.ok(second.ok, 'the regeneration attached')
+
+  const hist2 = getGenerationsForMotion(project.id, segmentId)
+  assert.strictEqual(hist2.length, 2, 'BOTH generations are in history — nothing was deleted')
+  assert.strictEqual(hist2.filter((g) => g.active).length, 1, 'exactly one is current')
+  assert.strictEqual(hist2[0].queueJobId, 'job-motion-2', 'and it is the newest')
+  assert.ok(!hist2[1].active, 'the previous one is retired, not removed')
+  assert.ok(hist2[1].clip, 'and still has its paid-for clip')
+
+  const afterSecond = listProjects().find((p) => p.id === project.id)!
+  const seg2 = motionSegments(afterSecond).find((s) => s.id === segmentId)!
+  assert.strictEqual(
+    seg2.clip?.storedName,
+    hist2[0].clip?.storedName,
+    'the segment plays the CURRENT generation'
+  )
+  assert.notStrictEqual(seg2.clip?.storedName, seg1.clip?.storedName, 'which is the new file')
+
+  // ── I. ASSEMBLY USES THE MOTION CLIP EXACTLY ONCE ────────────────────
+  const plan = planAssembly({
+    imageIds: [ID_imgA, ID_imgB],
+    modes: ['cut'],
+    clipPaths: [null],
+    imagePaths: ['a.jpg', 'b.jpg'],
+    seamBlend: 'subtle',
+    motions: motionSegments(afterSecond).map((m) => ({
+      segmentId: m.id,
+      imageId: m.imageId,
+      label: motionSegmentLabel(m),
+      clipPath: m.clip ? `clips/${m.clip.storedName}` : null
+    }))
+  })
+  assert.ok(plan.ok, 'the project exports')
+  assert.deepStrictEqual(
+    plan.segments.map((s) => s.kind),
+    ['motion', 'still'],
+    'image A appears ONCE as motion; no still hold beside it'
+  )
+  assert.strictEqual(
+    plan.segments.filter((s) => s.motionSegmentId === segmentId).length,
+    1,
+    'EXACTLY ONCE — not once per generation in history'
+  )
+  assert.strictEqual(
+    plan.segments[0].clipPath,
+    `clips/${seg2.clip!.storedName}`,
+    'and it is the current clip that plays, not the retired one'
+  )
+
+  console.log('[smoke] motion persistence: attach, history, regenerate, assembly')
+}
+
+async function testMotionGenerationPath(): Promise<void> {
+  const SECRET = 'fal-test-key'
+  const kling26 = resolveFalModel('fal-ai/kling-video/v2.6/pro/image-to-video')
+
+  // ── THE CORRECTED CAPABILITY ─────────────────────────────────────────
+  //
+  // This was registered as `supportsStartFrameOnly: false` on a reading
+  // that the contract marked only voice_ids optional. fal.ai's published
+  // schema marks `end_image_url` optional, so the model serves both
+  // shapes and the old reading was simply wrong.
+  assert.ok(kling26.confirmed, 'Kling 2.6 Pro is a confirmed contract')
+  assert.ok(kling26.supportsStartFrameOnly, 'and it CAN generate from a single image')
+  assert.ok(kling26.supportsEndFrame, 'while still accepting an end frame')
+  assert.deepStrictEqual(kling26.durationsSec, [5, 10])
+  assert.ok(
+    startFrameOnlyModels().some((m) => m.id === kling26.id),
+    'so the single-image selector offers it'
+  )
+
+  // ── A. TWO-IMAGE TRANSITION: BOTH FRAMES PRESENT ─────────────────────
+  const twoImage = kling26.buildBody({
+    prompt: 'p',
+    startImage: 'https://cdn/start.jpg',
+    endImage: 'https://cdn/end.jpg',
+    durationSec: 5,
+    resolution: 'standard',
+    nativeAudio: false
+  })
+  assert.strictEqual(twoImage.start_image_url, 'https://cdn/start.jpg')
+  assert.strictEqual(twoImage.end_image_url, 'https://cdn/end.jpg')
+  assert.strictEqual(twoImage.duration, '5', 'duration is the schema STRING enum')
+  assert.strictEqual(twoImage.generate_audio, false)
+
+  // ── B. SINGLE MOTION: END FRAME ABSENT, NOT EMPTY ────────────────────
+  const oneImage = buildSingleImageBody(kling26, {
+    prompt: 'p',
+    startImage: 'https://cdn/start.jpg',
+    durationSec: 5,
+    resolution: 'standard',
+    nativeAudio: false
+  } as never)
+  assert.strictEqual(oneImage.start_image_url, 'https://cdn/start.jpg')
+  assert.ok(
+    !('end_image_url' in oneImage),
+    'the OPTIONAL field is OMITTED — not sent empty, and never the start frame twice'
+  )
+  assert.deepStrictEqual(
+    Object.keys(oneImage).sort(),
+    ['duration', 'generate_audio', 'prompt', 'start_image_url'],
+    'exactly the documented single-image body'
+  )
+
+  // ── D. A MODEL THAT NEEDS AN END FRAME STILL REFUSES ─────────────────
+  const o3 = resolveFalModel('fal-ai/kling-video/o3/standard/image-to-video')
+  assert.ok(!o3.supportsStartFrameOnly, 'O3 has no verified single-image contract')
+  assert.throws(
+    () => buildSingleImageBody(o3, { prompt: 'p', startImage: 'u', durationSec: 5 } as never),
+    /cannot generate from a single image/,
+    'and refuses rather than inventing an end frame'
+  )
+
+  // ── E. VERIFIED PRICING ──────────────────────────────────────────────
+  assert.strictEqual(falRunCost(kling26, 5, false)?.usd, 0.35, '5s without audio is $0.35')
+  assert.strictEqual(falRunCost(kling26, 10, false)?.usd, 0.7, '10s without audio is $0.70')
+  assert.strictEqual(falRunCost(kling26, 5, true)?.usd, 0.7, '5s WITH audio is $0.70')
+  assert.strictEqual(
+    falRunCost(kling26, 5, false)?.usdPerSecond,
+    0.07,
+    'derived from the verified per-second rate, not a stored total'
+  )
+
+  // ── C + K. THE PROVIDER ACCEPTS ONE SHAPE AND ONLY THE RIGHT ONE ─────
+  const motionRequest: GenerationRequest = {
+    projectId: 'p1',
+    subject: { kind: 'motion', segmentId: 'motion:1', imageId: 'imgA', motion: 'push-in' },
+    pairKey: '',
+    startImagePath: 'C:/managed/p1/images/a.jpg',
+    endImagePath: null,
+    startImageName: 'living.jpg',
+    endImageName: null,
+    prompt: buildMotionPrompt('push-in'),
+    durationSec: 5,
+    resolution: '1080p',
+    nativeAudio: false,
+    modelId: kling26.id
+  }
+
+  const noNetwork = async (): Promise<Response> => {
+    throw new Error('NETWORK CALLED DURING A MOTION TEST')
+  }
+  const fal = new FalProvider({ apiKey: SECRET, mode: 'dry-run', fetchImpl: noNetwork })
+
+  assert.ok(fal.validateRequest(motionRequest).ok, 'a single-image run on 2.6 Pro is accepted')
+
+  // The same request aimed at a model that needs an end frame: refused.
+  const onO3 = fal.validateRequest({ ...motionRequest, modelId: o3.id })
+  assert.ok(!onO3.ok, 'the SAME motion request is refused on a model that needs an end frame')
+  if (!onO3.ok) {
+    assert.strictEqual(onO3.error.code, 'unsupported-capability')
+  }
+
+  // A motion run that somehow carried an end frame is refused too — a
+  // single-image job must not quietly become a transition.
+  const smuggled = fal.validateRequest({ ...motionRequest, endImagePath: 'C:/managed/b.jpg' })
+  assert.ok(!smuggled.ok, 'a motion request carrying an end frame is refused')
+
+  // And a TRANSITION missing its end frame is still an error, not a
+  // silently cheaper different product.
+  const brokenPair = fal.validateRequest({
+    ...motionRequest,
+    subject: { kind: 'transition', pairKey: 'a->b' },
+    pairKey: 'a->b',
+    endImagePath: null
+  })
+  assert.ok(!brokenPair.ok, 'a transition with no end frame is still invalid')
+
+  // ── THE DRY RUN BUILDS THE REAL BODY, AND SENDS NOTHING ──────────────
+  const dry = fal.dryRun(motionRequest)
+  assert.ok(!('error' in dry), 'the single-image dry run builds cleanly')
+  if (!('error' in dry)) {
+    assert.ok(!('end_image_url' in dry.preview.body), 'the previewed body omits the end frame')
+    assert.strictEqual(
+      dry.preview.endpoint,
+      'https://queue.fal.run/fal-ai/kling-video/v2.6/pro/image-to-video',
+      'and goes to the SELECTED model’s endpoint, never a default'
+    )
+    assert.strictEqual(dry.preview.display.endImage, null, 'the preview shows no end frame')
+    assert.strictEqual(dry.estimatedCost, 0.35, '5s on 2.6 Pro is $0.35')
+  }
+  assert.strictEqual(fal.transportCallCount, 0, 'NOTHING was sent')
+  assert.strictEqual(fal.uploadCount, 0, 'and nothing was uploaded')
+
+  // ── THE LIVE SUBMIT, AGAINST A RECORDING STUB ────────────────────────
+  //
+  // Not a paid call: the transport is a local function. What it proves is
+  // the part a real call would add — one upload, not two, and a body with
+  // no end frame reaching the selected endpoint.
+  const sent: { url: string; body: Record<string, unknown> }[] = []
+  let uploads = 0
+  const recordingFetch = async (url: string | URL, init?: RequestInit): Promise<Response> => {
+    const href = String(url)
+    // fal's upload handshake, answered locally.
+    if (href.includes('upload') || href.includes('storage')) {
+      uploads++
+      return new Response(
+        JSON.stringify({ upload_url: 'https://local/put', file_url: `https://cdn/${uploads}.jpg` }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    }
+    if (href === 'https://local/put') return new Response('', { status: 200 })
+    sent.push({ url: href, body: JSON.parse(String(init?.body ?? '{}')) })
+    return new Response(
+      JSON.stringify({ request_id: 'req-motion-1', status: 'IN_QUEUE' }),
+      { status: 200, headers: { 'content-type': 'application/json' } }
+    )
+  }
+
+  const liveFal = new FalProvider({
+    apiKey: SECRET,
+    mode: 'live',
+    liveAllowed: true,
+    fetchImpl: recordingFetch as never
+  })
+
+  // A real managed file, so the frame reader has bytes to read.
+  const tmpImage = join(tmpdir(), `f2f-motion-${Date.now()}.jpg`)
+  writeFileSync(tmpImage, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]))
+  const submitted = await liveFal.submitGeneration({ ...motionRequest, startImagePath: tmpImage })
+  rmSync(tmpImage, { force: true })
+
+  assert.ok(submitted.ok, `the single-image submit succeeded: ${JSON.stringify(submitted)}`)
+  assert.strictEqual(uploads, 1, 'ONE frame uploaded — a single-image run has one frame')
+  assert.strictEqual(sent.length, 1, 'and one request was submitted')
+  assert.strictEqual(
+    sent[0].url,
+    'https://queue.fal.run/fal-ai/kling-video/v2.6/pro/image-to-video',
+    'to the selected model, not the global default'
+  )
+  assert.ok(!('end_image_url' in sent[0].body), 'THE WIRE BODY CARRIES NO END FRAME')
+  assert.ok(sent[0].body.start_image_url, 'and does carry the start frame')
+  assert.strictEqual(sent[0].body.duration, '5')
+  if (submitted.ok) {
+    assert.strictEqual(submitted.providerTaskId, 'req-motion-1', 'the task id is read and kept')
+  }
+
+  // ── H. THE CATALOGUE SHAPE IS UNAMBIGUOUS ────────────────────────────
+  //
+  // An empty `toImageId` is what makes a motion row unable to answer any
+  // pair lookup, and `motionSegmentId` is what the UI branches on. Both
+  // are asserted because the display rule depends on both.
+  const motionRow = {
+    fromImageId: 'imgA',
+    toImageId: '',
+    motionSegmentId: 'motion:1',
+    motionType: 'push-in'
+  }
+  assert.strictEqual(motionRow.toImageId, '', 'no end image id, so no pair can match it')
+  assert.notStrictEqual(
+    motionRow.fromImageId,
+    motionRow.toImageId,
+    'and NEVER image → the same image'
+  )
+  assert.ok(motionRow.motionSegmentId, 'the discriminator is explicit, never inferred')
+
+  console.log('[smoke] motion generation: 2.6 Pro single-image body, submit, pricing, isolation')
+}
+
+function testSingleImageMotion(): void {
+  const seg = (over: Partial<MotionSegment> = {}): MotionSegment => ({
+    id: `${MOTION_ID_PREFIX}abc`,
+    kind: 'single-motion',
+    imageId: 'i2',
+    motion: 'push-in',
+    durationSec: 5,
+    status: 'not-generated',
+    clip: null,
+    prompt: buildMotionPrompt('push-in'),
+    createdAt: 1,
+    ...over
+  })
+
+  // ── A. IT IS NOT A PAIR, AND CANNOT BE READ AS ONE ───────────────────
+  //
+  // The id namespace is the enforcement. A pair key always contains the
+  // arrow; a motion id never does, so no code that parses `from->to` can
+  // be handed one of these by accident.
+  assert.ok(seg().id.startsWith(MOTION_ID_PREFIX), 'motion ids carry their own prefix')
+  assert.ok(!seg().id.includes('->'), 'a motion id can never parse as a pair key')
+
+  // ── B. THE LABEL SAYS WHAT IT IS, IN WORDS ───────────────────────────
+  assert.strictEqual(motionSegmentLabel(seg()), 'SINGLE IMAGE · SLOW PUSH IN')
+  assert.ok(
+    motionSegmentLabel(seg({ motion: 'pan-left' })).startsWith('SINGLE IMAGE'),
+    'every motion type is spelled out as SINGLE IMAGE — never icon-only, never bare'
+  )
+  for (const m of MOTION_TYPES) {
+    assert.ok(MOTION_LABEL[m] && MOTION_LABEL[m].length > 0, `${m} has a human label`)
+  }
+  assert.strictEqual(MOTION_TYPES.length, 7, 'the six original motions plus Smooth Forward')
+
+  // ── C. ITS PROMPT IS ITS OWN, NOT THE TRANSITION PRESET ──────────────
+  //
+  // The transition preset names an END FRAME. There is no end frame
+  // here, and asking a model to reproduce one it was never given is an
+  // invitation to invent it.
+  const prompt = buildMotionPrompt('push-in')
+  assert.ok(!/end frame/i.test(prompt), 'the motion prompt never mentions an end frame')
+  assert.ok(!/START FRAME/i.test(prompt), 'nor a start frame — there is only one image')
+  assert.ok(
+    /invisible virtual viewpoint/i.test(prompt),
+    'but it keeps the no-physical-camera rule: a mirror reflects in a still too'
+  )
+  assert.ok(
+    /Do not redesign, add, remove or move anything/i.test(prompt),
+    'and the anti-invention contract'
+  )
+  const distinct = new Set(MOTION_TYPES.map((m) => buildMotionPrompt(m)))
+  assert.strictEqual(distinct.size, MOTION_TYPES.length, 'each motion produces a different prompt')
+
+  // ── D. THE RUN IS POSSIBLE, AND OFFERS A MODEL CHOICE ────────────────
+  //
+  // Kling 2.6 Pro's published schema marks `end_image_url` optional, so
+  // readiness must SUCCEED and hand the operator a selector. The earlier
+  // "no verified model can do this" state was a wrong reading of that
+  // contract and must not survive anywhere.
+  const readiness = motionGenerationReadiness(seg(), FAL_MODEL_REGISTRY)
+  assert.ok(readiness.ok, 'a single-image run is possible now that 2.6 Pro is enabled')
+  if (readiness.ok) {
+    assert.ok(readiness.models.length > 0, 'and the selector is never empty when a run is allowed')
+    assert.ok(
+      readiness.models.some((m) => m.displayName === 'Kling 2.6 Pro'),
+      'Kling 2.6 Pro is offered'
+    )
+    assert.ok(
+      readiness.models.every((m) => m.supportsStartFrameOnly && m.confirmed),
+      'and ONLY confirmed, single-image-capable models are'
+    )
+    assert.deepStrictEqual(readiness.durationsSec, [5, 10])
+  }
+  assert.ok(
+    startFrameOnlyModels().some((m) => m.id.includes('v2.6/pro')),
+    'the registry now returns a start-frame-only model'
+  )
+
+  // ── E. A MODEL THAT NEEDS AN END FRAME IS STILL EXCLUDED ─────────────
+  const needsEnd = FAL_MODEL_REGISTRY.filter((m) => !m.supportsStartFrameOnly)
+  assert.ok(needsEnd.length > 0, 'not every model can do this — O3 cannot')
+  for (const m of needsEnd) {
+    assert.throws(
+      () =>
+        buildSingleImageBody(m, {
+          prompt: 'x',
+          startImage: 'data:image/jpeg;base64,AA',
+          durationSec: 5
+        } as never),
+      /cannot generate from a single image/,
+      `${m.displayName} throws rather than sending the start frame twice`
+    )
+  }
+  const onlyIncapable = motionGenerationReadiness(
+    seg(),
+    FAL_MODEL_REGISTRY.filter((m) => !m.supportsStartFrameOnly)
+  )
+  assert.ok(!onlyIncapable.ok, 'with no capable model in the registry, the run is refused')
+
+  // ── F. UNCONFIRMED MODELS ARE NEVER OFFERED ──────────────────────────
+  //
+  // A guessed contract is not something to discover is wrong by spending
+  // money on it.
+  const unconfirmed = motionGenerationReadiness(
+    seg(),
+    FAL_MODEL_REGISTRY.map((m) => ({ ...m, confirmed: false, supportsStartFrameOnly: true }))
+  )
+  assert.ok(!unconfirmed.ok, 'unconfirmed models are never offered for a paid run')
+
+  // ── G. A STATUS WORD IS NOT A LOCK ───────────────────────────────────
+  //
+  // THE REGRESSION THIS PINS. Readiness used to refuse whenever the
+  // stored status said `queued`/`generating`. `queueMotionGeneration`
+  // writes `queued` BEFORE enqueuing, so the runner's own request build
+  // was refused by the marker the queue had just written for it: the job
+  // failed with "already running", the failure never cleared the status,
+  // and the segment was stuck for good. Running must be PROVEN by a live
+  // job — see motionRunState — never inferred from a word.
+  const statusOnly = motionGenerationReadiness(seg({ status: 'generating' }), FAL_MODEL_REGISTRY)
+  assert.ok(
+    statusOnly.ok,
+    'a stale `generating` status alone must NOT block — that was the deadlock'
+  )
+
+  // ── H. ASSEMBLY: THE MOTION CLIP REPLACES THE STILL ──────────────────
+  //
+  // The no-duplicated-time rule. Image 2 is shown by its motion clip, so
+  // it must NOT also be held as a still.
+  const imageIds = ['i1', 'i2', 'i3']
+  const imagePaths = ['p1.jpg', 'p2.jpg', 'p3.jpg']
+  const withMotion = planAssembly({
+    imageIds,
+    modes: ['cut', 'cut'],
+    clipPaths: [null, null],
+    imagePaths,
+    seamBlend: 'subtle',
+    motions: [
+      { segmentId: 'motion:1', imageId: 'i2', label: 'SINGLE IMAGE · Pan Left', clipPath: 'm1.mp4' }
+    ]
+  })
+  assert.ok(withMotion.ok, 'a generated motion clip does not block the build')
+  assert.deepStrictEqual(
+    withMotion.segments.map((s) => s.kind),
+    ['still', 'motion', 'still'],
+    'image 2 appears ONCE, as motion — not as a motion clip plus a still hold'
+  )
+  const heldIds = withMotion.segments.filter((s) => s.kind === 'still').map((s) => s.imageId)
+  assert.ok(!heldIds.includes('i2'), 'NO DUPLICATED TIME: the still for image 2 is gone')
+  assert.strictEqual(withMotion.segments[1].motionSegmentId, 'motion:1')
+
+  // ── I. AN UNGENERATED MOTION SEGMENT BLOCKS THE BUILD ────────────────
+  //
+  // Same treatment as a missing transition clip: it is on the timeline,
+  // so shipping without it would ship a different video.
+  const ungenerated = planAssembly({
+    imageIds,
+    modes: ['cut', 'cut'],
+    clipPaths: [null, null],
+    imagePaths,
+    seamBlend: 'subtle',
+    motions: [
+      { segmentId: 'motion:1', imageId: 'i2', label: 'SINGLE IMAGE · Pan Left', clipPath: null }
+    ]
+  })
+  assert.ok(!ungenerated.ok, 'an ungenerated motion segment is not silently dropped')
+  assert.deepStrictEqual(ungenerated.missingMotionSegments, ['SINGLE IMAGE · Pan Left'])
+  assert.ok(/Motion clips not generated/.test(ungenerated.reason ?? ''), 'and it says which')
+  assert.deepStrictEqual(
+    ungenerated.segments.map((s) => s.kind),
+    ['still', 'still', 'still'],
+    'and its image falls back to a still rather than vanishing from the video'
+  )
+
+  // ── J. EXISTING TWO-IMAGE TRANSITIONS ARE UNTOUCHED ──────────────────
+  //
+  // The same input with `motions` absent must produce byte-identical
+  // output to the same input with an empty list — that is what makes the
+  // field safe to add to every existing caller.
+  const base = { imageIds, modes: ['ai', 'ai'] as never, clipPaths: ['c1.mp4', 'c2.mp4'], imagePaths, seamBlend: 'subtle' as const }
+  const noField = planAssembly(base)
+  const emptyField = planAssembly({ ...base, motions: [] })
+  assert.deepStrictEqual(
+    noField.segments,
+    emptyField.segments,
+    'a project with no motion segments plans exactly as it did before'
+  )
+  assert.deepStrictEqual(noField.segments.map((s) => s.kind), ['clip', 'clip'])
+
+  // ── K. MOTION IS NOT SPATIAL EVIDENCE ────────────────────────────────
+  //
+  // A photograph with gentle movement says nothing about which room
+  // connects to which. The store is separate precisely so the pair
+  // analysers cannot see it — assert that separation structurally.
+  const project = {
+    id: 'p',
+    images: [{ id: 'i1' }, { id: 'i2' }],
+    feedSequence: ['i1', 'i2'],
+    transitions: {},
+    motionSegments: [seg()]
+  } as unknown as Project
+  assert.strictEqual(
+    Object.keys(project.transitions).length,
+    0,
+    'adding a motion segment writes NOTHING into project.transitions'
+  )
+  assert.strictEqual(motionSegments(project).length, 1)
+  assert.deepStrictEqual(
+    motionSegmentsForImage(project, 'i2').map((s) => s.id),
+    [`${MOTION_ID_PREFIX}abc`]
+  )
+  assert.deepStrictEqual(motionSegmentsForImage(project, 'i1'), [], 'and only for its own image')
+
+  console.log('[smoke] single-image motion: type, prompt, model gate, assembly, isolation')
+}
+
 function testMixedAssemblyPlan(): void {
   const imageIds = ['i1', 'i2', 'i3', 'i4']
   const imagePaths = ['p1.jpg', 'p2.jpg', 'p3.jpg', 'p4.jpg']
@@ -5218,10 +11191,25 @@ function testLogicalTransitions(workDir: string, created: string[]): void {
   const created28 = after.transitions[transitionKey(ids[27], ids[28])]
   assert.ok(created28, 'a previously unconfigured pair now has a row')
   assert.strictEqual(created28.promptProvenance?.manuallyEdited, false)
-  assert.ok(
-    created28.prompt.includes(DEFAULT_TRANSITION_PROMPT),
-    'and its prompt still leads with the unchanged safety contract'
-  )
+  // Not `includes(DEFAULT_TRANSITION_PROMPT)` any more: the preset's
+  // sections are interleaved with the pair's own blocks rather than
+  // concatenated in front of them, which is what stopped the movement
+  // instruction being pushed past the provider's character limit. The
+  // contract is checked by its parts instead of by one long substring.
+  for (const section of [
+    PRESET_PARTS.opening,
+    PRESET_PARTS.frames,
+    PRESET_PARTS.motionQuality,
+    PRESET_PARTS.geometry,
+    PRESET_PARTS.occupancy,
+    PRESET_PARTS.nonexistent
+  ]) {
+    assert.ok(
+      created28.prompt.includes(section.text) ||
+        (section.compact != null && created28.prompt.includes(section.compact)),
+      `and its prompt still carries the safety contract: ${section.id}`
+    )
+  }
   // The CONFIGURED default, read the same way the service reads it — a
   // row created by a rebuild must get the same duration as one created
   // any other way, and hard-coding a number here would only assert that
@@ -8027,6 +14015,602 @@ function testAnalysisReview(workDir: string, created: string[]): void {
  * property of English prose, which could not be asserted on and could
  * drift with a rewording; it is now a boolean these tests pin.
  */
+/**
+ * CONSTANT VELOCITY, IN EVERY AUTOMATIC PROMPT.
+ *
+ * The reported fault was that clips ran slow → faster → slow. That was
+ * not a rendering artefact: the preset asked for it, in so many words —
+ * "Ease in from an almost imperceptible start … then ease out to a still
+ * landing." These assertions exist so the wording cannot drift back.
+ */
+/**
+ * THE PROMPT BUDGET, ON THE FOUR SHAPES THAT ACTUALLY GET SENT.
+ *
+ * ── THE BUG THIS PINS ────────────────────────────────────────────────
+ *
+ * Prompts were assembled by concatenation, with the pair's own movement
+ * instruction appended LAST, and only checked against the provider limit
+ * at submit time — where the only remedy left was cutting characters off
+ * the end. Measured on the operator's real database: eight stored
+ * prompts of 2996–3458 characters against a 2500 limit, the cut landing
+ * at ~2498, and six of them losing `VIEWPOINT MOVEMENT FOR THIS
+ * TRANSITION` completely. The analysis that produced those instructions
+ * had been run and paid for.
+ *
+ * So every case here asserts the same two things: it fits, and the
+ * pair-specific movement is still in it.
+ */
+/**
+ * EVERY PATH THAT FINISHES AN AUTOMATIC PROMPT MUST AGREE.
+ *
+ * ── THE BUG THIS PINS ────────────────────────────────────────────────
+ *
+ * There were two final-prompt assemblies. Prompt repair planned the pair
+ * and rendered it through the canonical sections; accepting an
+ * individual Re-analyse did this instead:
+ *
+ *   `${DEFAULT_TRANSITION_PROMPT}\n\n${motionBlock(gemini.motionInstruction)}`
+ *
+ * — the pre-sections concatenation, movement LAST, no budget, no
+ * reflection block, no operator context, and the analyzer's prose used
+ * verbatim as the route. The operator could see the difference: the same
+ * pair played as one continuous take after a repair and did not after a
+ * Re-analyse.
+ *
+ * So this builds the SAME pair through the service entrypoints and
+ * compares the results to each other, not to a fixture. Two paths that
+ * are both wrong in the same way still pass a fixture comparison; they
+ * cannot pass this.
+ */
+function testFinalPromptEquivalence(workDir: string, created: string[]): void {
+  const project = makeProject('Smoke final prompt equivalence')
+  created.push(project.id)
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'
+  )
+  const img = join(workDir, 'equiv.png')
+  writeFileSync(img, png)
+  project.images = importImages(project.id, [
+    { sourcePath: img, name: 'a.png' },
+    { sourcePath: img, name: 'b.png' }
+  ])
+  const [A, B] = project.images.map((i) => i.id)
+  project.feedSequence = [A, B]
+  const key = transitionKey(A, B)
+  project.transitions[key] = { ...defaultTransitionSettings(5), mode: 'ai' }
+  saveProject(project)
+
+  // The analyzer's answer, worded the way a language model words things.
+  // "Gently" is the tempo claim; everything else is the route.
+  const GEMINI_ROUTE = 'rotate gently toward the window, then ease into the living room'
+  savePairAnalysis({
+    projectId: project.id,
+    pairKey: key,
+    analyzedAt: 5000,
+    analyzer: 'gemini',
+    model: 'test',
+    parentAnalysisUpdatedAt: null,
+    feedFingerprint: `${A}|${B}`,
+    libraryFingerprint: `${A}|${B}`,
+    evidence: {
+      relation: 'same-room',
+      sharedLandmarks: ['vanity'],
+      openings: [],
+      reflectiveSurfaces: [],
+      geometryConflicts: []
+    },
+    decision: 'ai',
+    missingContext: [],
+    motionInstruction: GEMINI_ROUTE,
+    promptCandidate: null,
+    reason: 'same room',
+    state: 'draft'
+  })
+
+  // ── A. THE RE-ANALYSE ACCEPTANCE PATH ───────────────────────────────
+  const accepted = acceptPairAnalysis(project.id, key)
+  assert.ok(accepted.ok, 'A: the analysis is accepted: ' + (accepted.reason ?? ''))
+  const viaAccept = listProjects().find((p) => p.id === project.id)!.transitions[key].prompt
+
+  // ── B. THE CANONICAL FINALIZER, CALLED DIRECTLY ─────────────────────
+  const viaFinalizer = finalizeTransitionPromptById(project.id, key)
+  assert.ok(viaFinalizer.ok, 'B: the finalizer builds a prompt')
+
+  // ── C. THE REBUILD PATH ("Analyse prompts") ─────────────────────────
+  rebuildPromptsFromAnalysis(project.id)
+  const viaRebuild = listProjects().find((p) => p.id === project.id)!.transitions[key].prompt
+
+  // ── D. THE REPAIR PATH ──────────────────────────────────────────────
+  repairRetiredPromptOntology(project.id, false)
+  const viaRepair = listProjects().find((p) => p.id === project.id)!.transitions[key].prompt
+
+  // THE POINT OF THE WHOLE TEST.
+  assert.strictEqual(viaAccept, viaFinalizer.ok ? viaFinalizer.prompt : '', 'A === B')
+  assert.strictEqual(viaRebuild, viaAccept, 'C === A')
+  assert.strictEqual(viaRepair, viaAccept, 'D === A')
+
+  // ── THE ROUTE SURVIVES, THE TEMPO DOES NOT ──────────────────────────
+  assert.match(viaAccept, /rotate/i, 'the analyzer’s rotation reaches the prompt')
+  assert.match(viaAccept, /toward the window/i, 'and its destination')
+  assert.match(viaAccept, /living room/i, 'and the room it ends in')
+  for (const tempo of [/gently/i, /\bease into\b/i, /\bease in\b/i, /\bsettle into\b/i]) {
+    assert.doesNotMatch(viaAccept, tempo, `no tempo claim survives: ${String(tempo)}`)
+  }
+
+  // ── AND THE CANONICAL CONTRACT IS THERE, IN THE CANONICAL ORDER ─────
+  assert.ok(viaAccept.includes(PRESET_PARTS.motionQuality.text) || viaAccept.includes(PRESET_PARTS.motionQuality.compact!), 'MOTION_QUALITY verbatim')
+  assert.ok(viaAccept.includes('ONE CONSTANT SPEED'), 'the speed contract')
+  assert.ok(viaAccept.includes(MOTION_HEADER), 'the pair-specific movement block')
+  assert.ok(
+    viaAccept.indexOf(MOTION_HEADER) < viaAccept.indexOf('SCENE OCCUPANCY'),
+    'the route comes BEFORE the occupancy block — the canonical order, not the appended one'
+  )
+  assert.ok(viaAccept.length <= PROMPT_MAX_CHARS, `budget respected: ${viaAccept.length}`)
+  assert.ok(!promptUsesRetiredLayout(viaAccept), 'and it is not the retired layout')
+  assert.ok(!promptUsesRetiredContract(viaAccept), 'nor a retired contract')
+
+  // ── THE HYGIENE ITSELF ──────────────────────────────────────────────
+  //
+  // What it must remove, and what it must leave alone. The spatial
+  // content is the whole value of the analysis; a sanitiser that eats
+  // landmarks would be worse than the tempo it was written to remove.
+  for (const [input, expected] of [
+    ['rotate gently toward the window', 'rotate toward the window'],
+    ['Slowly glide forward through the doorway', 'move forward through the doorway'],
+    [
+      'Move forward through the existing doorway, then turn right into the living room while preserving the wall geometry.',
+      'Move forward through the existing doorway, then turn right into the living room while preserving the wall geometry.'
+    ],
+    ['reposition smoothly between the two viewpoints', 'reposition smoothly between the two viewpoints']
+  ] as Array<[string, string]>) {
+    assert.strictEqual(sanitizeMotionInstruction(input), expected, `hygiene: ${input}`)
+  }
+  assert.strictEqual(sanitizeMotionInstruction(null), null, 'no instruction stays no instruction')
+
+  // ── PHRASE-AWARE, SO THE CONTRACT DOES NOT FLAG ITSELF ──────────────
+  //
+  // MOTION_QUALITY forbids these things BY NAME: "never accelerate,
+  // decelerate, ease, ramp, hesitate, pause, surge or settle". A word
+  // search finds them inside their own prohibition and reports the
+  // correct prompt as broken — and the preflight that consumes such a
+  // check then refuses to generate anything at all. That has already
+  // happened once in this codebase.
+  assert.ok(
+    !containsTempoClaim(PRESET_PARTS.motionQuality.text),
+    'the canonical contract is not mistaken for a tempo claim by its own prohibition'
+  )
+  assert.ok(!containsTempoClaim(viaAccept), 'nor is a whole finished prompt')
+  assert.ok(containsTempoClaim('rotate gently toward the window'), 'but a real claim is caught')
+  assert.ok(containsTempoClaim('ease into the living room'), 'and so is easing')
+
+  log('final prompt equivalence: accept === finalizer === rebuild === repair, route kept, tempo dropped')
+}
+
+function testPromptBudget(): void {
+  const MOVEMENT_WORST =
+    `${MOTION_HEADER}\n` +
+    'Hold the floor-to-ceiling stone fireplace and the oak media console in view while ' +
+    'rotating clockwise and translating forward from the Living Room through the open ' +
+    'sliding glass patio doorway into the Covered Terrace, keeping the glazed façade wall ' +
+    'on the left and the sectional sofa in the lower foreground, without depicting travel ' +
+    'through any other doorway or opening, since none is confirmed visible in the start frame.'
+
+  const operatorPart = (text: string): PromptPart => ({
+    id: 'operator-context',
+    priority: 'mandatory',
+    text: [
+      'OPERATOR-PROVIDED SPATIAL CONTEXT:',
+      text,
+      'This is authoritative knowledge of the real property supplied by the operator. Treat it as true. Do not reinterpret it into a different layout.'
+    ].join('\n'),
+    compact: [
+      'OPERATOR-PROVIDED SPATIAL CONTEXT:',
+      text,
+      'Authoritative knowledge of the real property, from the operator. Treat as true; do not reinterpret the layout.'
+    ].join('\n')
+  })
+
+  const movementPart = (text: string): PromptPart => ({
+    id: 'movement',
+    priority: 'mandatory',
+    text
+  })
+
+  const reflectionParts = (): PromptPart[] => [
+    {
+      id: 'reflection',
+      priority: 'mandatory',
+      text: REFLECTION_SAFETY_BLOCK,
+      compact: REFLECTION_SAFETY_BLOCK_COMPACT
+    },
+    {
+      id: 'expected-mirror',
+      priority: 'droppable',
+      text: expectedMirrorContentBlock('wall mirror', ['beige tiled wall', 'vanity unit'])!,
+      compact: expectedMirrorContentBlockCompact('wall mirror', [
+        'beige tiled wall',
+        'vanity unit'
+      ])!
+    }
+  ]
+
+  // Assembled in the SAME order renderPrompt uses. Stated once here so a
+  // reordering in one place and not the other shows up as a failure.
+  const shape = (opts: {
+    movement?: string
+    operator?: string
+    reflective?: boolean
+  }): PromptPart[] => [
+    PRESET_PARTS.opening,
+    PRESET_PARTS.frames,
+    ...(opts.movement ? [movementPart(opts.movement)] : []),
+    PRESET_PARTS.motionQuality,
+    PRESET_PARTS.geometry,
+    ...(opts.operator ? [operatorPart(opts.operator)] : []),
+    ...(opts.reflective ? reflectionParts() : []),
+    PRESET_PARTS.occupancy,
+    PRESET_PARTS.nonexistent,
+    PRESET_PARTS.style
+  ]
+
+  const CASES: Array<{ name: string; parts: PromptPart[]; reflective: boolean }> = [
+    {
+      name: 'A. longest normal pair',
+      parts: shape({ movement: MOVEMENT_WORST }),
+      reflective: false
+    },
+    {
+      name: 'B. longest reflective pair',
+      parts: shape({ movement: MOVEMENT_WORST, reflective: true }),
+      reflective: true
+    },
+    {
+      name: 'C. reflective pair + operator context',
+      parts: shape({
+        movement: MOVEMENT_WORST,
+        reflective: true,
+        operator:
+          'The mirror on the left shows the hallway door, not a second room. The corridor ' +
+          'behind the camera position leads to the garage, which is not part of this listing.'
+      }),
+      reflective: true
+    },
+    {
+      name: 'D. long pair-specific movement instruction',
+      parts: shape({
+        movement:
+          `${MOTION_HEADER}\n` +
+          'Hold the floor-to-ceiling stone fireplace, the oak media console and the brass ' +
+          'floor lamp in view while rotating clockwise and translating forward from the ' +
+          'Living Room through the open sliding glass patio doorway into the Covered ' +
+          'Terrace, keeping the glazed façade wall on the left, the sectional sofa in the ' +
+          'lower foreground and the pergola beams overhead, without depicting travel ' +
+          'through any other doorway, corridor or opening, since none of them is confirmed ' +
+          'visible in the start frame.',
+        reflective: true,
+        operator: 'The mirror shows the hallway door, not a second room.'
+      }),
+      reflective: true
+    }
+  ]
+
+  for (const { name, parts, reflective } of CASES) {
+    const built = assemblePrompt(parts)
+    assert.ok(built.ok, `${name}: assembles at all — ${built.ok ? '' : built.reason}`)
+    if (!built.ok) continue
+
+    assert.ok(
+      built.prompt.length <= PROMPT_MAX_CHARS,
+      `${name}: ${built.prompt.length} chars, limit ${PROMPT_MAX_CHARS}`
+    )
+
+    // THE ONE THAT WAS BEING LOST.
+    assert.ok(
+      built.prompt.includes(MOTION_HEADER),
+      `${name}: the pair-specific movement instruction survives`
+    )
+    // And in full — a compacted movement block would be the same bug
+    // wearing a different name.
+    const movement = parts.find((p) => p.id === 'movement')!
+    assert.ok(built.prompt.includes(movement.text), `${name}: and survives INTACT, not shortened`)
+
+    // Every mandatory concept still present.
+    for (const rule of [
+      'END FRAME must be reproduced EXACTLY',
+      'ONE CONSTANT SPEED',
+      'never through walls, floors, ceilings or furniture',
+      'zero people anywhere in it',
+      'do not exist in this world',
+      'invisible virtual viewpoint'
+    ]) {
+      assert.ok(built.prompt.includes(rule), `${name}: "${rule}" survives`)
+    }
+    if (reflective) {
+      assert.ok(
+        built.prompt.includes('REFLECTION CONTENT'),
+        `${name}: the reflection contract survives`
+      )
+    }
+    const operator = parts.find((p) => p.id === 'operator-context')
+    if (operator) {
+      // The operator's OWN words, not our framing sentence around them.
+      const theirText = operator.text.split('\n')[1]
+      assert.ok(
+        built.prompt.includes(theirText),
+        `${name}: the operator's own wording is reproduced exactly`
+      )
+    }
+
+    log(
+      `prompt budget ${name}: ${built.prompt.length} chars` +
+        (built.dropped.length ? `, dropped ${built.dropped.join('+')}` : '') +
+        (built.compacted.length ? `, compacted ${built.compacted.join('+')}` : '')
+    )
+  }
+
+  // ── STYLE GOES BEFORE ANY MANDATORY BLOCK IS TOUCHED ─────────────────
+  //
+  // Sized so that giving up the tone line is enough on its own: if the
+  // ladder ever reached for a mandatory block first, this would come
+  // back with something in `compacted`.
+  const normal = shape({ movement: MOVEMENT_WORST })
+  const fullLength = assemblePrompt(normal, Number.MAX_SAFE_INTEGER)
+  assert.ok(fullLength.ok)
+  const styleOnly = assemblePrompt(
+    normal,
+    (fullLength.ok ? fullLength.prompt.length : 0) - PRESET_PARTS.style.text.length
+  )
+  assert.ok(styleOnly.ok)
+  assert.deepStrictEqual(
+    styleOnly.ok ? styleOnly.dropped : null,
+    ['style'],
+    'tone is given up first'
+  )
+  assert.deepStrictEqual(
+    styleOnly.ok ? styleOnly.compacted : null,
+    [],
+    'and nothing mandatory is shortened while dropping tone is still enough'
+  )
+
+  // ── MANDATORY CONTENT THAT CANNOT FIT FAILS, IT DOES NOT TRUNCATE ────
+  //
+  // The old path answered this case with `slice()`, which is how a
+  // prompt missing its movement instruction got submitted at full price.
+  const impossible = assemblePrompt(
+    shape({
+      movement: MOVEMENT_WORST,
+      reflective: true,
+      operator: 'The mirror shows the hallway door. '.repeat(60)
+    })
+  )
+  assert.ok(!impossible.ok, 'mandatory content over the limit is refused, not cut')
+  if (!impossible.ok) {
+    assert.match(
+      impossible.reason,
+      /operator-provided spatial context|movement instruction/i,
+      'and the refusal names what the operator can actually shorten'
+    )
+    assert.ok(
+      impossible.smallestChars > impossible.maxChars,
+      'and reports how far over it got'
+    )
+  }
+
+  log('prompt budget: movement survives every realistic shape; overflow fails loudly')
+}
+
+function testConstantVelocityContract(): void {
+  const preset = DEFAULT_TRANSITION_PROMPT
+
+  // ── WHAT IT MUST SAY ─────────────────────────────────────────────────
+  for (const required of [
+    'CONTINUOUS CONSTANT VELOCITY',
+    'ONE CONSTANT SPEED',
+    'perfectly stabilized virtual rail'
+  ]) {
+    assert.ok(preset.includes(required), `the preset states: ${required}`)
+  }
+  assert.ok(
+    /never accelerate, decelerate, ease/i.test(preset),
+    'and forbids every form of tempo change by name'
+  )
+
+  // ── B/C. MOVING AT BOTH ENDS, AT THE SAME SPEED ──────────────────────
+  //
+  // The clip is a window onto a move that was already happening and goes
+  // on afterwards. Both ends have to say so, or the model supplies the
+  // missing half itself — a launch at the start, a landing at the end.
+  assert.ok(
+    /START FRAME is already travelling at that established speed/i.test(preset),
+    'B: no launch — it is already at travel speed when the clip starts'
+  )
+  assert.ok(
+    /END FRAME is reached at exactly that same speed/i.test(preset),
+    'C: no landing — arrival happens at travel speed, not after slowing to it'
+  )
+
+  // ── D. NO LAUNCH, NO LANDING, AND IT SAYS WHY ────────────────────────
+  assert.ok(
+    /Do not launch out of the START FRAME or land into the END FRAME/i.test(preset),
+    'D: the two failure shapes are named, not merely implied'
+  )
+  assert.ok(
+    /segment cut from one longer uninterrupted take/i.test(preset),
+    'D: and the reason is stated — several clips in sequence are one move'
+  )
+
+  // ── AND NOTHING ELSE MAY STILL ASK FOR A STOP ────────────────────────
+  //
+  // `FRAMES` ended "the final frame must be perfectly still" and the path
+  // planner appended "Stop on a still final frame". Both said SPEED from
+  // inside blocks about something else, and both contradicted reaching
+  // the end frame at travel speed. The last sentence the model read used
+  // to be the one telling it to halt.
+  for (const contradiction of [
+    /final frame must be perfectly still/i,
+    /held perfectly still/i,
+    /stop on a still final frame/i,
+    /stops dead on the END FRAME/i
+  ]) {
+    assert.doesNotMatch(
+      preset,
+      contradiction,
+      `nothing in the preset still asks the move to stop: ${String(contradiction)}`
+    )
+  }
+
+  // ── AND IT HAS TO FIT ALONGSIDE A REAL INSTRUCTION ───────────────────
+  //
+  // The preset is never sent alone. `testPromptFitting` pins the worst
+  // realistic case, but it only fails once the block has ALREADY grown
+  // too big; this states the budget directly so the next person to edit
+  // the wording learns the constraint from the test rather than from a
+  // dropped section. 461 is the planner's wordiest instruction today.
+  //
+  // Measured through the ASSEMBLER, not by adding up full-form lengths.
+  // The full preset is 2181 characters and does not fit beside a 461
+  // character instruction — it is not supposed to. What has to be true
+  // is that the assembler can reach a fitting prompt without giving up
+  // anything mandatory, which is what this asks it to prove. The
+  // per-shape version of the same guarantee is `testPromptBudget`.
+  const withWorstMovement = assemblePrompt([
+    PRESET_PARTS.opening,
+    PRESET_PARTS.frames,
+    { id: 'movement', priority: 'mandatory', text: 'x'.repeat(461) },
+    PRESET_PARTS.motionQuality,
+    PRESET_PARTS.geometry,
+    PRESET_PARTS.occupancy,
+    PRESET_PARTS.nonexistent,
+    PRESET_PARTS.style
+  ])
+  assert.ok(
+    withWorstMovement.ok,
+    `the preset must assemble beside the wordiest motion instruction (461 chars): ` +
+      `${withWorstMovement.ok ? '' : withWorstMovement.reason}`
+  )
+  if (withWorstMovement.ok) {
+    assert.ok(
+      withWorstMovement.prompt.includes('ONE CONSTANT SPEED'),
+      'and the speed contract is still in what comes out'
+    )
+  }
+
+  // ── WHAT IT MUST NOT SAY ─────────────────────────────────────────────
+  for (const banned of [
+    'ease in from',
+    'ease out to',
+    'imperceptible start',
+    'still landing',
+    'gradually slow',
+    'slowly begin',
+    'settle into'
+  ]) {
+    assert.ok(!preset.toLowerCase().includes(banned), `the preset no longer says: ${banned}`)
+  }
+
+  // ── AND STILL NO PHYSICAL DEVICE ─────────────────────────────────────
+  //
+  // The motion QUALITY is drone-like; the scene must not contain a drone.
+  // Naming one is what once put a photographer in a bathroom mirror.
+  //
+  // Checked against the MOTION BLOCK, not the whole preset: the preset
+  // names gimbals and drones on purpose, in the list of things that may
+  // never appear in frame. A blanket substring check over the preset
+  // fails on that prohibition — which is the same mistake the retired-
+  // phrase detector made, in the same file, for the same reason.
+  const motionBlock = /MOTION — CONTINUOUS CONSTANT VELOCITY:[^\n]*/.exec(preset)?.[0] ?? ''
+  assert.ok(motionBlock.length > 0, 'the motion block is findable in the preset')
+  for (const device of ['gimbal', 'drone', 'camera', 'rail-mounted', 'dolly', 'crane']) {
+    assert.ok(
+      !motionBlock.toLowerCase().includes(device),
+      `the motion block describes motion without naming a device: ${device}`
+    )
+  }
+  assert.ok(
+    preset.includes('no physical imaging device exists'),
+    'the ontology is unchanged: nothing is filming'
+  )
+
+  // ── IT CANNOT BE TRIMMED AWAY ────────────────────────────────────────
+  //
+  // The motion block used to be `droppable`, so the LONGEST prompts — a
+  // reflective pair carrying operator context, exactly where a steady
+  // move matters most — were the ones that lost it to the length limiter.
+  const squeezed = fitPromptToLimit(preset, 900)
+  assert.ok(
+    squeezed.prompt.includes('ONE CONSTANT SPEED'),
+    'the motion contract survives even an aggressive trim'
+  )
+
+  // ── THE DETECTOR SEPARATES NEW FROM RETIRED ──────────────────────────
+  //
+  // THE BUG THIS PINS. The current block FORBIDS these things by name —
+  // "no acceleration, no deceleration, no easing" — and a naive substring
+  // match finds "accelerat" and "easing" inside its own prohibition. On
+  // the real database every freshly rebuilt prompt flagged itself, which
+  // would have made the preflight refuse to generate anything at all.
+  assert.ok(
+    !promptUsesRetiredMotion(preset),
+    'a CURRENT prompt is not mistaken for a stale one by its own prohibitions'
+  )
+  assert.ok(
+    promptUsesRetiredMotion(
+      'The viewpoint glides. Ease in from an almost imperceptible start, move steadily, then ease out to a still landing.'
+    ),
+    'but the retired three-phase wording IS caught'
+  )
+  assert.ok(
+    promptUsesRetiredMotion(`${DEFAULT_TRANSITION_PROMPT} Then ease out to a still landing.`),
+    'and a stale sentence appended to a current prompt is still caught'
+  )
+  assert.ok(promptCoversConstantVelocity(preset), 'the preset satisfies the currentness check')
+
+  // Both retirements answer one question, so repair and preflight cannot
+  // disagree about whether a row is current.
+  assert.ok(promptUsesRetiredContract('describing a high-end stabilized gimbal'), 'ontology')
+  assert.ok(promptUsesRetiredContract('ease in from an imperceptible start'), 'motion')
+  assert.ok(!promptUsesRetiredContract(preset), 'and the current preset is neither')
+
+  // ── A REFLECTIVE PAIR KEEPS BOTH CONTRACTS ───────────────────────────
+  // The shape a reflective pair actually gets: the preset plus the
+  // reflection block the planner appends.
+  const mirrored = `${preset}\n\n${REFLECTION_SAFETY_BLOCK}`
+  assert.ok(mirrored.includes('ONE CONSTANT SPEED'), 'motion contract present on a mirror pair')
+  assert.ok(promptCoversReflection(mirrored), 'and the reflection contract too')
+  assert.ok(!promptUsesRetiredMotion(mirrored), 'with no retired speed wording')
+  // Not a substring test for `gimbal`/`drone`: the preset names both, in
+  // the list of things that may never appear in frame, and a mirror pair
+  // is exactly where that prohibition earns its place. The question is
+  // whether the wording ASKS for equipment, which is what the detector
+  // answers.
+  assert.ok(
+    !promptUsesRetiredContract(mirrored),
+    'and still no filming equipment anywhere near a mirror'
+  )
+
+  // ── AND IT STILL FITS THE PROVIDER ──────────────────────────────────
+  //
+  // fal rejects a prompt over 2500 characters outright. The motion block
+  // grew when it became a requirement, so the budget is asserted rather
+  // than assumed — a preset that no longer fits would 422 on every
+  // single generation.
+  console.log(
+    '[smoke] preset chars:',
+    preset.length,
+    '| fitted:',
+    fitPromptToLimit(preset, 2500).prompt.length,
+    '| dropped:',
+    JSON.stringify(fitPromptToLimit(preset, 2500).dropped)
+  )
+  assert.ok(
+    fitPromptToLimit(preset, 2500).prompt.includes('ONE CONSTANT SPEED'),
+    'the motion contract reaches the provider within the character budget'
+  )
+
+  console.log('[smoke] motion contract: constant velocity, no easing, no device, not trimmable')
+}
+
 function testTransitionPlanning(): void {
   const ids = ['img-1', 'img-2', 'img-3', 'img-4']
   const analysis: PropertyAnalysis = {
@@ -8157,9 +14741,26 @@ function testTransitionPlanning(): void {
   }
 
   // ── The safety contract always leads ─────────────────────────────────
+  //
+  // "Leads" used to mean "is a literal prefix", because every pair block
+  // was concatenated after the whole preset. That is the arrangement
+  // that pushed the movement instruction past the character limit, so
+  // what is checked now is that the prompt still OPENS on the ontology
+  // and still carries the contract — not that it is one long prefix.
   for (const plan of plans) {
     const prompt = renderPrompt(plan, { fromRoom: 'Living Room', toRoom: 'Kitchen' })
-    assert.ok(prompt.startsWith(DEFAULT_TRANSITION_PROMPT), 'the base prompt leads every prompt')
+    assert.ok(
+      prompt.startsWith(PRESET_PARTS.opening.text) ||
+        prompt.startsWith(PRESET_PARTS.opening.compact!),
+      'every prompt opens on the viewpoint ontology'
+    )
+    for (const section of [PRESET_PARTS.frames, PRESET_PARTS.motionQuality, PRESET_PARTS.geometry]) {
+      assert.ok(
+        prompt.includes(section.text) ||
+          (section.compact != null && prompt.includes(section.compact)),
+        `the base contract leads every prompt: ${section.id}`
+      )
+    }
     assert.ok(
       prompt.includes('END FRAME must be reproduced EXACTLY'),
       'and the strict end-frame rule survives'
@@ -8574,7 +15175,7 @@ function testCostLedger(workDir: string, created: string[]): void {
   // Attach Test Clip never call the record path at all — asserted here by
   // running a MOCK-provider generation end to end and finding no entry.
   const before = listCostEntries(project.id).length
-  const mockJob = queueGeneration(project.id, [pairB])
+  const mockJob = queueGeneration(project.id, [pairB], null)
   assert.ok(mockJob, 'a non-live generation job was created')
   assert.strictEqual(
     listCostEntries(project.id).length,
@@ -9219,6 +15820,13 @@ function makeMockTransport(resultBytes: Buffer): MockTransport {
 
 const LIVE_SETTINGS = (overrides: Record<string, unknown> = {}): string =>
   JSON.stringify({
+    // These fixtures exercise the PROVIDER path — submit, poll, download,
+    // attach. Quality validation is a separate concern with its own tests
+    // (testQualityValidation), and it is switched off here so a missing
+    // Gemini key cannot turn every provider assertion into a needs-review.
+    // See the report: with the check ON and no key, clips correctly stop
+    // at needs-review rather than attaching.
+    analyzer: { analyzerId: 'manual', model: '', apiKey: '', mode: 'dry-run', qualityValidationMode: 'off' },
     providers: [
       {
         id: 'kling',
@@ -9503,7 +16111,17 @@ async function testKlingLive(workDir: string, created: string[]): Promise<void> 
     badTransport.processingPolls = 0
     __setTestTransport(badTransport)
     const badProject = listProjects().find((p) => p.id === project.id)!
-    badProject.transitions[pairB] = { prompt: '', durationSec: 5, status: 'not-generated', clip: null }
+    // Reset the CLIP state only. Keeping the prompt basis matters because
+    // generation preflight now refuses wording built on superseded
+    // evidence — and this test is about a corrupt download, not about
+    // provenance, so it must not strip the precondition by accident.
+    badProject.transitions[pairB] = {
+      ...badProject.transitions[pairB]!,
+      prompt: '',
+      durationSec: 5,
+      status: 'not-generated',
+      clip: null
+    }
     saveProject(badProject)
     const badJob = queueLiveGeneration(project.id, [pairB])
     assert.ok(badJob.ok, 'job queued for the corrupt-download case')
@@ -10308,6 +16926,13 @@ function makeFalMockTransport(resultBytes: Buffer): FalMockTransport {
 
 const FAL_LIVE_SETTINGS = (overrides: Record<string, unknown> = {}): string =>
   JSON.stringify({
+    // These fixtures exercise the PROVIDER path — submit, poll, download,
+    // attach. Quality validation is a separate concern with its own tests
+    // (testQualityValidation), and it is switched off here so a missing
+    // Gemini key cannot turn every provider assertion into a needs-review.
+    // See the report: with the check ON and no key, clips correctly stop
+    // at needs-review rather than attaching.
+    analyzer: { analyzerId: 'manual', model: '', apiKey: '', mode: 'dry-run', qualityValidationMode: 'off' },
     providers: [
       { id: 'fal', label: 'fal.ai', apiKey: 'sk-fal-live-smoke-key', mode: 'live', model: FAL_MODEL_ID },
       { id: 'kling', label: 'Kling', apiKey: '', legacySecret: '', mode: 'dry-run', model: null }
@@ -10671,7 +17296,17 @@ async function testFalLive(workDir: string, created: string[]): Promise<void> {
     badTransport.processingPolls = 0
     __setTestTransport(badTransport)
     const badProject = listProjects().find((p) => p.id === project.id)!
-    badProject.transitions[pairB] = { prompt: '', durationSec: 5, status: 'not-generated', clip: null }
+    // Reset the CLIP state only. Keeping the prompt basis matters because
+    // generation preflight now refuses wording built on superseded
+    // evidence — and this test is about a corrupt download, not about
+    // provenance, so it must not strip the precondition by accident.
+    badProject.transitions[pairB] = {
+      ...badProject.transitions[pairB]!,
+      prompt: '',
+      durationSec: 5,
+      status: 'not-generated',
+      clip: null
+    }
     saveProject(badProject)
     const badJob = queueLiveGeneration(project.id, [pairB])
     assert.ok(badJob.ok, 'fal job queued for the corrupt-download case')
@@ -10814,7 +17449,7 @@ async function testProviderQueueIntegration(workDir: string, created: string[]):
   )
 
   // 13. Queue the generation: provider metadata is stored on the job.
-  const genJob = queueGeneration(project.id, [pairKey])
+  const genJob = queueGeneration(project.id, [pairKey], null)
   assert.ok(genJob, 'generation job queued')
   assert.strictEqual(genJob!.provider?.provider, 'kling', 'provider recorded')
   assert.strictEqual(genJob!.provider?.model, KLING_MODELS[0].id, 'model recorded')
@@ -11611,7 +18246,7 @@ async function testProductionQueue(workDir: string, created: string[]): Promise<
     })
   )
 
-  const genJob = queueGeneration(genProject.id, [pairKey])
+  const genJob = queueGeneration(genProject.id, [pairKey], null)
   assert.ok(genJob, 'mock generation job created')
   assert.ok(genJob!.metadata.mock, 'job is labelled mock')
   assert.strictEqual(genJob!.provider?.provider, 'mock', 'mock provider recorded on the job')

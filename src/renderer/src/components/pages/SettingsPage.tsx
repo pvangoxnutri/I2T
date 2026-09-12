@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useAppState } from '../../state/AppState'
+import { makeWatermark, useAppState } from '../../state/AppState'
 import { durationChoices } from '../../../../shared/transitionDuration'
 import type {
   AspectRatio,
@@ -7,16 +7,18 @@ import type {
   Currency,
   FfmpegStatus,
   ProviderId,
-  ProviderMode
+  ProviderMode,
+  WatermarkPosition
 } from '../../types'
 import { SELECTABLE_PROVIDERS } from '../../types'
-import type { ProviderMetadataPayload } from '../../../../preload/index'
+import type { FalModelOption, ProviderMetadataPayload } from '../../../../preload/index'
 import { formatPrice, sanitizePricePerImage } from '../../../../shared/pricing'
 import { SEAM_SECONDS, type SeamBlend } from '../../../../shared/seamBlend'
 import type { AnalyzerMetadata } from '../../../../shared/analyzerTypes'
 import {
   Field,
   ImagePickerButton,
+  ApiKeyRow,
   SectionCard,
   SelectInput,
   SliderRow,
@@ -24,13 +26,15 @@ import {
   Toggle
 } from '../common/controls'
 
-type SettingsTab = 'general' | 'ai' | 'video' | 'branding' | 'advanced'
+type SettingsTab = 'general' | 'ai' | 'video' | 'branding'
 
 export function SettingsPage(): React.JSX.Element {
   const { settings, updateSettings } = useAppState()
   const [tab, setTab] = useState<SettingsTab>('general')
   const [ffmpeg, setFfmpeg] = useState<FfmpegStatus | null>(null)
   const [catalog, setCatalog] = useState<ProviderMetadataPayload[]>([])
+  /** The canonical model list — the same one the confirmation dialog uses. */
+  const [videoModels, setVideoModels] = useState<FalModelOption[]>([])
   const [keyStatus, setKeyStatus] = useState<Record<string, boolean>>({})
   const [keyDraft, setKeyDraft] = useState('')
   /** Which provider's safety-lock confirmation dialog is open. */
@@ -80,6 +84,9 @@ export function SettingsPage(): React.JSX.Element {
     void window.f2f.ffmpeg.status().then((status) => {
       if (!cancelled) setFfmpeg(status)
     })
+    void window.f2f.generation.models().then((m) => {
+      if (!cancelled) setVideoModels(m)
+    })
     void window.f2f.providers.catalog().then((c) => {
       if (!cancelled) setCatalog(c)
     })
@@ -110,27 +117,23 @@ export function SettingsPage(): React.JSX.Element {
     }
   }, [])
 
-  // ── The ACTIVE provider — everything below configures this one ─────────
-  const activeId: ProviderId =
-    settings.activeProviderId ?? settings.providers[0]?.id ?? 'fal'
-  const active =
-    settings.providers.find((p) => p.id === activeId) ?? settings.providers[0]
-  const isFal = active.id === 'fal'
-  const providerName = isFal ? 'fal.ai' : 'Kling'
-  const hasKey = keyStatus[active.id] === true
+  // ── NO ACTIVE-PROVIDER DERIVATION ───────────────────────────────────
+  //
+  // Video is fal.ai and analysis is Gemini; live mode and the safety
+  // locks are derived in main from whether a key is stored. What stood
+  // here — the active provider, its model, the per-provider lock and the
+  // list of reasons Live was unavailable — configured a card that no
+  // longer exists, and crashed outright on a settings row with no
+  // providers array.
+  const [brandingError, setBrandingError] = useState<string | null>(null)
   const exp = settings.exportDefaults
   const sig = settings.defaultSignature
-  const activeProviderLabel = providerName
-  /** Durations the SELECTED model publishes — never a hardcoded list. */
+  const falModel = catalog.find((p) => p.id === 'fal')
+  /** Durations the model publishes — never a hardcoded list. */
   const defaultDurationChoices = durationChoices(
-    catalog.find((p) => p.id === active.id)?.models.find((m) => m.id === active.model)?.durationsSec
+    falModel?.models.find((m) => m.id === falModel?.models[0]?.id)?.durationsSec
   )
-
-  /** Patches ONLY the active provider's entry — the other one is untouched. */
-  const patchProvider = (patch: Partial<typeof active>): void =>
-    updateSettings({
-      providers: settings.providers.map((p) => (p.id === active.id ? { ...p, ...patch } : p))
-    })
+  const activeProviderLabel = 'fal.ai'
 
   const patchExport = (patch: Partial<typeof exp>): void =>
     updateSettings({ exportDefaults: { ...exp, ...patch } })
@@ -138,35 +141,38 @@ export function SettingsPage(): React.JSX.Element {
   const patchSignature = (patch: Partial<typeof sig>): void =>
     updateSettings({ defaultSignature: { ...sig, ...patch } })
 
-  const models = catalog.find((p) => p.id === active.id)?.models ?? []
-  const selectedModel = models.find((m) => m.id === active.model)
+  /**
+   * THE LARGE VIDEO WATERMARK, AS A DEFAULT.
+   *
+   * Absent on every settings row written before this section existed, so
+   * it hydrates from the shared default rather than reading as "off" —
+   * §12's no-destructive-reset rule, honoured by falling back rather
+   * than by writing anything on load.
+   */
+  const wm = settings.defaultWatermark ?? makeWatermark()
+  const patchWatermark = (patch: Partial<typeof wm>): void =>
+    updateSettings({ defaultWatermark: { ...wm, ...patch } })
+
+  /**
+   * Store a picked image as a managed file and keep the short url.
+   *
+   * The old asset is removed in the same call, so replacing a logo does
+   * not leave the previous one on disk forever.
+   */
+  const pickBrandingAsset = async (
+    dataUrl: string,
+    name: string,
+    replacing: string | null,
+    apply: (url: string, name: string) => void
+  ): Promise<void> => {
+    const res = await window.f2f.projects.branding.save(dataUrl, name, replacing)
+    if (res.ok) apply(res.url, name)
+    else setBrandingError(res.reason)
+  }
 
   const production = settings.production
-  const contract = production.klingContract
   const patchProduction = (patch: Partial<typeof production>): void =>
     updateSettings({ production: { ...production, ...patch } })
-  const patchContract = (patch: Partial<typeof contract>): void =>
-    patchProduction({ klingContract: { ...contract, ...patch } })
-
-  // Each provider has its OWN safety lock — one never unlocks the other.
-  const lockOn = isFal ? production.allowLiveFalRequests : production.allowLiveKlingRequests
-  const setLock = (on: boolean): void =>
-    patchProduction(isFal ? { allowLiveFalRequests: on } : { allowLiveKlingRequests: on })
-
-  // Live becomes selectable ONLY when every requirement is met.
-  const liveBlockers: string[] = []
-  if (!hasKey) liveBlockers.push('No API key.')
-  if (!selectedModel) liveBlockers.push('No capable model selected.')
-  else if (!selectedModel.startFrame || !selectedModel.endFrame) {
-    liveBlockers.push('Selected model lacks start + end frame support.')
-  }
-  if (!isFal && !contract.acknowledged) {
-    liveBlockers.push('Remaining unconfirmed values not acknowledged.')
-  }
-  if (!lockOn) liveBlockers.push('Safety lock is off.')
-  const liveSelectable = liveBlockers.length === 0
-  const unconfirmed = contractStatus.filter((item) => !item.confirmed)
-  const falRateOff = falInfo?.rates.find((r) => !r.nativeAudio)?.usdPerSecond
 
   const pricing = settings.pricing
   const patchPricing = (patch: Partial<typeof pricing>): void =>
@@ -200,8 +206,7 @@ export function SettingsPage(): React.JSX.Element {
             ['general', 'General'],
             ['ai', 'AI'],
             ['video', 'Video'],
-            ['branding', 'Branding'],
-            ['advanced', 'Advanced']
+            ['branding', 'Branding']
           ] as const
         ).map(([key, label]) => (
           <button
@@ -263,386 +268,94 @@ export function SettingsPage(): React.JSX.Element {
         </SectionCard>
         )}
 
-        {tab === 'video' && (
+        {/* ── API KEYS ───────────────────────────────────────────────
+            I2T generates video with fal.ai and analyses properties with
+            Gemini. That is what the product is, not a choice to make, so
+            this is the whole of provider configuration: two keys.
+
+            What used to be here — a provider dropdown, a Dry Run / Live
+            mode, a per-provider safety lock and a contract-status table —
+            described one fact four times, and any one of them being
+            wrong silently disabled the app. Live is now derived from the
+            key, and spending is confirmed per generation with the cost
+            shown, which is where that decision belongs. */}
+        {/* ── VIDEO GENERATION ─────────────────────────────────────────
+            Where a new generation STARTS. The confirmation dialog can
+            change the model for one run without touching this, because
+            comparing two models on a transition must not require
+            editing a preference. */}
+        {tab === 'ai' && (
         <SectionCard
-          title="AI Provider"
-          subtitle="Stored locally only. Dry Run validates and builds the request without contacting the provider; Live sends paid requests, one transition at a time."
+          title="Video generation"
+          subtitle="The model new generations open with. You can change it for a single run in the confirmation."
         >
-          <Field
-            label="Provider"
-            hint="fal.ai is recommended — no large upfront API package required. Each provider keeps its own key, mode and safety lock."
-          >
+          <Field label="Default model">
             <SelectInput
-              value={activeId}
-              onChange={(e) => {
-                const id = e.target.value as ProviderId
-                setKeyDraft('')
-                updateSettings({ activeProviderId: id })
-                refreshKeys()
-              }}
+              value={settings.providers.find((p) => p.id === 'fal')?.model ?? ''}
+              onChange={(e) =>
+                updateSettings({
+                  providers: settings.providers.map((p) =>
+                    p.id === 'fal' ? { ...p, model: e.target.value } : p
+                  )
+                })
+              }
             >
-              {SELECTABLE_PROVIDERS.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                  {p.recommended ? ' — recommended' : ''}
+              {videoModels.map((m) => (
+                <option key={m.id} value={m.id} disabled={!m.confirmed}>
+                  {m.displayName}{m.confirmed ? '' : ' — not verified yet'}
                 </option>
               ))}
             </SelectInput>
           </Field>
-
-          <Field
-            label={`${providerName} API Key`}
-            hint={
-              hasKey
-                ? 'A key is stored. It is write-only — it is never read back into this window.'
-                : isFal
-                  ? 'Sent as Authorization: Key <key>. Empty by default.'
-                  : 'Sent as Authorization: Bearer <key>. Empty by default.'
-            }
-          >
-            <div className="key-row">
-              <TextInput
-                type="password"
-                placeholder={hasKey ? '•••••••• stored' : 'Not set'}
-                value={keyDraft}
-                onChange={(e) => setKeyDraft(e.target.value)}
-                autoComplete="off"
-              />
-              <button
-                type="button"
-                className="btn btn-ghost btn-tiny"
-                disabled={keyDraft.trim().length === 0}
-                onClick={() => {
-                  void window.f2f.providers.setApiKey(active.id, keyDraft.trim()).then(() => {
-                    setKeyDraft('')
-                    refreshKeys()
-                  })
-                }}
-              >
-                Save key
-              </button>
-              {hasKey && (
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-tiny"
-                  onClick={() => {
-                    void window.f2f.providers.setApiKey(active.id, '').then(refreshKeys)
-                  }}
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-          </Field>
-
-          <Field
-            label="Mode"
-            hint={
-              liveSelectable
-                ? `Live sends PAID requests to ${providerName} — one transition at a time.`
-                : `Live is unavailable: ${liveBlockers.join(' ')}`
-            }
-          >
-            <SelectInput
-              value={active.mode}
-              onChange={(e) => patchProvider({ mode: e.target.value as ProviderMode })}
-            >
-              <option value="dry-run">Dry Run — no API request is sent</option>
-              <option value="live" disabled={!liveSelectable}>
-                {liveSelectable ? 'Live — paid requests enabled' : 'Live — requirements not met'}
-              </option>
-            </SelectInput>
-          </Field>
-
-          <Field
-            label="Model"
-            hint="Only models that support start + end frame generation are offered."
-          >
-            <SelectInput
-              value={active.model ?? ''}
-              onChange={(e) => patchProvider({ model: e.target.value || null })}
-            >
-              <option value="">Not selected</option>
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </SelectInput>
-          </Field>
-
-          <div className="provider-status">
-            <span className={`status-chip ${hasKey ? 'status-chip-completed' : 'status-chip-queued'}`}>
-              {hasKey ? 'API key configured' : 'Not configured'}
-            </span>
-            <span className="status-chip status-chip-scheduled">
-              {active.mode === 'live' ? 'Live — paid requests' : 'Dry Run — network disabled'}
-            </span>
-            <span className="status-chip status-chip-queued">
-              Capability: Start + End Frame
-            </span>
-            {isFal && falRateOff !== undefined && (
-              <span className="status-chip status-chip-queued">
-                ${falRateOff}/s · audio off
-              </span>
-            )}
-          </div>
-
-          {/* ── FREE connection test (fal.ai only) ─────────────────────── */}
-          {isFal && (
-            <div className="conn-test">
-              <div className="conn-test-row">
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-tiny"
-                  disabled={connTest !== null && 'running' in connTest && connTest.running}
-                  onClick={() => {
-                    setConnTest({ running: true })
-                    void window.f2f.providers
-                      .testConnection()
-                      .then((res) => setConnTest({ running: false, ...res }))
-                      .catch(() =>
-                        setConnTest({
-                          running: false,
-                          status: 'network',
-                          detail: ['The test could not be started.']
-                        })
-                      )
-                  }}
-                >
-                  {connTest && 'running' in connTest && connTest.running ? 'Testing…' : 'Test connection'}
-                </button>
-                {connTest && !('running' in connTest && connTest.running) && 'status' in connTest && (
-                  <span
-                    className={`status-chip ${
-                      connTest.status === 'connected'
-                        ? 'status-chip-completed'
-                        : connTest.status === 'network'
-                          ? 'status-chip-scheduled'
-                          : 'status-chip-failed'
-                    }`}
-                  >
-                    {connTest.status === 'connected'
-                      ? 'Connected'
-                      : connTest.status === 'auth-failed'
-                        ? 'Authentication failed'
-                        : connTest.status === 'permission'
-                          ? 'Permission/scope issue'
-                          : 'Network error'}
-                  </span>
-                )}
-              </div>
-              <p className="field-hint">
-                Free — checks the key against rest.fal.ai (storage) and queue.fal.run (queue)
-                without running the video model, uploading anything or consuming generation
-                credits.
-              </p>
-              {connTest && 'detail' in connTest && connTest.detail.length > 0 && (
-                <ul className="conn-test-detail">
-                  {connTest.detail.map((line) => (
-                    <li key={line}>{line}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-          {selectedModel && !selectedModel.confirmed && (
-            <p className="field-hint provider-warning">
-              ⚠ {selectedModel.verificationNote ?? 'Model identifiers are unverified.'} They live in
-              one config file and must be confirmed against the official documentation before Live
-              mode is enabled.
-            </p>
-          )}
-          {!isFal && active.legacySecret ? (
-            <p className="field-hint">
-              Legacy Secret — not used for the current Kling API. Retained only so older settings
-              hydrate without loss.
-            </p>
-          ) : null}
-
-          {/* ── The safety lock (per provider) ─────────────────────────── */}
-          <div className="safety-lock">
-            <Toggle
-              label={`Allow live ${providerName} requests`}
-              checked={lockOn}
-              onChange={(next) => {
-                if (!next) {
-                  setLock(false)
-                  patchProvider({ mode: 'dry-run' })
-                  return
-                }
-                setConfirmLock(active.id === 'fal' ? 'fal' : 'kling')
-              }}
-            />
-            <p className="field-hint">
-              <strong>Safety lock — enables paid {providerName} API requests.</strong> While this is
-              off, no live request can leave the app regardless of key or mode. Each provider has
-              its own lock.
-            </p>
-          </div>
-
-          {/* ── fal.ai: fully verified contract ─────────────────────────── */}
-          {isFal && falInfo && (
-            <details className="contract-block">
-              <summary>Developer details — fal.ai API contract (all verified)</summary>
-              <dl className="contract-locked">
-                <div>
-                  <dt>Auth</dt>
-                  <dd>
-                    <code>Authorization: Key &lt;FAL_KEY&gt;</code>
-                  </dd>
-                </div>
-                <div>
-                  <dt>Submit</dt>
-                  <dd>
-                    <code>
-                      POST {falInfo.queueHost}/{falInfo.modelId}
-                    </code>
-                  </dd>
-                </div>
-                <div>
-                  <dt>Frames</dt>
-                  <dd>
-                    <code>image_url</code> = start · <code>end_image_url</code> = end
-                  </dd>
-                </div>
-                <div>
-                  <dt>Statuses</dt>
-                  <dd>
-                    <code>IN_QUEUE · IN_PROGRESS · COMPLETED</code>
-                  </dd>
-                </div>
-                <div>
-                  <dt>Native audio</dt>
-                  <dd>
-                    {falInfo.nativeAudioDefault
-                      ? 'On'
-                      : 'Off by default — never enabled automatically'}
-                  </dd>
-                </div>
-              </dl>
-              <p className="field-hint">Official fal.ai rates for this endpoint — per output second:</p>
-              <ul className="contract-rates">
-                {falInfo.rates.map((r) => (
-                  <li key={String(r.nativeAudio)}>
-                    audio {r.nativeAudio ? 'on' : 'off'} — <strong>${r.usdPerSecond}/s</strong>
-                  </li>
-                ))}
-              </ul>
-              <ul className="contract-status">
-                {falInfo.items.map((item) => (
-                  <li key={item.key} className="is-confirmed">
-                    <strong>✓ {item.label}</strong> — {item.note}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
-
-          {/* ── Kling: remaining unconfirmed values ─────────────────────── */}
-          {!isFal && (
-            <div className="contract-open">
-              <p className="field-hint">
-                The base URL, submit endpoint, model id, frame fields, status vocabulary and credit
-                pricing are <strong>verified and locked</strong> — nothing to type. Only the values
-                below are still unconfirmed.
-              </p>
-              <ul className="contract-status">
-                {unconfirmed.map((item) => (
-                  <li key={item.key} className="is-unconfirmed">
-                    <strong>? {item.label}</strong> — {item.note}
-                  </li>
-                ))}
-              </ul>
-              <Field
-                label="Task status path (unverified)"
-                hint="Override this if the official documentation uses a different path. {id} is replaced with the task id."
-              >
-                <TextInput
-                  placeholder={contractDefaults?.taskStatusPath ?? ''}
-                  value={contract.taskStatusPath ?? ''}
-                  onChange={(e) => patchContract({ taskStatusPath: e.target.value })}
-                />
-              </Field>
-              <Toggle
-                label="I understand the values above are not confirmed"
-                checked={contract.acknowledged}
-                onChange={(acknowledged) => patchContract({ acknowledged })}
-              />
-            </div>
-          )}
-
-          {/* ── Kling developer details: the locked contract ────────────── */}
-          {!isFal && (
-            <details className="contract-block">
-              <summary>Developer details — locked API contract</summary>
-              <dl className="contract-locked">
-                <div>
-                  <dt>Auth</dt>
-                  <dd>
-                    <code>Authorization: Bearer &lt;API_KEY&gt;</code>
-                  </dd>
-                </div>
-                <div>
-                  <dt>Submit</dt>
-                  <dd>
-                    <code>
-                      POST {contractLocked?.baseUrl}
-                      {contractLocked?.imageToVideoPath}
-                    </code>
-                  </dd>
-                </div>
-                <div>
-                  <dt>Model</dt>
-                  <dd>
-                    <code>{contractLocked?.modelId}</code>
-                  </dd>
-                </div>
-                <div>
-                  <dt>Frames</dt>
-                  <dd>
-                    <code>image</code> = start · <code>image_tail</code> = end
-                  </dd>
-                </div>
-                <div>
-                  <dt>Statuses</dt>
-                  <dd>
-                    <code>submitted · processing · succeed · failed</code>
-                  </dd>
-                </div>
-                <div>
-                  <dt>Native audio</dt>
-                  <dd>{audioDefault ? 'On' : 'Off by default — never enabled automatically'}</dd>
-                </div>
-              </dl>
-
-              <p className="field-hint">
-                Official API rates (Kling 3.0 Omni, no video input) — credits per second:
-              </p>
-              <ul className="contract-rates">
-                {creditRates.map((r) => (
-                  <li key={`${r.resolution}-${r.nativeAudio}`}>
-                    {r.resolution} · audio {r.nativeAudio ? 'on' : 'off'} —{' '}
-                    <strong>{r.creditsPerSecond} credits/s</strong>
-                  </li>
-                ))}
-              </ul>
-
-              <ul className="contract-status">
-                {contractStatus.map((item) => (
-                  <li key={item.key} className={item.confirmed ? 'is-confirmed' : 'is-unconfirmed'}>
-                    <strong>
-                      {item.confirmed ? '✓' : '?'} {item.label}
-                      {item.locked ? ' (locked)' : ''}
-                    </strong>{' '}
-                    — {item.note}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          )}
         </SectionCard>
         )}
+
+        {tab === 'ai' && (
+        <SectionCard
+          title="API Keys"
+          subtitle="Stored locally on this machine and never shown again after saving."
+        >
+          <ApiKeyRow
+            label="Gemini"
+            hint="Reads the photographs to work out how the rooms connect, and writes the transition prompts."
+            connected={analyzerKey}
+            draft={analyzerKeyDraft}
+            onDraft={setAnalyzerKeyDraft}
+            onSave={() =>
+              void window.f2f.projects.analyzerConfig
+                .setApiKey(analyzerKeyDraft.trim())
+                .then(() => {
+                  setAnalyzerKeyDraft('')
+                  return window.f2f.projects.analyzerConfig.hasApiKey()
+                })
+                .then(setAnalyzerKey)
+            }
+            onClear={() =>
+              void window.f2f.projects.analyzerConfig
+                .setApiKey('')
+                .then(() => window.f2f.projects.analyzerConfig.hasApiKey())
+                .then(setAnalyzerKey)
+            }
+          />
+          <ApiKeyRow
+            label="fal.ai"
+            hint="Generates the transition video between each pair of photographs."
+            connected={keyStatus['fal'] === true}
+            draft={keyDraft}
+            onDraft={setKeyDraft}
+            onSave={() =>
+              void window.f2f.providers.setApiKey('fal', keyDraft.trim()).then(() => {
+                setKeyDraft('')
+                refreshKeys()
+              })
+            }
+            onClear={() =>
+              void window.f2f.providers.setApiKey('fal', '').then(refreshKeys)
+            }
+          />
+        </SectionCard>
+        )}
+
 
         {confirmLock && (
           <div className="dialog-backdrop" onClick={() => setConfirmLock(null)}>
@@ -682,26 +395,6 @@ export function SettingsPage(): React.JSX.Element {
           </div>
         )}
 
-        {tab === 'advanced' && (
-        <SectionCard title="FFmpeg" subtitle="Local video assembly engine.">
-          <div className="ffmpeg-status">
-            {ffmpeg === null ? (
-              <span className="status-chip status-chip-queued">Checking…</span>
-            ) : ffmpeg.available ? (
-              <span className="status-chip status-chip-completed">
-                Detected · v{ffmpeg.version} ({ffmpeg.source === 'bundled' ? 'bundled' : 'system'})
-              </span>
-            ) : (
-              <span className="status-chip status-chip-failed">Not available</span>
-            )}
-            <p className="field-hint">
-              {ffmpeg?.available
-                ? 'FFmpeg assembles transition clips, composites branding layers and writes the exported MP4 files — all locally.'
-                : 'I2T ships with a bundled FFmpeg; if it cannot be loaded, a system-wide ffmpeg on PATH is used instead.'}
-            </p>
-          </div>
-        </SectionCard>
-        )}
 
         {/* ── PROPERTY ANALYZER ──────────────────────────────────────────
             Structure for a future vision provider, deliberately inert.
@@ -921,6 +614,21 @@ export function SettingsPage(): React.JSX.Element {
         </SectionCard>
         )}
 
+        {/* Kept from the removed Advanced tab: if FFmpeg cannot load,
+            exporting fails, and that is worth seeing without hunting
+            through a technical section for it. Read-only. */}
+        {tab === 'general' && (
+        <SectionCard title="Video engine" subtitle="Assembles and exports your videos locally.">
+          {ffmpeg === null ? (
+            <span className="status-chip status-chip-queued">Checking…</span>
+          ) : ffmpeg.available ? (
+            <span className="status-chip status-chip-completed">Ready</span>
+          ) : (
+            <span className="status-chip status-chip-failed">Not available — export will fail</span>
+          )}
+        </SectionCard>
+        )}
+
         {tab === 'general' && (
         <SectionCard
           title="Pricing"
@@ -958,70 +666,96 @@ export function SettingsPage(): React.JSX.Element {
         </SectionCard>
         )}
 
-        {tab === 'advanced' && (
+
+        {/* ── A. VIDEO WATERMARK ──────────────────────────────────────
+            THE GAP THIS FILLS. Settings → Branding configured only the
+            corner stamp: brand name, website, logo, position, size,
+            opacity. The large watermark over the video had no controls
+            here at all, so the only way to change it was per project, in
+            the Export & Branding drawer — which is why it looked
+            unchangeable. Its data model always supported an image; the
+            settings screen simply never offered one. */}
+        {tab === 'branding' && (
         <SectionCard
-          title="Production"
-          subtitle="Queue and future AI orchestration. FFmpeg always renders one job at a time."
+          title="Video Watermark"
+          subtitle="The large protective mark over the whole video on unpaid preview exports."
         >
+          <Toggle
+            label="Enable watermark on new projects"
+            checked={wm.enabled}
+            onChange={(enabled) => patchWatermark({ enabled })}
+          />
           <div className="field-row">
-            <Field label="Max concurrent AI generations" hint="Prepared for future providers — currently unused.">
+            <Field label="Watermark image">
+              <div className="logo-picker">
+                {wm.imageSrc ? (
+                  <img className="logo-picker-preview" src={wm.imageSrc} alt="" />
+                ) : (
+                  <span className="logo-picker-empty">No image selected</span>
+                )}
+                <ImagePickerButton
+                  label={wm.imageSrc ? 'Choose image' : 'Choose image'}
+                  onPick={(dataUrl, name) =>
+                    void pickBrandingAsset(dataUrl, name, wm.imageSrc, (url, fileName) =>
+                      patchWatermark({ imageSrc: url, imageName: fileName })
+                    )
+                  }
+                />
+                {wm.imageSrc && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-tiny"
+                    onClick={() => {
+                      void window.f2f.projects.branding.remove(wm.imageSrc)
+                      patchWatermark({ imageSrc: null, imageName: null })
+                    }}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            </Field>
+            <Field label="Position">
               <SelectInput
-                value={String(settings.production.maxConcurrentAiGenerations)}
-                onChange={(e) =>
-                  updateSettings({
-                    production: {
-                      ...settings.production,
-                      maxConcurrentAiGenerations: Number(e.target.value)
-                    }
-                  })
-                }
+                value={wm.position}
+                onChange={(e) => patchWatermark({ position: e.target.value as WatermarkPosition })}
               >
-                {[1, 2, 3, 4].map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
+                <option value="center">Center</option>
+                <option value="bottom-right">Bottom right</option>
+                <option value="bottom-left">Bottom left</option>
+                <option value="top-right">Top right</option>
+                <option value="top-left">Top left</option>
               </SelectInput>
             </Field>
-            <Field
-              label="Mock AI cost / second (dev)"
-              hint="DEV ONLY — exercises the cost estimator. Empty = no rate, estimates show “—”."
-            >
-              <TextInput
-                type="number"
-                min={0}
-                step={0.01}
-                placeholder="Not configured"
-                value={
-                  settings.production.mockAiCostPerSecond === null
-                    ? ''
-                    : String(settings.production.mockAiCostPerSecond)
-                }
-                onChange={(e) =>
-                  updateSettings({
-                    production: {
-                      ...settings.production,
-                      mockAiCostPerSecond:
-                        e.target.value.trim() === '' || Number(e.target.value) <= 0
-                          ? null
-                          : Number(e.target.value)
-                    }
-                  })
-                }
-              />
-            </Field>
           </div>
-          <p className="field-hint">
-            No provider pricing is hardcoded. Real per-second rates arrive with the provider
-            integration; customer pricing above stays completely separate from production cost.
-          </p>
+          <SliderRow
+            label="Size"
+            value={wm.sizePct}
+            min={5}
+            /* 100 = the full width of the video frame. The cap was 90,
+               so the largest mark the product allowed could never be
+               asked for. Corner Stamp keeps its own smaller scale. */
+            max={100}
+            onChange={(sizePct) => patchWatermark({ sizePct })}
+          />
+          <SliderRow
+            label="Opacity"
+            value={wm.opacityPct}
+            min={5}
+            max={100}
+            onChange={(opacityPct) => patchWatermark({ opacityPct })}
+          />
+          {brandingError && <p className="field-hint field-hint-warn">{brandingError}</p>}
         </SectionCard>
         )}
 
+        {/* ── B. CORNER STAMP ─────────────────────────────────────────
+            Unchanged behaviour, now named for what it is so the two are
+            never confused for one "branding image". */}
         {tab === 'branding' && (
         <SectionCard
-          title="Default Branding"
-          subtitle="The small I2T signature applied to new projects. Each project can override it."
+          title="Corner Stamp"
+          subtitle="The small permanent I2T signature — stays on the final film."
         >
           <Toggle
             label="Enable signature on new projects"

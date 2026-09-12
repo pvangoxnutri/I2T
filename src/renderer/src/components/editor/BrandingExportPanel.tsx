@@ -1,14 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useAppState } from '../../state/AppState'
 import type { CornerPosition, Project, WatermarkPosition } from '../../types'
+import { resolveBranding } from '../../../../shared/branding'
 import { formatPrice, priceSnapshot } from '../../../../shared/pricing'
 import { rasterizeSignature, rasterizeWatermark } from '../../utils/rasterizeOverlays'
 import { getFeedImages } from '../../../../shared/feedSequence'
-import {
-  DEFAULT_EXPORT_FORMAT,
-  EXPORT_FORMATS,
-  type ExportFormatId
-} from '../../../../shared/exportFormat'
+import { applyExportFormat, type ExportFormatId } from '../../../../shared/exportFormat'
 import {
   Field,
   ImagePickerButton,
@@ -50,10 +47,19 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
   const { updateWatermark, updateSignature, settings } = useAppState()
   const [exportNote, setExportNote] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
-  /** Compare Assembly runs two full FFmpeg passes — disable while busy. */
-  const [comparing, setComparing] = useState(false)
-  const wm = project.watermark
-  const sig = project.signature
+  // ── THE RESOLVED BRANDING, NOT THE RAW PROJECT ROW ────────────────
+  //
+  // A project that has never chosen its own image INHERITS the one
+  // configured in Settings. Reading `project.watermark` directly meant a
+  // null image was read as "no watermark" rather than "nothing
+  // overridden", so a watermark configured in Settings never reached an
+  // existing project — neither its preview nor its export.
+  //
+  // The rasterisers below feed on this, so the exported PNG is built
+  // from exactly what the preview draws.
+  const branding = resolveBranding(project, settings)
+  const wm = branding.watermark
+  const sig = branding.signature
   const feedImages = getFeedImages(project)
   const coverSrc = feedImages[0]?.src ?? null
 
@@ -90,28 +96,45 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
   const canExport = (readiness?.ready ?? false) && !starting
 
   /**
-   * WHERE THIS FILM IS GOING.
+   * WHAT THIS EXPORT CARRIES — not what the preview shows.
    *
-   * An export choice, not a project setting: the source files, the
-   * project's own aspect ratio and everything the editor previews stay
-   * exactly as they are. The same project can be exported for a desktop
-   * page and for a phone without editing anything in between.
+   * The timeline preview has its own Watermark and Corner Stamp
+   * checkboxes and they are deliberately NOT these. Those decide what is
+   * on screen while editing; these decide what is rasterised into the
+   * file. An operator can work with a clean picture and still ship a
+   * branded one, which is the normal way round.
+   *
+   * Local state, not settings: it is a decision about one export, and
+   * storing it would make the next export inherit a choice nobody made.
+   * Saved Branding Settings still own the asset, position, size and
+   * opacity; these own only whether it is included.
    */
-  const [format, setFormat] = useState<ExportFormatId>(DEFAULT_EXPORT_FORMAT)
+  const [exportWatermark, setExportWatermark] = useState(true)
+  const [exportStamp, setExportStamp] = useState(true)
 
-  const runExport = async (kind: 'preview' | 'final'): Promise<void> => {
+  const runExport = async (format: ExportFormatId): Promise<void> => {
     setStarting(true)
     setExportNote(null)
     try {
-      // Overlays are rasterized here, at output resolution, so the export
-      // matches the live preview exactly. Final never gets the watermark.
+      // ── THE OVERLAYS ARE BUILT FOR THE FRAME THEY LAND ON ─────────
+      //
+      // THE BUG THIS FIXES. These were rasterised against
+      // `settings.exportDefaults` — the PROJECT's aspect ratio, 16:9 —
+      // whatever shape the export itself was. An Instagram Reel renders
+      // 1080x1920, so a 1920x1080 overlay PNG was composited onto it at
+      // 0:0: clipped off the right edge, covering only the top half, and
+      // the corner stamp — anchored to the bottom-right of a LANDSCAPE
+      // canvas — landed near the middle of the Reel and off its side.
+      //
+      // The format decides the frame, so the format decides the overlay.
+      const { defaults: frame } = applyExportFormat(settings.exportDefaults, format)
       const [watermarkPng, signaturePng] = await Promise.all([
-        kind === 'preview' ? rasterizeWatermark(wm, settings.exportDefaults) : null,
-        rasterizeSignature(sig, settings.exportDefaults)
+        exportWatermark ? rasterizeWatermark(wm, frame) : null,
+        exportStamp ? rasterizeSignature(sig, frame) : null
       ])
       const result = await window.f2f.exports.run(
         project.id,
-        kind,
+        'final',
         { watermarkPng, signaturePng },
         null,
         format
@@ -198,28 +221,28 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
           )}
         </div>
 
-        {/* ── FORMAT ─────────────────────────────────────────────────
-            Chosen per export. Nothing here is stretched: the desktop
-            format fits the whole frame, the vertical one fills the phone
-            screen by cropping evenly from the sides. */}
-        <fieldset className="export-format">
-          <legend>Format</legend>
-          {EXPORT_FORMATS.map((f) => (
-            <label
-              key={f.id}
-              className={`export-format-option${format === f.id ? ' is-active' : ''}`}
-            >
-              <input
-                type="radio"
-                name="export-format"
-                value={f.id}
-                checked={format === f.id}
-                onChange={() => setFormat(f.id)}
-              />
-              <span className="export-format-label">{f.label}</span>
-              <span className="export-format-desc">{f.description}</span>
-            </label>
-          ))}
+        {/* ── BRANDING FOR THIS EXPORT ────────────────────────────────
+            Not the timeline preview's checkboxes. Those decide what is
+            on screen; these decide what is rasterised into the file, and
+            they apply to both buttons below. */}
+        <fieldset className="export-branding">
+          <legend>Branding</legend>
+          <label className="export-branding-option">
+            <input
+              type="checkbox"
+              checked={exportWatermark}
+              onChange={(e) => setExportWatermark(e.target.checked)}
+            />
+            <span>Watermark</span>
+          </label>
+          <label className="export-branding-option">
+            <input
+              type="checkbox"
+              checked={exportStamp}
+              onChange={(e) => setExportStamp(e.target.checked)}
+            />
+            <span>Corner Stamp</span>
+          </label>
         </fieldset>
 
         <div className="export-actions">
@@ -229,59 +252,33 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
             disabled={!canExport}
             title={
               canExport
-                ? 'Assemble all transition clips and export with the preview watermark'
+                ? 'Assemble the TIMELINE and export it in the project format'
                 : 'Requires at least two images and a clip on every transition'
             }
-            onClick={() => void runExport('preview')}
+            onClick={() => void runExport('computer')}
           >
-            Export Preview with Watermark
+            Export Video
           </button>
           <button
             type="button"
-            className="btn btn-ghost btn-block"
+            className="btn btn-primary btn-block"
             disabled={!canExport}
             title={
               canExport
-                ? 'Assemble and export WITHOUT the customer-protection watermark'
+                ? 'Assemble the TIMELINE and export it as a 1080×1920 vertical Reel, cropped to fill the frame'
                 : 'Requires at least two images and a clip on every transition'
             }
-            onClick={() => void runExport('final')}
+            onClick={() => void runExport('instagram')}
           >
-            Export Final
+            Export Instagram Reel
           </button>
-          {/* DEVELOPMENT/EVALUATION TOOL.
-              Exports the SAME clips twice so hard cuts and Seamless
-              Assembly can be watched back to back — the only honest way
-              to judge whether the seam work is worth having. Re-uses
-              clips that already exist: no AI generation, no provider
-              request, no charge. */}
-          <button
-            type="button"
-            className="btn btn-ghost btn-block btn-dev"
-            disabled={!canExport || feedImages.length < 3 || comparing}
-            title={
-              feedImages.length < 3
-                ? 'Needs at least two clips — a single clip has no seam to compare'
-                : 'Development tool: exports these clips twice, hard cuts and seamless, for side-by-side comparison. Generates nothing and costs nothing.'
-            }
-            onClick={() => {
-              setComparing(true)
-              setExportNote(null)
-              void window.f2f.exports
-                .compareAssembly(project.id)
-                .then((res) => {
-                  if (res.canceled) return
-                  setExportNote(
-                    res.ok
-                      ? `Comparison written — ${res.hardCutsPath?.split(/[\\/]/).pop()} and ${res.seamlessPath?.split(/[\\/]/).pop()}. No AI generation was involved.`
-                      : (res.reason ?? 'Comparison failed.')
-                  )
-                })
-                .finally(() => setComparing(false))
-            }}
-          >
-            {comparing ? 'Assembling both versions…' : '⚙ Compare Assembly (dev)'}
-          </button>
+          {/* THE COMPARE-ASSEMBLY TOOL IS NOT IN THE PRODUCT UI.
+              It exports the same clips twice so seam work can be judged
+              side by side — a developer's question, not an operator's,
+              and a third button next to two export buttons is exactly
+              the ambiguity this panel was rebuilt to remove. The service
+              and its IPC channel are untouched and still reachable from
+              test code. */}
           {missingPairs.length > 0 && feedImages.length >= 2 && (
             <p className="export-missing">
               Missing transition clips: <strong>{missingPairs.join(', ')}</strong>
@@ -289,8 +286,10 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
           )}
           {exportNote && <p className="export-note">{exportNote}</p>}
           <p className="field-hint">
-            Preview export carries the large watermark until the customer has paid. Final export
-            removes it — only the I2T signature remains.
+            Both export the TIMELINE below the Feed — its order, its trims and whatever you
+            removed. The Reel is 1080×1920 and crops the sides to fill the frame rather than
+            padding it. The checkboxes above decide what branding this file carries; Settings
+            decide which asset, where, how big and how opaque.
           </p>
         </div>
       </SectionCard>
@@ -336,8 +335,9 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
         <SliderRow
           label="Size"
           value={wm.sizePct}
-          min={15}
-          max={90}
+          min={5}
+          /* 100 = the full width of the video frame. See Settings. */
+          max={100}
           onChange={(sizePct) => updateWatermark(project.id, { sizePct })}
         />
         <SliderRow

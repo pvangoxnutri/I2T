@@ -3,7 +3,8 @@ import type { AnalyzerRequest } from '../../../../shared/analyzerTypes'
 import type {
   AnalysisConfidence,
   CameraOrientation,
-  PropertyAnalysis
+  PropertyAnalysis,
+  ReflectiveSurface
 } from '../../../../shared/propertyAnalysis'
 
 /**
@@ -88,6 +89,26 @@ export const GEMINI_RESPONSE_SCHEMA = {
           landmarks: { type: 'array', items: { type: 'string' } },
           openings: { type: 'array', items: { type: 'string' } },
           overlapWith: { type: 'array', items: { type: 'string' } },
+          // MIRRORS AND GLASS, AS HAZARDS RATHER THAN LANDMARKS.
+          //
+          // Structured output can only return fields declared here — a
+          // field the prompt asks for and the schema omits is silently
+          // dropped, which has cost this project three separate data
+          // losses. `testPromptSchemaContract` pins the pairing.
+          reflectiveSurfaces: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                type: { type: 'string' },
+                locationDescription: { type: 'string' },
+                dominant: { type: 'boolean' },
+                expectedVisibleContent: { type: 'array', items: { type: 'string' } },
+                confidence: { type: 'string', enum: ['confirmed', 'probable', 'unknown'] }
+              },
+              required: ['type', 'dominant']
+            }
+          },
           marketingImportance: { type: 'number' },
           isHero: { type: 'boolean' },
           notes: { type: 'string' }
@@ -251,6 +272,7 @@ export function mapGeminiResponse(
       overlapWith: asStringArray(entry.overlapWith)
         .map(resolve)
         .filter((v): v is string => v !== null),
+      reflectiveSurfaces: asReflectiveSurfaces(entry.reflectiveSurfaces),
       marketingImportance: asScore(entry.marketingImportance),
       isHero: entry.isHero === true,
       notes: typeof entry.notes === 'string' ? entry.notes : undefined
@@ -367,6 +389,40 @@ export function mapGeminiResponse(
  * "this is worthless" are different facts, and collapsing them is what
  * let a whole library score zero and select nothing.
  */
+/**
+ * Reflective surfaces, kept only where the model actually named one.
+ *
+ * `undefined` rather than `[]` when nothing came back: an empty array
+ * would read downstream as "the analyzer looked and found no mirrors",
+ * which is a much stronger claim than "this response said nothing". The
+ * risk model treats absence as unknown and falls back to reading the
+ * prose, so the distinction decides whether an old bathroom is re-checked
+ * or silently cleared.
+ */
+function asReflectiveSurfaces(value: unknown): ReflectiveSurface[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const out: ReflectiveSurface[] = []
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object') continue
+    const entry = raw as Record<string, unknown>
+    const type = typeof entry.type === 'string' ? entry.type.trim() : ''
+    if (!type) continue
+    out.push({
+      type,
+      locationDescription:
+        typeof entry.locationDescription === 'string' ? entry.locationDescription : undefined,
+      dominant: entry.dominant === true,
+      expectedVisibleContent: asStringArray(entry.expectedVisibleContent),
+      confidence:
+        typeof entry.confidence === 'string' &&
+        ['confirmed', 'probable', 'unknown'].includes(entry.confidence)
+          ? (entry.confidence as AnalysisConfidence)
+          : undefined
+    })
+  }
+  return out.length > 0 ? out : undefined
+}
+
 function asScore(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
   return Math.min(10, Math.max(0, value))

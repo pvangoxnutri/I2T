@@ -72,6 +72,23 @@ export function registerRunner(kind: JobKind, runner: JobRunner): void {
  * DB write + broadcast). The live submit path uses this to store the remote
  * task id the instant Kling returns it — before anything else can fail.
  */
+/**
+ * Merge fields into a job's metadata and persist.
+ *
+ * Separate from `updateJobProvider` on purpose: provider state describes
+ * what the REMOTE task did and drives the resume/retry machine, while
+ * metadata carries facts about the work itself — including the quality
+ * verdict, which must never be mistaken for a provider outcome.
+ */
+export function updateJobMetadata(jobId: string, metadata: JobMetadata): QueueJob | null {
+  const job = jobs.find((j) => j.id === jobId)
+  if (!job) return null
+  job.metadata = metadata
+  updateJob(job)
+  broadcast()
+  return job
+}
+
 export function updateJobProvider(jobId: string, patch: Partial<ProviderJobState>): QueueJob | null {
   const job = jobs.find((j) => j.id === jobId)
   if (!job) return null
@@ -161,6 +178,25 @@ export function initQueue(): void {
 
   for (const job of jobs) {
     if (job.status === 'processing') {
+      /**
+       * INTERRUPTED DURING THE QUALITY CHECK.
+       *
+       * ── WHY IT IS NOT RESUMED AUTOMATICALLY ────────────────────────
+       *
+       * The clip exists, is downloaded and is already paid for; only the
+       * inspection was cut short. Re-running it would be idempotent and
+       * would not touch fal — but it would spend money on a vision
+       * request as a side effect of the app starting, which nobody asked
+       * for. Every other spend in this app is a decision someone makes.
+       *
+       * So the verdict becomes `needs-review` with a reason that says
+       * what happened. Nothing is lost: the operator can preview it,
+       * accept it, or regenerate. What is avoided is both a silent
+       * charge and a permanent zombie sitting in `quality-checking`
+       * forever.
+       *
+       * The fal generation is NEVER resubmitted — see the note below.
+       */
       // The process that owned this job is gone with the previous run.
       // If a REMOTE task exists it is still running and already paid for —
       // say so, because Retry resumes polling instead of resubmitting.

@@ -41,11 +41,17 @@ export type CostEntryStatus = 'submitted' | 'succeeded' | 'failed' | 'unknown'
  * migration 10 backfills them rather than leaving a null for readers to
  * guess about.
  */
-export type CostCategory = 'video-generation' | 'vision-analysis'
+export type CostCategory = 'video-generation' | 'vision-analysis' | 'quality-validation'
 
 export const COST_CATEGORY_LABEL: Record<CostCategory, string> = {
   'video-generation': 'Video generation',
-  'vision-analysis': 'Property analysis'
+  'vision-analysis': 'Property analysis',
+  // ITS OWN LINE, NEVER ADDED TO THE GENERATION IT INSPECTED.
+  //
+  // The check is a separate vision request with its own charge. Folding
+  // it into the fal cost would make one clip look more expensive than the
+  // provider's rate and hide that the spend is optional and switchable.
+  'quality-validation': 'Generation quality validation'
 }
 
 export interface GenerationCostEntry {

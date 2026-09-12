@@ -2,7 +2,14 @@ import { copyFileSync, existsSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ProjectImage, TransitionClip } from '../shared/types'
-import { ensureDir, projectDir, projectImagesDir, projectsRoot, safeManagedPath } from './paths'
+import {
+  ensureDir,
+  projectDir,
+  projectImagesDir,
+  projectsRoot,
+  safeManagedPath,
+  userDataDir
+} from './paths'
 
 /**
  * Managed project files. Imported originals are COPIED into
@@ -50,9 +57,101 @@ const PROTOCOL_DIRS: Record<string, string> = {
 
 /** Resolves an f2f://image/... or f2f://clip/... request to a managed path,
  * or null. */
+/**
+ * BRANDING ASSETS — app-wide, not per project.
+ *
+ * A watermark or a corner stamp is a property of the BUSINESS, reused
+ * across every project, so it lives beside the database rather than
+ * inside one project's directory. That also means deleting a project
+ * cannot take the company logo with it.
+ */
+export function brandingDir(): string {
+  return join(userDataDir(), 'branding')
+}
+
+export function brandingUrl(storedName: string): string {
+  return `${IMAGE_PROTOCOL}://brand/${encodeURIComponent(storedName)}`
+}
+
+export function resolveBrandingRequest(storedName: string): string | null {
+  try {
+    const path = safeManagedPath(brandingDir(), storedName)
+    return existsSync(path) ? path : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Store a picked branding image as a MANAGED file.
+ *
+ * ── WHY NOT THE DATA URL THE PICKER HANDS US ─────────────────────────
+ *
+ * The image picker produces a base64 data URL, and branding used to
+ * store that string straight into the settings/project row. A 200 KB
+ * PNG becomes ~270 KB of base64 that is then parsed on every settings
+ * read, carried in every project save, and duplicated into every
+ * project that inherits the default.
+ *
+ * The bytes go to disk once and the row keeps a short `f2f://brand/…`
+ * url instead. Legacy `data:` values are still rendered as-is — see the
+ * note in the settings panel — so nothing existing has to be migrated.
+ */
+export function saveBrandingAsset(dataUrl: string, originalName: string): string | null {
+  const match = /^data:(image\/[a-z+]+);base64,(.+)$/i.exec(dataUrl.trim())
+  if (!match) return null
+  const [, mime, base64] = match
+
+  const extFromName = extname(originalName).toLowerCase()
+  const ext = SAFE_EXTENSIONS.has(extFromName)
+    ? extFromName
+    : mime === 'image/png'
+      ? '.png'
+      : mime === 'image/webp'
+        ? '.webp'
+        : '.jpg'
+
+  try {
+    const dir = brandingDir()
+    ensureDir(dir)
+    const storedName = `${randomUUID()}${ext}`
+    writeFileSync(safeManagedPath(dir, storedName), Buffer.from(base64, 'base64'))
+    return brandingUrl(storedName)
+  } catch (err) {
+    console.error('[branding] could not store the image:', err)
+    return null
+  }
+}
+
+/**
+ * Delete a managed branding file.
+ *
+ * Only ever called when the operator replaces or removes an asset, and
+ * only for `f2f://brand/…` values — a legacy data URL owns no file, and
+ * a project image is not ours to delete from here.
+ */
+export function removeBrandingAsset(url: string | null | undefined): void {
+  if (!url || !url.startsWith(`${IMAGE_PROTOCOL}://brand/`)) return
+  try {
+    const storedName = decodeURIComponent(url.split('/').pop() ?? '')
+    if (storedName) rmSync(safeManagedPath(brandingDir(), storedName), { force: true })
+  } catch (err) {
+    console.error('[branding] could not remove the old image:', err)
+  }
+}
+
 export function resolveImageRequest(url: string): string | null {
   try {
     const parsed = new URL(url)
+
+    // Branding is app-level: one path segment, no project id. Handled
+    // before the project map below, which would otherwise read the
+    // stored name as a project id and find nothing.
+    if (parsed.host === 'brand') {
+      const [storedName] = parsed.pathname.split('/').filter(Boolean).map(decodeURIComponent)
+      return storedName ? resolveBrandingRequest(storedName) : null
+    }
+
     // With a standard scheme, "image"/"clip" parses as the host.
     const subdir = PROTOCOL_DIRS[parsed.host]
     if (!subdir) return null

@@ -1,6 +1,8 @@
 import { defaultTransitionSettings, transitionKey, type Project, type TransitionSettings, type TransitionStatus } from './types'
 import type { EditorSelection } from './editorSelection'
 import { getFeedImages } from './feedSequence'
+import { motionSegments } from './motionSegment'
+import { locateAtTime, timelineDurationSec, type TimelineItem } from './timeline'
 
 /**
  * WHAT THE MAIN PREVIEW SHOWS, decided once.
@@ -25,6 +27,27 @@ export type PreviewSource =
   | { kind: 'image'; imageId: string; index: number; src: string; fileName: string }
   /** A selected transition that has a generated clip. */
   | { kind: 'clip'; pairKey: string; index: number; src: string }
+  /** A single-image motion clip. Its own kind, with no pairKey. */
+  | { kind: 'motion-clip'; segmentId: string; src: string }
+  /**
+   * THE FINAL EDIT, at a position.
+   *
+   * `sourceSec` is where the underlying FILE must be seeked to: the
+   * item's in point plus how far into the item the playhead is. It is
+   * NOT the same number as `absoluteSec`, and confusing the two is what
+   * makes a scrub land on the wrong frame the moment a clip is trimmed,
+   * split or reordered.
+   */
+  | {
+      kind: 'timeline'
+      itemId: string
+      src: string
+      sourceSec: number
+      absoluteSec: number
+      totalSec: number
+      /** A still holds a photograph; there is no file to seek. */
+      isStill: boolean
+    }
   /**
    * A selected transition with no clip.
    *
@@ -76,9 +99,81 @@ export function resolvePreviewSource(
   project: Project,
   selection: EditorSelection,
   assembledUrl: string | null,
-  defaultDurationSec: number
+  defaultDurationSec: number,
+  /**
+   * The timeline, when one has been loaded.
+   *
+   * Passed in rather than read here because it lives in main and arrives
+   * asynchronously. Absent, a timeline selection resolves to
+   * `unavailable` — an honest "not loaded yet" rather than a guess.
+   */
+  timeline?: { items: TimelineItem[]; defaultSeamSec: number } | null
 ): PreviewSource {
   if (selection.kind === 'full') return { kind: 'full', src: assembledUrl }
+
+  // ── THE FINAL EDIT ──────────────────────────────────────────────────
+  //
+  // Absolute time in, a file and a seek position out. This is the whole
+  // of §3: ONE mapping, `locateAtTime`, shared with the split and the
+  // playhead, so scrubbing cannot land somewhere the timeline disagrees
+  // with.
+  if (selection.kind === 'timeline') {
+    if (!timeline || timeline.items.length === 0) {
+      return { kind: 'unavailable', reason: 'The timeline has no clips yet.' }
+    }
+    const located = locateAtTime(timeline.items, selection.atSec, timeline.defaultSeamSec)
+    if (!located) return { kind: 'unavailable', reason: 'Nothing at that position.' }
+
+    const isStill = located.item.sourceType === 'still'
+    const src = isStill
+      ? located.item.sourceImageName
+        ? `f2f://image/${project.id}/${located.item.sourceImageName}`
+        : ''
+      : located.item.sourceClipName
+        ? `f2f://clip/${project.id}/${located.item.sourceClipName}`
+        : ''
+    if (!src) {
+      return { kind: 'unavailable', reason: 'This timeline clip is missing its source video.' }
+    }
+
+    return {
+      kind: 'timeline',
+      itemId: located.item.id,
+      src,
+      sourceSec: located.sourceSec,
+      absoluteSec: selection.atSec,
+      totalSec: timelineDurationSec(timeline.items, timeline.defaultSeamSec),
+      isStill
+    }
+  }
+
+  // ── A MOTION SEGMENT PREVIEWS AS ITSELF ─────────────────────────────
+  //
+  // Its generated clip once one exists; until then the photograph it was
+  // made from. Deliberately NOT reported as `kind: 'clip'`: that shape
+  // carries a pairKey, and handing a motion id to anything that parses
+  // pair keys is exactly the confusion this type is meant to prevent.
+  if (selection.kind === 'motion') {
+    const segment = motionSegments(project).find((s) => s.id === selection.segmentId)
+    if (!segment) {
+      return { kind: 'unavailable', reason: 'That motion clip no longer exists.' }
+    }
+    if (segment.clip) {
+      return { kind: 'motion-clip', segmentId: segment.id, src: segment.clip.src }
+    }
+    const feedImages = getFeedImages(project)
+    const index = feedImages.findIndex((i) => i.id === segment.imageId)
+    if (index === -1) {
+      return { kind: 'unavailable', reason: 'That photograph is not in the Transition Feed.' }
+    }
+    return {
+      kind: 'image',
+      imageId: segment.imageId,
+      index,
+      src: feedImages[index].src,
+      fileName: feedImages[index].fileName
+    }
+  }
 
   if (selection.kind === 'image') {
     const feedImages = getFeedImages(project)

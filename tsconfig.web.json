@@ -11,5 +11,6 @@
     "skipLibCheck": true,
     "useDefineForClassFields": true
   },
+  "exclude": ["harness/**"],
   "include": ["src/renderer/src/**/*", "src/shared/**/*", "src/preload/index.ts"]
 }

@@ -250,7 +250,7 @@ export class KlingProvider implements VideoProvider {
     const model = this.model(request.modelId)!
 
     // Real image preparation: managed bytes → base64, no host, no paths.
-    const frames = prepareFramePair(request.startImagePath, request.endImagePath)
+    const frames = prepareFramePair(request.startImagePath, request.endImagePath ?? '')
     if (!frames.ok) return { ok: false, error: frames.error }
 
     // RUNTIME ASSERTION — a paid request must never go out with a missing

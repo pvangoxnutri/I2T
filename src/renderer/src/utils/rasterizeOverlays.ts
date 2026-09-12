@@ -4,6 +4,8 @@ import type {
   ExportDefaults,
   PreviewWatermark
 } from '../types'
+import { BRAND_MARGIN_FRACTION, brandRect } from '../../../shared/branding'
+import { measureAlphaBounds } from './alphaBounds'
 
 /**
  * Renders the two branding layers to FULL-FRAME transparent PNGs at output
@@ -96,10 +98,17 @@ export async function rasterizeWatermark(
 
   if (wm.imageSrc) {
     const img = await loadImage(wm.imageSrc)
-    const targetW = (wm.sizePct / 100) * W
-    const targetH = targetW * (img.naturalHeight / img.naturalWidth)
-    const { x, y } = place(anchor, W, H, targetW, targetH, margin)
-    ctx.drawImage(img, x, y, targetW, targetH)
+    // THE SHARED RULE. Identical arithmetic to the preview's, from one
+    // function, so the two cannot drift apart again — they already had,
+    // on the margin.
+    const r = brandRect(
+      { width: W, height: H },
+      { w: img.naturalWidth, h: img.naturalHeight },
+      wm.sizePct,
+      wm.position,
+      BRAND_MARGIN_FRACTION.watermark
+    )
+    ctx.drawImage(img, r.left, r.top, r.width, r.height)
   } else {
     // Text fallback — the same "PREVIEW" the editor's preview box shows.
     const fontSize = Math.max(24, Math.round((W * (wm.sizePct / 3)) / 330))
@@ -134,6 +143,38 @@ export async function rasterizeSignature(
   canvas.width = W
   canvas.height = H
   const ctx = canvas.getContext('2d')!
+
+  // ── A SUPPLIED IMAGE IS THE STAMP, NOT AN INGREDIENT IN A PILL ──────
+  //
+  // THE PARITY BUG THIS FIXES. The preview draws the operator's stamp as
+  // a plain image, `sizePct` percent of the picture's width, aspect
+  // preserved. The export drew something else entirely: a rounded pill
+  // with a background, a border and two lines of text, with the image
+  // squeezed inside it at `logoH = 14 * s`.
+  //
+  // With the operator's own asset those are not close. Their stamp is
+  // 1920x1080 at sizePct 30; the preview renders it 576x324 on a
+  // 1920-wide picture, and the export's pill logo came out 204x115 —
+  // about a third the linear size, in a box with a dark background the
+  // preview never showed. No margin rule could reconcile that, because
+  // the two were not drawing the same object.
+  //
+  // So when there IS an image it is the stamp, placed by the same shared
+  // rectangle the preview uses. The pill remains for the case it was
+  // designed for: a text-only signature with no artwork.
+  if (sig.logoSrc) {
+    const img = await loadImage(sig.logoSrc)
+    const r = brandRect(
+      { width: W, height: H },
+      { w: img.naturalWidth, h: img.naturalHeight },
+      sig.sizePct,
+      sig.position,
+      BRAND_MARGIN_FRACTION.stamp
+    )
+    ctx.globalAlpha = sig.opacityPct / 100
+    ctx.drawImage(img, r.left, r.top, r.width, r.height)
+    return canvasToArrayBuffer(canvas)
+  }
 
   // Scale factor mirrors the preview box (designed at ~330px width).
   const s = (Math.min(W, H) / 330) * (sig.sizePct / 12)

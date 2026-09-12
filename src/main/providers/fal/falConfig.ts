@@ -1,4 +1,5 @@
 import { NATIVE_AUDIO_DEFAULT } from '../../../shared/types'
+import { PROMPT_MAX_CHARS } from '../../../shared/prompts'
 import type { GenerationState, ModelCapabilities } from '../types'
 
 /**
@@ -95,7 +96,11 @@ export const FAL_FIELDS = {
  * prompt was rebuilt — see `fitPromptToLimit`, which now enforces it on
  * the way into the body so a future edit cannot repeat that.
  */
-export const FAL_PROMPT_MAX_CHARS = 2500
+// One value, defined where the prompt is BUILT. It used to be declared
+// here and nowhere else, so the assembler had no way to build against
+// it and only found out at submit time — by which point the only
+// remedy left was cutting characters off the end.
+export const FAL_PROMPT_MAX_CHARS = PROMPT_MAX_CHARS
 
 // ── Queue status vocabulary ──────────────────────────────────────────────
 

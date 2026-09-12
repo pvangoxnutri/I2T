@@ -1,6 +1,7 @@
 import type { FrameFit } from '../../shared/exportFormat'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { sep } from 'node:path'
 import type { AspectRatio, ExportDefaults, FfmpegStatus } from '../../shared/types'
 import { planSeams, type SeamBlend } from '../../shared/seamBlend'
 
@@ -28,11 +29,33 @@ function tryVersion(path: string): string | null {
   }
 }
 
+/**
+ * IN A PACKAGED APP THE BUNDLED PATH POINTS INSIDE THE ARCHIVE.
+ *
+ * `require('ffmpeg-static')` returns a path under node_modules, which in
+ * a packaged build lives inside app.asar. Reading a file there works —
+ * Electron mounts the archive transparently — so `existsSync` says yes
+ * and everything looks fine. EXECUTING one does not: the operating
+ * system cannot spawn a process from a file that has no real location on
+ * disk, and the failure surfaces much later as an export that dies with
+ * an opaque spawn error.
+ *
+ * electron-builder therefore copies the binary out to `app.asar.unpacked`
+ * (see the `asarUnpack` entry in package.json). That copy is the one to
+ * run, and this rewrite is what points at it. Outside a packaged build
+ * the substring is absent and the path is returned untouched.
+ */
+function unpackedPath(p: string): string {
+  return p.includes(`app.asar${sep}`) ? p.replace(`app.asar${sep}`, `app.asar.unpacked${sep}`) : p
+}
+
 function resolveBundled(): string | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const p = require('ffmpeg-static') as string | null
-    return p && existsSync(p) ? p : null
+    const raw = require('ffmpeg-static') as string | null
+    if (!raw) return null
+    const p = unpackedPath(raw)
+    return existsSync(p) ? p : null
   } catch {
     return null
   }
@@ -120,6 +143,21 @@ export interface AssembleSegment {
   path: string
   /** Stills only: how long to hold. Clips are probed. */
   holdSeconds?: number
+  /**
+   * THE SOURCE RANGE THIS SEGMENT PLAYS.
+   *
+   * Absent means the whole file, which is every caller that predates the
+   * Timeline. Present, only `[sourceStartSec, sourceEndSec)` is used —
+   * which is how a split works: two segments over the same path with
+   * different ranges, and no second copy of the video on disk.
+   *
+   * These COMPOSE with the seam trim below rather than replacing it. The
+   * seam removes a duplicated key frame at a blended joint; this removes
+   * everything outside the operator's in and out points. Both are the
+   * same FFmpeg `trim`, applied together.
+   */
+  sourceStartSec?: number
+  sourceEndSec?: number
 }
 
 export interface AssembleOptions {
@@ -141,6 +179,15 @@ export interface AssembleOptions {
    * export needs — see shared/exportFormat. Neither ever stretches.
    */
   fit?: FrameFit
+  /**
+   * Background where a `contain` fit leaves the frame unfilled.
+   *
+   * Defaults to black, which is what every export did before formats
+   * existed and what a desktop letterbox should be. Passed per export
+   * rather than set globally: making it white everywhere changed the
+   * normal export for every non-16:9 source.
+   */
+  padColor?: 'black' | 'white'
   defaults: ExportDefaults
   /** Full-frame transparent PNG overlays, applied bottom-up in order
    * (watermark first, signature last so it stays on top). */
@@ -167,6 +214,7 @@ export interface AssembleHandle {
 export function assemble(options: AssembleOptions): AssembleHandle {
   const { clipPaths, defaults, overlayPngPaths, outputPath, onProgress } = options
   const fit: FrameFit = options.fit ?? 'contain'
+  const padColor = options.padColor ?? 'black'
   const { w, h } = outputDims(defaults)
   const fps = defaults.fps
   const blend: SeamBlend = options.seamBlend ?? defaults.seamBlend ?? 'subtle'
@@ -176,9 +224,23 @@ export function assemble(options: AssembleOptions): AssembleHandle {
   const segments: AssembleSegment[] =
     options.segments ?? clipPaths.map((path) => ({ kind: 'clip' as const, path }))
 
-  const durations = segments.map((s) =>
-    s.kind === 'still' ? (s.holdSeconds ?? 1.5) : probeDurationSec(s.path)
-  )
+  // ── THE IN POINT OF EACH SEGMENT, AND HOW LONG IT PLAYS ────────────
+  //
+  // `sourceIn` is where this segment starts inside its file; `durations`
+  // is what it CONTRIBUTES to the output, which is the trimmed length,
+  // not the file's length. The seam planner must see the trimmed value —
+  // given the whole file it would happily plan a blend longer than the
+  // piece the operator actually kept.
+  const sourceIn = segments.map((s) => Math.max(0, s.sourceStartSec ?? 0))
+  // A stated OUT point needs the trim filter even when the IN point is 0
+  // and no seam applies — otherwise the tail of the file would play on.
+  const hasOutPoint = segments.map((s) => s.kind !== 'still' && s.sourceEndSec !== undefined)
+  const durations = segments.map((s, i) => {
+    if (s.kind === 'still') return s.holdSeconds ?? 1.5
+    const full = probeDurationSec(s.path)
+    const end = s.sourceEndSec !== undefined ? Math.min(s.sourceEndSec, full) : full
+    return Math.max(0, Math.round((end - sourceIn[i]) * 1000) / 1000)
+  })
   const plan = planSeams({
     durationsSec: durations,
     blend,
@@ -215,11 +277,19 @@ export function assemble(options: AssembleOptions): AssembleHandle {
     // that eases to a stop on its last frame does not stack that hold on
     // top of the next clip's identical first frame. `setpts` rebases the
     // timestamps after trimming, which xfade's offsets depend on.
-    const start = plan.trimStartSec[i]
-    const end = plan.trimEndSec[i]
+    // ── ONE TRIM, TWO REASONS ─────────────────────────────────────
+    //
+    // The seam trim is measured from the start of the SEGMENT, and the
+    // segment may itself begin partway into the file. Both are folded
+    // into a single absolute range here, so an in/out point and a
+    // blended joint compose instead of one silently overwriting the
+    // other. Written against `sourceIn[i]`, which is 0 for every caller
+    // that does not use source ranges — so their output is unchanged.
+    const start = plan.trimStartSec[i] + sourceIn[i]
+    const end = sourceIn[i] + durations[i] - plan.trimEndSec[i]
     const trimmed =
-      start > 0 || end > 0
-        ? `trim=start=${start}:end=${(durations[i] - end).toFixed(3)},setpts=PTS-STARTPTS,`
+      plan.trimStartSec[i] > 0 || plan.trimEndSec[i] > 0 || sourceIn[i] > 0 || hasOutPoint[i]
+        ? `trim=start=${start.toFixed(3)}:end=${end.toFixed(3)},setpts=PTS-STARTPTS,`
         : ''
     // ── FIT THE FRAME WITHOUT DISTORTING IT ─────────────────────────
     //
@@ -232,11 +302,19 @@ export function assemble(options: AssembleOptions): AssembleHandle {
     // `cover` is what makes a vertical export a vertical video rather
     // than a landscape clip marooned in a tall black rectangle. The crop
     // is centred, so the middle of every frame survives.
+    //
+    // ── AND WHEN PADDING DOES HAPPEN, THE FORMAT DECIDES ITS COLOUR ─
+    //
+    // `cover` never pads: it scales up until the frame is filled and
+    // crops the overflow, which is what makes a vertical export a
+    // vertical video. `contain` pads, and the colour comes from the
+    // export format — black for the desktop letterbox it has always
+    // been, white where a fallback should read as margin.
     const fitChain =
       fit === 'cover'
         ? `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}`
         : `scale=${w}:${h}:force_original_aspect_ratio=decrease,` +
-          `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black`
+          `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=${padColor}`
 
     chains.push(
       `[${i}:v]${trimmed}${fitChain},setsar=1,fps=${fps},` +

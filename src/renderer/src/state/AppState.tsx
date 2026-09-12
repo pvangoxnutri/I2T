@@ -52,7 +52,12 @@ const makeSignature = (): BrandSignature => ({
   opacityPct: 55
 })
 
-const makeWatermark = (): PreviewWatermark => ({
+/**
+ * The built-in watermark. Exported so Settings can fall back to it for
+ * a row written before  existed — one default, not a
+ * second copy that could drift from what new projects actually get.
+ */
+export const makeWatermark = (): PreviewWatermark => ({
   enabled: true,
   imageSrc: null,
   imageName: null,

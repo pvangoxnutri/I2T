@@ -28,7 +28,25 @@ export function readAnalysis(projectId: string): PropertyAnalysis {
 }
 
 export function saveAnalysis(analysis: PropertyAnalysis): PropertyAnalysis {
-  const stored: PropertyAnalysis = { ...analysis, updatedAt: Date.now() }
+  // ── A SAVE THAT CHANGES NOTHING KEEPS ITS TIMESTAMP ─────────────────
+  //
+  // `updatedAt` is not bookkeeping: prompt provenance is fingerprinted
+  // against it, so bumping it on every write marked every prompt in the
+  // project stale whenever the map was re-saved — re-accepting the same
+  // analysis, promoting an unchanged draft — with no spatial evidence
+  // having changed at all. The timestamp now means "when this map last
+  // actually changed", which is what everything downstream already
+  // assumed it meant.
+  const previous = readAnalysis(analysis.projectId)
+  const unchanged =
+    previous.updatedAt > 0 &&
+    serializeAnalysis({ ...previous, updatedAt: 0 }) ===
+      serializeAnalysis({ ...analysis, updatedAt: 0 })
+
+  const stored: PropertyAnalysis = {
+    ...analysis,
+    updatedAt: unchanged ? previous.updatedAt : Date.now()
+  }
   const db = getDb()
   // UPSERT ON THE ACCEPTED COLUMNS ONLY.
   //

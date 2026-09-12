@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppState } from '../../state/AppState'
 import type { PropertyAnalysis } from '../../../../shared/propertyAnalysis'
+import type { GenerationRecord } from '../../../../shared/types'
 import {
   inspectorModeFor,
   previewModeFor,
@@ -9,29 +10,36 @@ import {
   selectFullVideo,
   selectImage,
   selectTransition,
+  selectMotion,
+  selectTimeline,
+  selectedMotionId,
   type EditorSelection
 } from '../../../../shared/editorSelection'
-import { getFeedSequenceIds } from '../../../../shared/feedSequence'
+import { getFeedImages, getFeedSequenceIds } from '../../../../shared/feedSequence'
+import { transitionKey } from '../../types'
+import { useLiveGeneration } from '../../hooks/useLiveGeneration'
 import { EditorToolbar } from '../editor/EditorToolbar'
 import { LeftPanel } from '../editor/LeftPanel'
 import { PreviewStage } from '../editor/PreviewStage'
 import { TimelineStrip } from '../editor/TimelineStrip'
 import { TransitionInspector } from '../editor/TransitionInspector'
 import { ImageInspector } from '../editor/ImageInspector'
+import { MotionInspector } from '../editor/MotionInspector'
+import { TimelineEditor } from '../editor/TimelineEditor'
 import { ExportDrawer } from '../editor/ExportDrawer'
-import { LiveGenerateDialog } from '../editor/LiveGenerateDialog'
 import { CustomerDetailsDrawer } from '../editor/CustomerDetailsDrawer'
 import { ProjectCatalogue } from '../editor/ProjectCatalogue'
-import type { LiveConfirmationPayload } from '../../../../preload/index'
 import {
   latestJobForPair,
   transitionRecovery,
   type TransitionRecovery
 } from '../../../../shared/transitionRecovery'
 import { pairIndexOf } from '../../../../shared/previewSource'
+import { feedTransitionState } from '../../../../shared/feedTransitionState'
 import { analyzeFeedMutation, type FeedMutationReport } from '../../../../shared/feedMutationGuard'
 import { FeedMutationWarningDialog } from '../editor/FeedMutationWarningDialog'
 import type { ResolvedModeRow } from '../../../../shared/transitionMode'
+import type { TimelineViewPayload } from '../../../../shared/timeline'
 
 /**
  * The I2T editor — a desktop video-editing workspace.
@@ -77,20 +85,85 @@ export function ProjectEditorPage({
   const [exportOpen, setExportOpen] = useState(false)
   const [customerOpen, setCustomerOpen] = useState(false)
   const [catalogueOpen, setCatalogueOpen] = useState(false)
+  /** The generation Review quality asked to look at, if any. */
+  const [focusGeneration, setFocusGeneration] = useState<string | null>(null)
+  /**
+   * Every generation in this project, so the recovery offered for the
+   * selected transition knows whether a clip was downloaded and then
+   * rejected. Without it the panel reads "no clip" and offers a free
+   * re-download of a file already on disk.
+   */
+  const [generations, setGenerations] = useState<GenerationRecord[]>([])
+  /**
+   * Regenerate, driven from Generation History.
+   *
+   * The SAME hook the inspector uses, so there is exactly one paid path
+   * in the renderer: confirmation payload from main, dialog, then submit
+   * with the one-shot token. A second copy here would be a second place
+   * for a spending guard to go missing.
+   */
+  const liveGeneration = useLiveGeneration(projectId, refreshProjects)
   const [analysis, setAnalysis] = useState<PropertyAnalysis | null>(null)
   // Bumped whenever a manual override changes, so the effective analysis
   // — and therefore every plan derived from it — is re-read.
   const [factsNonce, setFactsNonce] = useState(0)
-  const [liveConfirm, setLiveConfirm] = useState<LiveConfirmationPayload | null>(null)
   // How every transition will actually behave — generated, cut or
   // dissolved. Resolved once in main so the timeline, both inspectors,
   // readiness and the cost estimate cannot disagree.
   const [modes, setModes] = useState<ResolvedModeRow[]>([])
   const [generateOpening, setGenerateOpening] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
+  /**
+   * Bumped ONLY by keyboard navigation.
+   *
+   * The timeline scrolls the selection into view when this changes and at
+   * no other time, so an ordinary click can never move the track.
+   */
+  const [keyboardNavNonce, setKeyboardNavNonce] = useState(0)
   const [ctrlArrowWarning, setCtrlArrowWarning] = useState<{ mutation: () => void; report: FeedMutationReport } | null>(null)
+  /**
+   * THE FINAL EDIT, OWNED HERE.
+   *
+   * ── WHY THE PAGE HOLDS IT ──────────────────────────────────────────
+   *
+   * The timeline component used to fetch this itself AND keep its own
+   * selected item and playhead, beside its own hidden <video>. That is
+   * two preview states: a feed click and a timeline click could each
+   * believe they owned the screen, and whichever re-rendered last won.
+   *
+   * One owner. The page fetches it, the timeline strip renders it, and
+   * the preview resolves the playhead from the SAME list — so they
+   * cannot disagree even for a frame.
+   */
+  const [timelineView, setTimelineView] = useState<TimelineViewPayload | null>(null)
+  /**
+   * Transport state, owned here for the same reason the selection is:
+   * the timeline header and the preview both have a play button, and two
+   * copies of "is it playing" would let one show a pause glyph while the
+   * other showed play.
+   */
+  const [timelinePlaying, setTimelinePlaying] = useState(false)
+  /**
+   * PREVIEW LAYER VISIBILITY — editor-local, deliberately.
+   *
+   * Not persisted, and not part of the branding config. This answers
+   * "what do I want to look at right now", which is a property of the
+   * session rather than of the project. The export rasterises from the
+   * SAVED branding settings and never reads these, so hiding a layer
+   * here cannot change what ships.
+   */
+  const [showWatermark, setShowWatermark] = useState(true)
+  const [showCornerStamp, setShowCornerStamp] = useState(true)
 
   const project = projects.find((p) => p.id === projectId)
+
+  useEffect(() => {
+    void window.f2f.projects.timeline.get(projectId).then(setTimelineView)
+  }, [projectId, project?.updatedAt])
+
+  /** The shape `resolvePreviewSource` needs. Null until it has loaded. */
+  const timelineSource = timelineView?.timeline
+    ? { items: timelineView.timeline.items, defaultSeamSec: timelineView.defaultSeamSec }
+    : null
 
   // The EFFECTIVE analysis: accepted, with manual corrections folded in.
   // Read once here and passed down so the timeline, both inspectors and
@@ -99,6 +172,12 @@ export function ProjectEditorPage({
   useEffect(() => {
     void window.f2f.projects.analysis.effective(projectId).then(setAnalysis)
   }, [projectId, factsNonce])
+
+  // Re-read when the project moves, so a verdict that lands mid-poll
+  // reaches the recovery decision without a restart.
+  useEffect(() => {
+    void window.f2f.projects.catalogue.getAll(projectId).then(setGenerations)
+  }, [projectId, project?.updatedAt])
 
   // Re-read whenever the project changes: a mode is stored on the
   // transition, and Auto can resolve differently after an accepted
@@ -110,6 +189,22 @@ export function ProjectEditorPage({
   // Reconciliation runs against the FEED, because that is what a selected
   // transition is a transition IN.
   const feedIdKey = project ? getFeedSequenceIds(project).join('|') : ''
+
+  /**
+   * Every pair the CURRENT feed contains.
+   *
+   * Generation History outlives feed edits on purpose — a clip generated
+   * for two photographs that are no longer adjacent is still real, still
+   * paid for, and still worth keeping. But it cannot be regenerated:
+   * there is no such transition any more, and a Regenerate button that
+   * quietly bought a clip for a pair the video does not contain would be
+   * spending money on nothing.
+   */
+  const currentPairKeys = project
+    ? getFeedImages(project)
+        .slice(0, -1)
+        .map((img, i) => transitionKey(img.id, getFeedImages(project)[i + 1].id))
+    : []
 
   /**
    * Keep the selection meaningful as the project changes. A photo that
@@ -193,6 +288,15 @@ export function ProjectEditorPage({
       event.preventDefault()
       if (action.type === 'select-image') {
         setSelection(selectImage(action.imageId))
+        // ARROW-KEY REVIEW IS THE ONE CASE THAT MAY SCROLL.
+        //
+        // Walking the sequence with the keyboard can step onto something
+        // off-screen, and leaving the operator staring at an unchanged
+        // strip would make the shortcut look broken. A mouse click cannot
+        // reach anything off-screen — they clicked what they could see —
+        // so it must never move the track. The nonce is what tells the
+        // timeline which of the two just happened.
+        setKeyboardNavNonce((n) => n + 1)
         return
       }
       // Ctrl+Arrow: reorder within feedSequence (video sequence), not library.
@@ -250,15 +354,20 @@ export function ProjectEditorPage({
         void window.f2f.queue.resumePolling(action.jobId).then(() => refreshProjects())
         return
       }
+      // THE SAME HOOK THE INSPECTOR AND THE CATALOGUE USE.
+      //
+      // This path had its own copy, and the copy had drifted: it opened
+      // the confirmation for one pairKey but submitted against
+      // selection.pairKey. Those are the same value only while the
+      // dialog is open and the selection does not move — so selecting a
+      // different transition mid-dialog would have bought a clip for a
+      // pair the operator never saw priced. The hook holds the pair it
+      // was opened with.
       setGenerateOpening(true)
-      void window.f2f.generation
-        .liveConfirmation(projectId, pairKey)
-        .then((data) => {
-          if (data) setLiveConfirm(data)
-        })
-        .finally(() => setGenerateOpening(false))
+      liveGeneration.open(pairKey)
+      setGenerateOpening(false)
     },
-    [projectId, refreshProjects]
+    [projectId, liveGeneration, generations, refreshProjects]
   )
 
   if (!project) {
@@ -276,6 +385,36 @@ export function ProjectEditorPage({
   const selectedMode = modes.find(
     (m) => selection.kind === 'transition' && m.pairKey === selection.pairKey
   )
+
+  /**
+   * The newest generation for a pair — the fact both the displayed word
+   * and the offered action have to be derived from.
+   */
+  const latestGenerationFor = (pairKey: string): GenerationRecord | null => {
+    const [from, to] = pairKey.split('->')
+    return (
+      generations
+        .filter((g) => g.fromImageId === from && g.toImageId === to)
+        .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null
+    )
+  }
+
+  /**
+   * What the preview pane says about the selected transition.
+   *
+   * The SAME derivation the timeline uses and the same catalogue facts the
+   * Queue reads. The preview had its own reading of `transition.status`
+   * and so kept printing "Transition 11 → 12 failed" after the timeline
+   * had been taught better.
+   */
+  const selectedView =
+    selection.kind === 'transition'
+      ? feedTransitionState(
+          project.transitions[selection.pairKey],
+          latestGenerationFor(selection.pairKey),
+          false
+        )
+      : null
 
   // What to offer for the selected transition. Decided in `shared` from
   // the REMOTE task state, so a free recovery is never mislabelled as a
@@ -311,10 +450,24 @@ export function ProjectEditorPage({
         <PreviewStage
           project={project}
           selection={selection}
+          timeline={timelineSource}
+          playing={timelinePlaying}
+          onPlayingChange={setTimelinePlaying}
+          showWatermark={showWatermark}
+          showCornerStamp={showCornerStamp}
+          onTimelineSeek={(atSec) =>
+            setSelection((prev) =>
+              // Only while the timeline owns the preview. A frame update
+              // arriving after the operator clicked a transition must not
+              // drag the selection back.
+              prev.kind === 'timeline' ? selectTimeline(prev.itemId, atSec) : prev
+            )
+          }
           mode={previewModeFor(selection)}
           onShowFullVideo={() => setSelection(selectFullVideo())}
           recovery={recovery}
           transitionMode={selectedMode ?? null}
+          view={selectedView}
           onRecover={
             selection.kind === 'transition' && recovery
               ? () => recover(selection.pairKey, recovery)
@@ -329,8 +482,30 @@ export function ProjectEditorPage({
         analysis={analysis}
         selection={selection}
         modes={modes}
+        generations={generations}
+        scrollToSelectionNonce={keyboardNavNonce}
         onSelectImage={(id) => setSelection(selectImage(id))}
         onSelectTransition={(key) => setSelection(selectTransition(key))}
+        selectedMotionId={selectedMotionId(selection)}
+        onSelectMotion={(id) => setSelection(selectMotion(id))}
+      />
+
+      {/* ── THE FINAL EDIT ──────────────────────────────────────────
+          Directly under the Feed, because that is the reading order:
+          the Feed is what to produce, this is what actually ships.
+          Nothing it does writes back into the feed. */}
+      <TimelineEditor
+        project={project}
+        view={timelineView}
+        selection={selection}
+        onSelect={setSelection}
+        onViewChanged={setTimelineView}
+        playing={timelinePlaying}
+        onPlayingChange={setTimelinePlaying}
+        showWatermark={showWatermark}
+        showCornerStamp={showCornerStamp}
+        onShowWatermarkChange={setShowWatermark}
+        onShowCornerStampChange={setShowCornerStamp}
       />
 
       {inspector === 'image' && (
@@ -347,6 +522,12 @@ export function ProjectEditorPage({
           analysis={analysis}
           pairKey={selection.kind === 'transition' ? selection.pairKey : null}
           modes={modes}
+        />
+      )}
+      {inspector === 'motion' && (
+        <MotionInspector
+          project={project}
+          segmentId={selection.kind === 'motion' ? selection.segmentId : null}
         />
       )}
       {inspector === 'none' && (
@@ -367,29 +548,27 @@ export function ProjectEditorPage({
       <ProjectCatalogue
         projectId={projectId}
         open={catalogueOpen}
-        onClose={() => setCatalogueOpen(false)}
+        onClose={() => {
+          setCatalogueOpen(false)
+          setFocusGeneration(null)
+        }}
+        // Set when Review quality asked about one specific clip, so the
+        // operator lands on it rather than on a list to search.
+        focusGenerationId={focusGeneration}
+        // THE SAME PAID PATH THE INSPECTOR USES — main builds the
+        // confirmation, main enforces readiness, main issues the token.
+        // The catalogue only supplies which pair.
+        onRegenerate={(from, to) => liveGeneration.open(transitionKey(from, to))}
+        // Pairs the CURRENT feed actually contains. A generation whose two
+        // photographs are no longer adjacent is history, not something to
+        // regenerate — see the note in ProjectCatalogue.
+        currentPairKeys={currentPairKeys}
       />
 
       {/* The unchanged paid-request confirmation. Reached from the preview
           and from the inspector's Generation tab; both build it in main
           and neither can submit without passing through it. */}
-      {liveConfirm && selection.kind === 'transition' && (
-        <LiveGenerateDialog
-          data={liveConfirm}
-          busy={submitting}
-          onCancel={() => setLiveConfirm(null)}
-          onConfirm={() => {
-            setSubmitting(true)
-            void window.f2f.generation
-              .generateLive(project.id, [selection.pairKey])
-              .then(() => {
-                setSubmitting(false)
-                setLiveConfirm(null)
-                refreshProjects()
-              })
-          }}
-        />
-      )}
+      {liveGeneration.dialog}
 
       {ctrlArrowWarning && project && (
         <FeedMutationWarningDialog

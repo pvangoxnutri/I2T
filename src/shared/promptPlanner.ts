@@ -1,4 +1,5 @@
-import { DEFAULT_TRANSITION_PROMPT } from './prompts'
+import type { EvidenceSource } from './pairAnalysis'
+import { motionBlock, DEFAULT_TRANSITION_PROMPT } from './prompts'
 import { relateImages, type PropertyAnalysis, type SpatialRelation } from './propertyAnalysis'
 
 /**
@@ -85,8 +86,8 @@ function planFromRelation(relation: SpatialRelation): {
       return {
         motion:
           `The END FRAME is in the ${relation.to.label}, reached from the ${relation.from.label} ` +
-          `through the ${through} visible in the START FRAME. Move the camera forward through ` +
-          `that visible opening and settle into the ${relation.to.label}. Do not invent any ` +
+          `through the ${through} visible in the START FRAME. The invisible viewpoint moves forward ` +
+          `through that visible opening and stops in the ${relation.to.label}. Do not invent any ` +
           `corridor, door or opening that is not visible in the START FRAME.`,
         basis: 'adjacent-room',
         rationale:
@@ -99,7 +100,7 @@ function planFromRelation(relation: SpatialRelation): {
     return {
       motion:
         `The START FRAME is in the ${relation.from.label} and the END FRAME is in the ` +
-        `${relation.to.label}. Move the camera smoothly toward the END FRAME's viewpoint ` +
+        `${relation.to.label}. The invisible viewpoint moves toward the END FRAME's viewpoint ` +
         `without depicting travel through any doorway or opening, since none is confirmed ` +
         `visible in the START FRAME.`,
       basis: 'adjacent-room',
@@ -137,8 +138,13 @@ export function planTransitionPrompt(
     rationale,
     // The safety contract ALWAYS leads. The motion instruction is appended
     // under its own heading so it can never be read as replacing a rule
-    // above it.
-    effectivePrompt: motion ? `${basePrompt}\n\nCAMERA MOVEMENT FOR THIS TRANSITION:\n${motion}` : basePrompt
+    // above it — and the heading comes from ONE definition, because this
+    // was one of three places that hardcoded "CAMERA MOVEMENT FOR THIS
+    // TRANSITION" and so announced a camera after every rule denying one.
+    effectivePrompt: (() => {
+      const movement = motionBlock(motion)
+      return movement ? `${basePrompt}\n\n${movement}` : basePrompt
+    })()
   }
 }
 
@@ -165,6 +171,103 @@ export interface PromptProvenance {
    * existed.
    */
   analysisUpdatedAt: number | null
+  /**
+   * WHICH SPATIAL EVIDENCE THIS WORDING WAS BUILT FROM.
+   *
+   * `analysisUpdatedAt` alone stopped being enough once a pair could be
+   * guided by four different things. A prompt built from an individual
+   * pair analysis and one built from the global map can carry the same
+   * analysis timestamp and mean entirely different things — and the
+   * second is stale the moment the first arrives.
+   *
+   * Absent on every row written before this existed, which correctly
+   * reads as "we do not know what this was based on" rather than as a
+   * match.
+   */
+  evidenceSource?: EvidenceSource
+  /**
+   * A stable id for that evidence. Compared, never parsed — its only job
+   * is to differ when the evidence differs.
+   */
+  evidenceFingerprint?: string
+  /** Set only when operator context actually went into the wording. */
+  operatorContextFingerprint?: string
+  /** The pair this describes, so a provenance record cannot drift. */
+  pairKey?: string
+}
+
+/**
+ * IS THIS WORDING STILL BUILT ON WHAT WE NOW BELIEVE?
+ *
+ * ── WHY NOT "A PROMPT EXISTS, SO IT IS CURRENT" ──────────────────────
+ *
+ * Because that is how a prompt written against a five-week-old map
+ * survived a fresh analysis and kept guiding generation. Existence is
+ * not currency. This compares the evidence the prompt RECORDS against
+ * the evidence that resolves for the pair today.
+ *
+ * A hand-edited prompt is never stale: it is the operator's wording, not
+ * a derivation, and nothing about new evidence makes their sentence
+ * wrong. It is protected everywhere else for the same reason.
+ */
+export function isPromptBasisCurrent(
+  provenance: PromptProvenance | null | undefined,
+  current: {
+    source: EvidenceSource
+    fingerprint: string
+    operatorContextFingerprint?: string
+  }
+): boolean {
+  if (!provenance) return false
+  if (provenance.manuallyEdited) return true
+  // Written before provenance carried a source: unknowable, so treated
+  // as stale rather than assumed to match.
+  if (!provenance.evidenceSource) return false
+  if (provenance.evidenceSource !== current.source) return false
+  if (provenance.evidenceFingerprint !== current.fingerprint) return false
+  return (
+    (provenance.operatorContextFingerprint ?? null) ===
+    (current.operatorContextFingerprint ?? null)
+  )
+}
+
+/**
+ * The fingerprint for one resolved evidence state.
+ *
+ * Deliberately a string built from whichever identifiers that source
+ * actually has: a value that changes when the evidence changes is the
+ * entire requirement, and inventing a hash would only hide which part
+ * moved.
+ */
+export function evidenceFingerprintOf(input: {
+  source: EvidenceSource
+  analysisUpdatedAt?: number | null
+  pairAnalyzedAt?: number | null
+  operatorContextAt?: number | null
+  /**
+   * The accepted feed analysis' own identity, pinned when it was
+   * accepted. Preferred over the live analysis timestamp for feed
+   * evidence: the map can be re-saved for reasons that have nothing to do
+   * with this pair, and a fingerprint that moves then marks every prompt
+   * stale without any evidence having changed.
+   */
+  feedAnalysisAcceptedAt?: number | null
+}): string {
+  switch (input.source) {
+    case 'operator':
+      return `operator:${input.operatorContextAt ?? 0}`
+    case 'individual-analysis':
+      return `pair:${input.pairAnalyzedAt ?? 0}`
+    case 'feed-analysis':
+      // Falls back to the analysis timestamp for feed analyses accepted
+      // before the identity was pinned — those two values were equal at
+      // accept time, so existing prompts keep matching.
+      return `feed:${input.feedAnalysisAcceptedAt ?? input.analysisUpdatedAt ?? 0}`
+    case 'global-analysis':
+      return `global:${input.analysisUpdatedAt ?? 0}`
+    default:
+      return 'unknown'
+  }
 }
 
 /**

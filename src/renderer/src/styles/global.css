@@ -55,6 +55,9 @@
 
   --toolbar-h: 46px;
   --timeline-h: 132px;
+  /* The final edit gets a generous band: ruler, 76px blocks, the
+     selected-clip readout and room to click without pixel-hunting. */
+  --timeline-editor-h: 196px;
   /* ── FUNCTION OVER SPECTACLE ──────────────────────────────────────
      The preview used to absorb every spare pixel while the inspector
      was pinned to a short fixed row, so the controls that actually do
@@ -62,10 +65,19 @@
      pushed out of view. The inspector now gets the taller row and the
      preview shrinks around it: a compact frame you can still judge a
      clip in beats a large one whose buttons need scrolling to reach. */
-  --inspector-h: 300px;
+  /* The prompt editor lives here and was the most cramped thing on
+     screen; the row it sits in has to be tall enough to hold it. */
+  --inspector-h: 460px;
+  /* The inspector shrinks to this before the preview gives up a pixel.
+     Its body scrolls, so a shorter row costs scrolling — not access. */
+  --inspector-min-h: 210px;
+  /* A frame you can actually judge a clip in. The preview grows past
+     this whenever the window allows; it never goes below it. */
+  --preview-min-h: 285px;
   /* The preview never grows past this, however tall the window is. */
-  --preview-max-h: 46vh;
-  --left-panel-w: 300px;
+  --preview-max-h: 34vh;
+  /* Media / Tools / Analysis / Production all live in this column. */
+  --left-panel-w: 360px;
 
   --font-body:
     'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
@@ -1985,6 +1997,19 @@ textarea {
   background: rgba(127, 191, 150, 0.1);
 }
 
+/* Downloaded, and deliberately not in use. Not green — nothing here is
+   finished work — and not red either, because the file arrived exactly as
+   it should have. The content is what was refused. */
+.queue-clip-held {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--warn, #d8a657);
+  border: 1px solid rgba(216, 166, 87, 0.35);
+  background: rgba(216, 166, 87, 0.1);
+}
+
 .queue-clip-missing {
   font-size: 11px;
   font-weight: 600;
@@ -2751,11 +2776,38 @@ textarea {
   grid-template-columns: minmax(0, 1fr);
   /* The preview row shrinks first and is capped; the inspector keeps its
      full row so nothing important is pushed below the fold. */
+  /* ── FIVE ROWS, AND PREVIEW IS THE ONE THAT GROWS ─────────────────
+     THE REGRESSION THIS FIXES. The rows were
+     `46 / minmax(150, 34vh) / 132 / 238 / minmax(460, 1fr)`, which at
+     911px tall summed to 1026. Preview was the ONLY row that could
+     shrink — the inspector's minimum was a floor of 460 — so it
+     collapsed to its 150px minimum and the video inside it rendered at
+     103×58. Adding the timeline row is what tipped it over; the
+     arithmetic had no slack left.
+     The priority is now the operator's stated one: PREVIEW first,
+     TIMELINE second, inspector last. Preview takes `1fr` so it grows
+     into whatever is spare, with a real working floor rather than a
+     token one. The timeline is a fixed band that scrolls horizontally.
+     The inspector is capped rather than floored: it gets its preferred
+     height when there is room and shrinks to a usable minimum when
+     there is not, scrolling internally either way. */
+  /* ── THE WORKSPACE IS CONTENT-DRIVEN ──────────────────────────────
+     The last row was `minmax(--inspector-min-h, --inspector-h)`, a band
+     of fixed height whatever was in it. With nothing selected that
+     produced a 223px panel holding 18px of text — 205px of blank — while
+     the preview row above it was capped and the LEFT PANEL inside that
+     row was squeezed to 98px for Media, Analysis, Tools and Production.
+     Blank space below, no space to work in above.
+     `auto` sizes the row to what the panel actually contains, and the
+     cap below stops a full inspector eating the preview. Whatever the
+     workspace does not need flows to `1fr` — the preview row — and the
+     left panel grows with it. */
   grid-template-rows:
     var(--toolbar-h)
-    minmax(150px, var(--preview-max-h))
+    minmax(var(--preview-min-h), 1fr)
     var(--timeline-h)
-    minmax(var(--inspector-h), 1fr);
+    var(--timeline-editor-h)
+    auto;
   height: 100vh;
   min-width: 0;
   overflow: hidden;
@@ -2930,10 +2982,12 @@ textarea {
   border: none;
   border-bottom: 2px solid transparent;
   color: var(--text-mute);
-  font-size: 11px;
+  /* Was 11px in a 35px-tall target. These are the four things the
+     operator switches between all day. */
+  font-size: 12.5px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 9px 4px;
+  letter-spacing: 0.05em;
+  padding: 13px 8px;
   cursor: pointer;
 }
 
@@ -2944,10 +2998,10 @@ textarea {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px;
+  padding: 18px 16px;
 }
 
-.left-production { display: flex; flex-direction: column; gap: 14px; }
+.left-production { display: flex; flex-direction: column; gap: 20px; }
 
 /* ── Media browser ──────────────────────────────────────────────────── */
 
@@ -3981,6 +4035,22 @@ textarea {
 .state-dot-busy { background: var(--info); }
 .state-dot-pending { background: var(--info); }
 .state-dot-missing { background: var(--text-mute); }
+/* Held for a human decision. Deliberately NOT the failure red: the
+   generation succeeded and the file is on disk — what is outstanding is
+   a judgement about its content. */
+.state-dot-review { background: var(--warn, #d8a657); }
+
+/* Rule F: an older clip is still in use, and the newest attempt is not.
+   Sits under the primary word, quieter, because the transition is
+   working and this is a follow-up rather than the headline. */
+.timeline-transition-secondary {
+  display: block;
+  margin-top: 2px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--warn, #d8a657);
+}
 
 .timeline-tail-drop { width: 24px; position: relative; flex: none; }
 
@@ -3991,6 +4061,24 @@ textarea {
   flex-direction: column;
   min-height: 0;
   background: var(--bg-raised);
+  /* ── THE CAP THAT PROTECTS THE PREVIEW ────────────────────────────
+     The grid row is `auto`, so this panel takes exactly the height its
+     content needs — which is what removes the blank band when nothing
+     is selected. This cap is the other half: a full inspector (prompt
+     editor, evidence, controls) must not grow until the preview is
+     squeezed to nothing.
+     The value is what is genuinely left over once the toolbar, the
+     preview's floor, the feed and the timeline have been paid for, so
+     it adapts to the window instead of guessing. It scrolls internally
+     past that point — a shorter panel costs scrolling, not access. */
+  max-height: min(
+    var(--inspector-h),
+    calc(
+      100vh - var(--toolbar-h) - var(--preview-min-h) - var(--timeline-h) -
+        var(--timeline-editor-h)
+    )
+  );
+  overflow-y: auto;
 }
 
 .inspector-empty {
@@ -3998,6 +4086,9 @@ textarea {
   justify-content: center;
   color: var(--text-mute);
   font-size: 12px;
+  /* Just enough to read the sentence. Nothing is selected, so nothing
+     here deserves a reserved band. */
+  padding: 10px 0;
 }
 
 .inspector-head {
@@ -4032,7 +4123,20 @@ textarea {
 .inspector-tab:hover { color: var(--text-dim); }
 .inspector-tab.is-active { color: var(--text); border-bottom-color: var(--text); }
 
-.inspector-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 14px; }
+.inspector-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 14px;
+  /* A COLUMN, so the panel inside can be told to fill it.
+     As display:block this was inert: .inspector-prompt carried
+     flex: 1 against a non-flex parent, its 240px textarea forced the
+     grid to 399px inside a 324px body, and the overflow rule turned
+     the difference into a scrollbar. The prompt was bigger and less
+     visible at the same time. */
+  display: flex;
+  flex-direction: column;
+}
 
 .inspector-motion,
 .inspector-generation,
@@ -4072,18 +4176,45 @@ textarea {
 }
 .inspector-planned p { margin: 3px 0 0; font-size: 12px; line-height: 1.55; color: var(--text-dim); }
 
-.inspector-prompt { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 14px; }
+/* The prompt is the main thing edited in this panel, so it takes the
+   room and the side column is only as wide as its buttons need. */
+/* A COLUMN of notices with ONE growing editor row at the bottom.
+   It was a two-column grid holding the notices AND the editor, so the
+   editor landed in whichever row was left over — an auto row whenever an
+   extra notice appeared, which collapsed it. */
+.inspector-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  flex: 1;
+}
+
+/* The editor and its buttons. This is the row that takes the space. */
+.inspector-prompt-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+  gap: 20px;
+  flex: 1;
+  min-height: 0;
+}
 
 /* Grows on focus, never permanently. */
 .inspector-textarea {
   width: 100%;
-  height: 96px;
+  /* Was 96px — about five visible lines of a prompt that routinely runs
+     to forty. Long wording had to be edited through a slot. It now fills
+     its grid row; the floor is deliberately below the row height so it
+     can never be the thing that overflows the panel. */
+  height: 100%;
+  min-height: 120px;
+  resize: vertical;
   background: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text);
   font-family: var(--font-body);
-  font-size: 12px;
+  font-size: 13.5px;
   line-height: 1.55;
   padding: 8px 10px;
   resize: none;
@@ -4091,6 +4222,12 @@ textarea {
 }
 
 .inspector-textarea:focus { height: 150px; border-color: var(--border-strong); outline: none; }
+
+/* The evidence line describes the whole prompt, so it spans the grid.
+   Without this it occupied column 1 and pushed the textarea into the
+   240px side column — which is why the editor measured 240px wide
+   however tall it was made. */
+
 
 .inspector-prompt-side { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 
@@ -4314,14 +4451,19 @@ textarea {
    fall off the bottom. The inspector keeps its height and the preview
    cap comes down instead. */
 
+/* The left column is a WORKSPACE, not a sidebar: Media, Analysis,
+   Tools and Production all render into it. Now that the preview row
+   grows rather than being capped, there is room to give it back some
+   width without the video suffering. */
 @media (max-width: 1500px) {
-  :root { --left-panel-w: 260px; --preview-max-h: 42vh; }
+  :root { --left-panel-w: 340px; }
 }
 
 @media (max-width: 1280px) {
   :root {
-    --left-panel-w: 232px;
+    --left-panel-w: 270px;
     --timeline-h: 124px;
+    --timeline-editor-h: 200px;
     --preview-max-h: 38vh;
   }
   .toolbar-project-name { max-width: 190px; }
@@ -4330,11 +4472,29 @@ textarea {
 /* SHORT WINDOWS are where "everything visible" is actually won or lost —
    a 1440×800 laptop has far less to spare vertically than horizontally. */
 @media (max-height: 900px) {
-  :root { --timeline-h: 118px; --inspector-h: 272px; --preview-max-h: 36vh; }
+  /* THE PROMPT EDITOR LIVES IN THE INSPECTOR, so this row is the one
+     that must not be sacrificed on a short window. It was 272px while
+     the base was 460px — and a 900px-tall laptop viewport matches here,
+     so this override was what the operator actually got. The preview
+     cap comes down instead, which is what the note above already said
+     the policy was. */
+  :root {
+    --timeline-h: 118px;
+    --inspector-h: 400px;
+    --inspector-min-h: 190px;
+    --timeline-editor-h: 196px;
+    --preview-min-h: 280px;
+  }
 }
 
 @media (max-height: 760px) {
-  :root { --timeline-h: 106px; --inspector-h: 250px; --preview-max-h: 30vh; }
+  :root {
+    --timeline-h: 106px;
+    --inspector-h: 330px;
+    --inspector-min-h: 170px;
+    --timeline-editor-h: 182px;
+    --preview-min-h: 240px;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -4769,9 +4929,14 @@ textarea {
 /* ── Project readiness ────────────────────────────────────────────────
    A readout, never a gate. Nothing here disables anything. */
 
+/* Compacted: it is a status strip, not a panel. At 156px it was half
+   the left column, which is why Media/Analysis/Tools/Production had
+   only 98px to render into. */
 .readiness {
   flex: none;
-  padding: 9px 12px;
+  padding: 7px 12px;
+  max-height: 108px;
+  overflow-y: auto;
   border-bottom: 1px solid var(--border);
   background: var(--bg-inset);
 }
@@ -5965,3 +6130,1024 @@ textarea {
 .export-format-option input { grid-area: radio; align-self: center; }
 .export-format-label { grid-area: label; font-size: 12.5px; color: var(--text); }
 .export-format-desc { grid-area: desc; font-size: 11px; color: var(--text-mute); }
+
+/* ── POST-GENERATION QUALITY ──────────────────────────────────────────
+   Three verdicts that must be distinguishable at a glance in a list:
+   passed is quiet, failed is loud, and "not checked" must never look
+   like approval — so it is grey rather than green. */
+.catalogue-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.catalogue-provider-status {
+  font-size: 11px;
+  color: var(--text-mute);
+}
+
+.catalogue-quality {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 100px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.quality-passed {
+  color: #6fd08c;
+  background: rgba(111, 208, 140, 0.1);
+  border-color: rgba(111, 208, 140, 0.25);
+}
+
+.quality-failed {
+  color: #ff8a80;
+  background: rgba(255, 138, 128, 0.12);
+  border-color: rgba(255, 138, 128, 0.3);
+}
+
+.quality-review {
+  color: #ffcf70;
+  background: rgba(255, 207, 112, 0.1);
+  border-color: rgba(255, 207, 112, 0.28);
+}
+
+/* Deliberately neutral. Nobody looked at these clips. */
+.quality-unchecked {
+  color: var(--text-mute);
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--border);
+}
+
+.quality-override {
+  color: #9db8ff;
+  background: rgba(157, 184, 255, 0.1);
+  border-color: rgba(157, 184, 255, 0.28);
+}
+
+.catalogue-quality-reason {
+  margin-top: 5px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* ── THE ACTIONS COLUMN MUST NOT CRUSH THE REASON TEXT ────────────────
+   Three buttons on one row are wider than the drawer, and a flex child
+   will not shrink below its content. The info column collapsed to about
+   one word per line — the quality reason, which is the whole point of
+   the row, became unreadable.
+
+   So the row wraps: the actions drop to their own line rather than
+   competing for width, and the info column keeps a real basis. */
+.catalogue-item {
+  flex-wrap: wrap;
+}
+
+.catalogue-item-info {
+  flex: 1 1 260px;
+}
+
+.catalogue-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+
+.catalogue-actions .btn {
+  white-space: nowrap;
+}
+
+.catalogue-override {
+  border-color: rgba(255, 138, 128, 0.35);
+  color: #ff8a80;
+}
+
+.quality-chip-passed { color: #6fd08c; }
+.quality-chip-failed { color: #ff8a80; }
+.quality-chip-needs-review { color: #ffcf70; }
+
+/* The inspector's "active clip is not the newest generation" explanation.
+   Bordered rather than inline text: it contradicts what the operator just
+   did (paid for a regenerate) and has to be read, not skimmed past. */
+.inspector-quality-warning {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 207, 112, 0.3);
+  border-radius: 8px;
+  background: rgba(255, 207, 112, 0.06);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.inspector-quality-warning p { margin: 0 0 4px; }
+.inspector-quality-warning p:last-child { margin-bottom: 0; }
+.inspector-quality-warning .is-free { color: var(--text-mute); }
+
+.dialog-emphasis { font-weight: 500; color: #ffcf70; }
+.dialog-warning { color: #ff8a80; }
+.dialog-list {
+  margin: 6px 0 10px 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+/* A blocked Toolbox action states its reason next to the button that
+   caused it. Red rather than the neutral help colour: this is why
+   nothing happened, not extra guidance. */
+.toolbox-error {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 138, 128, 0.3);
+  border-radius: 8px;
+  background: rgba(255, 138, 128, 0.08);
+  color: #ff8a80;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* ── MISSING CONTEXT ──────────────────────────────────────────────────
+   A third outcome that must not read as a refusal. Amber, not red: this
+   is a question waiting for the operator, and the whole point of the
+   change is that "we could not determine it" is not "it cannot be done". */
+.transition-review-mode.mode-needs-context,
+.transition-review-safety.safety-needs-context {
+  color: #ffcf70;
+  background: rgba(255, 207, 112, 0.1);
+  border-color: rgba(255, 207, 112, 0.3);
+}
+
+.toolbox-needs-context { color: #ffcf70; }
+
+.transition-review-context {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 207, 112, 0.28);
+  border-radius: 8px;
+  background: rgba(255, 207, 112, 0.06);
+}
+
+.transition-review-missing {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.transition-review-context-input {
+  width: 100%;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-inset);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.transition-review-context-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* ── STALE OPERATOR CONTEXT ───────────────────────────────────────────
+   Text written against an OLDER analysis. Kept, shown, and explicitly
+   not in use — the failure being prevented is text that steers prompts
+   from somewhere the operator cannot see. */
+.transition-review-stale {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px dashed rgba(255, 138, 128, 0.4);
+  border-radius: 8px;
+  background: rgba(255, 138, 128, 0.06);
+}
+
+.transition-review-stale-title {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #ff8a80;
+}
+
+.transition-review-stale-text {
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  background: var(--bg-inset);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.transition-review-stale-note {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-mute);
+}
+
+.transition-review-error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #ff8a80;
+}
+
+/* A decision the operator just made, before Accept applies the analysis.
+   Without it the row looked identical after clicking — which reads as a
+   button that did nothing. */
+.transition-review-resolved {
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(111, 208, 140, 0.1);
+  border: 1px solid rgba(111, 208, 140, 0.28);
+  color: #6fd08c;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ── EVIDENCE SOURCE, above the prompt ────────────────────────────────
+   Names what generation is actually guided by. Different components used
+   to hold different spatial sources with nothing on screen to say which
+   one was in force. */
+.inspector-evidence-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.inspector-evidence-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.inspector-evidence-label strong { color: var(--text); }
+
+.inspector-pair-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #ff8a80;
+}
+
+/* ── PROMPT BASIS ─────────────────────────────────────────────────────
+   What the wording was built on, and whether that still holds. */
+.inspector-basis {
+  margin: 0 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+
+/* A suggestion the operator has not chosen. Bordered, because it sits
+   next to text they wrote and must never be mistaken for it. */
+.inspector-suggestion {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px dashed rgba(157, 184, 255, 0.35);
+  border-radius: 8px;
+  background: rgba(157, 184, 255, 0.06);
+}
+
+.inspector-suggestion-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #9db8ff;
+}
+
+.inspector-suggestion-text {
+  margin: 0 0 8px;
+  padding: 8px;
+  max-height: 160px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--bg-inset);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--text-dim);
+}
+
+.inspector-suggestion-actions { display: flex; gap: 8px; }
+
+/* The model selector in the paid confirmation. One row, not a settings
+   panel: the operator is choosing between two named models, not
+   configuring a provider. */
+.confirm-model {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 10px;
+}
+
+.confirm-model-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  min-width: 52px;
+}
+
+.confirm-model .select-input { flex: 1; }
+
+/* ── NATIVE DROPDOWNS: THE ONE CANONICAL RULE ─────────────────────────
+ *
+ * ROOT CAUSE. The reset near the top of this file says
+ *
+ *     input, textarea, select, button { color: inherit }
+ *
+ * so every <select> inherits `--text` — near-white, correct for the
+ * closed control sitting on our dark ground. An <option> then inherits
+ * that same near-white from its <select>. But the OPEN list is not ours
+ * to paint: Chromium hands it to the platform, which draws it on a LIGHT
+ * ground. Near-white text on a light popup is invisible, which is why a
+ * model list with options in it read as empty.
+ *
+ * This block is the only place that decides how a native list looks, and
+ * it is deliberately written on the bare element selectors — `option`,
+ * not `.input option`, not `.dialog select option`. A rule that depends
+ * on someone remembering to add a class is a rule that silently stops
+ * working the next time a dropdown is added; that is exactly how the
+ * seam control in the export panel, which carries no class at all, kept
+ * its unreadable list after the first fix.
+ *
+ * `option` is also matched on its own rather than only under `select`,
+ * so an option inside an <optgroup> or any future wrapper is covered
+ * without this having to enumerate contexts.
+ *
+ * THIS DOES NOT LIGHTEN THE APP. It applies inside the native popup
+ * only. The closed control keeps `var(--text)` on `var(--bg-inset)` from
+ * the component styles above, and `body` is untouched — asserted by the
+ * style regression in the smoke suite, which reads the computed
+ * background of the page as well as the colour of every option.
+ */
+
+option {
+  background-color: #ffffff;
+  color: #000000;
+}
+
+optgroup {
+  background-color: #ffffff;
+  color: #000000;
+}
+
+option:checked,
+option:hover {
+  /* The current value, still black on a light highlight. */
+  background-color: #dbe4f0;
+  color: #000000;
+}
+
+option:disabled,
+optgroup:disabled {
+  /* Visibly unavailable and STILL LEGIBLE. An unverified model has to be
+     readable enough to explain why it cannot be picked — greying it into
+     the background just recreates the original bug for one row. */
+  color: #55607a;
+}
+
+select {
+  /* Tells the platform which palette it is painting the popup in, so the
+     popup's own scrollbar and highlight match the light ground it draws
+     on. Scoped to the control; it does not cascade into the page. */
+  color-scheme: light;
+}
+
+/* ── SINGLE-IMAGE MOTION IN THE TIMELINE ──────────────────────────────
+   Deliberately unlike a transition block: a different shape, a different
+   tint, and two lines of text that name the kind before the motion. A
+   transition is a journey between two rooms; this is one photograph
+   moving. Reading one as the other would put a segment in a customer's
+   video that the operator never intended, so the distinction is carried
+   by words and not by colour alone. */
+.timeline-motion {
+  flex: none;
+  width: 104px;
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 9px;
+  margin: 0 2px;
+  background: var(--bg-card);
+  /* Dashed, where a transition block is solid — visible at a glance even
+     before the words are read. */
+  border: 1px dashed var(--accent-border, #6b7db3);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: left;
+}
+
+.timeline-motion:hover { border-color: var(--text-dim); }
+
+.timeline-motion.is-selected {
+  border-style: solid;
+  border-color: var(--text);
+  background: var(--bg-raised);
+}
+
+.timeline-motion-kind {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--accent-text, #9fb2dd);
+}
+
+.timeline-motion-type {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.2;
+}
+
+.timeline-motion-state {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.5px;
+  color: var(--text-mute);
+}
+
+/* ── SINGLE-IMAGE MOTION, IN THE IMAGE INSPECTOR ─────────────────────
+ *
+ * Same visual family as the timeline block so the two read as one
+ * feature: a dashed edge and a spelled-out label, never an icon alone.
+ */
+.motion-list {
+  list-style: none;
+  margin: 6px 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.motion-list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.motion-list-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.motion-list-meta {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.motion-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.motion-add .input { flex: 1 1 auto; min-width: 0; }
+
+.inspector-hint-warn { color: var(--warn, #d98b3a); }
+
+/* ── SINGLE-IMAGE MOTION IN THE CATALOGUE ────────────────────────────
+ *
+ * The heading says WHAT the generation was; the detail line says which
+ * photograph and which movement. On its own line because run together
+ * they read as one word ("SINGLE IMAGE MOTIONIMAGE 05").
+ */
+.catalogue-pair-motion {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.catalogue-motion-detail {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--text-dim);
+}
+
+/* Not a button: a motion clip is regenerated from its own inspector,
+   where the single-image model selector lives. */
+.catalogue-motion-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+  align-self: center;
+}
+
+/* ── SINGLE-IMAGE MOTION IN THE QUEUE ────────────────────────────────
+ *
+ * Its own line, like the catalogue's. Run together with the detail the
+ * heading reads as one word ("SINGLE IMAGE MOTIONIMAGE 11"), which is
+ * how the subject stops being scannable at a glance.
+ */
+.queue-row-subject {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 4px 0 2px;
+}
+
+.queue-row-subject-kind {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text);
+}
+
+.queue-row-subject-detail {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ── PREVIOUS GENERATION, IN THE REGENERATE DIALOG ───────────────────
+ *
+ * What exists today, above the controls that will replace it. Muted on
+ * purpose: it is context for the choice, not one of the choices.
+ */
+.confirm-previous {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border-left: 2px solid var(--border-strong, rgba(255, 255, 255, 0.18));
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.confirm-previous-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/* ── THE TIMELINE EDITOR ─────────────────────────────────────────────
+ *
+ * Video-editing vocabulary, deliberately minimal: a dark base, plain
+ * rectangles, a ruler and one vertical playhead. It has to read as
+ * "this is the finished video" at a glance, which means no controls
+ * that do not correspond to something the operator can actually do.
+ */
+.tl-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #08080a;
+  border-top: 1px solid var(--border);
+  outline: none;
+}
+
+.tl-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tl-editor-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.tl-editor-name {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--text);
+}
+
+.tl-editor-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.tl-editor-transport {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Tabular figures: a clock whose digits change width jitters while it
+   runs, which is distracting on a control you watch. */
+.tl-editor-clock {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text);
+  min-width: 118px;
+}
+
+.tl-editor-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tl-editor-hint {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+/* ── DRIFT AND CONFIRMATION ────────────────────────────────────────── */
+
+.tl-drift,
+.tl-confirm {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 14px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tl-drift.is-stale {
+  background: rgba(217, 139, 58, 0.10);
+  color: var(--text);
+}
+
+/* A conflict has the operator's own edits at stake, so it is louder
+   than a stale timeline nobody has touched. */
+.tl-drift.is-conflict {
+  background: rgba(220, 90, 80, 0.14);
+  color: var(--text);
+}
+
+.tl-drift-note {
+  color: var(--text-dim);
+}
+
+.tl-confirm {
+  background: rgba(220, 90, 80, 0.18);
+}
+
+.tl-error {
+  margin: 0;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: #e8a06a;
+}
+
+/* ── TRACK ─────────────────────────────────────────────────────────── */
+
+.tl-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* Horizontal padding removed: it shrank the scrub surface below the
+     width the scale is computed from, so the last fraction of a second
+     sat under the padding and could not be reached. */
+  padding: 0 0 10px;
+  width: 100%;
+}
+
+.tl-inner {
+  position: relative;
+  padding-top: 18px;
+}
+
+.tl-ruler {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 16px;
+}
+
+.tl-tick {
+  position: absolute;
+  top: 0;
+  font-size: 9px;
+  color: var(--text-dim);
+  border-left: 1px solid rgba(255, 255, 255, 0.10);
+  padding-left: 3px;
+  height: 6px;
+}
+
+.tl-tick.is-major {
+  border-left-color: rgba(255, 255, 255, 0.26);
+  height: 14px;
+}
+
+/* Positioned, not flowed. Every block is placed at its own start time,
+   so the ruler, the playhead and the clips share one mapping. Flex
+   layout gave the blocks widths of their own and let the three drift. */
+.tl-track {
+  position: relative;
+  min-height: 74px;
+  width: 100%;
+}
+
+.tl-empty {
+  margin: 0;
+  padding: 24px 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.tl-block {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 1px;
+  padding: 4px 5px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #16161a;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tl-block:hover { border-color: var(--text-dim); }
+
+/* Selection is an outline rather than a fill: the thumbnail underneath
+   is the thing being identified, so it must stay visible. */
+.tl-block.is-selected {
+  outline: 2px solid var(--accent, #6ea8fe);
+  outline-offset: -2px;
+  border-color: transparent;
+}
+
+.tl-block.is-drop-target {
+  box-shadow: inset 3px 0 0 var(--accent, #6ea8fe);
+}
+
+.tl-block.is-missing {
+  border-color: #a8443c;
+  background: rgba(168, 68, 60, 0.16);
+}
+
+.tl-block-thumb {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.34;
+  pointer-events: none;
+}
+
+.tl-block-kind,
+.tl-block-detail,
+.tl-block-dur,
+.tl-block-warn {
+  position: relative;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.tl-block-kind {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  color: var(--text);
+}
+
+.tl-block-detail {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.tl-block-dur {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.tl-block-warn {
+  font-size: 9px;
+  color: #e8776a;
+}
+
+/* Each source type gets its own edge colour, so the shape of the film
+   is readable without reading any text. */
+.tl-block.kind-transition-clip { border-left: 3px solid #4f7fd0; }
+.tl-block.kind-motion-clip { border-left: 3px dashed #b98adb; }
+.tl-block.kind-still { border-left: 3px solid #7a7a82; }
+
+.tl-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #ff5b52;
+  pointer-events: none;
+}
+
+.tl-playhead::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -4px;
+  border-left: 4.5px solid transparent;
+  border-right: 4.5px solid transparent;
+  border-top: 7px solid #ff5b52;
+}
+
+/* ── SELECTED CLIP INFO ────────────────────────────────────────────── */
+
+.tl-clip-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+  margin: 0;
+  padding: 8px 14px 12px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.tl-clip-info div { display: flex; gap: 6px; align-items: baseline; }
+
+.tl-clip-info dt {
+  color: var(--text-dim);
+  text-transform: uppercase;
+  font-size: 9.5px;
+  letter-spacing: 0.07em;
+}
+
+.tl-clip-info dd {
+  margin: 0;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.tl-clip-source {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The element that actually decodes the frame under the playhead. It is
+   off-screen: the timeline shows thumbnails, and the main preview stage
+   is where a clip is watched. */
+.tl-preview-sink {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── BRANDING OVERLAYS IN THE PREVIEW ────────────────────────────────
+ *
+ * Plain positioned images over the frame — no encode, no FFmpeg, no
+ * temporary file. That is what makes the timeline toggles instant, and
+ * why hiding a layer costs nothing and changes nothing about the export.
+ *
+ * `pointer-events: none` throughout: the frame underneath is clickable
+ * (click-to-play), and an overlay that swallowed the click would make
+ * the video look broken.
+ */
+.preview-brand-watermark,
+.preview-brand-stamp {
+  position: absolute;
+  pointer-events: none;
+  user-select: none;
+  object-fit: contain;
+  /* Above the video, below the transport and any message overlay. */
+  z-index: 2;
+}
+
+/* ── POSITION IS NO LONGER DECIDED HERE ──────────────────────────────
+   These used to be `bottom: 3%; right: 3%` and similar. A CSS
+   percentage resolves `right` against the container's WIDTH and
+   `bottom` against its HEIGHT, so on a 16:9 picture the two insets were
+   different distances — and neither matched the export, which uses one
+   margin derived from the SHORT side. On 1920x1080 the export insets by
+   32px on both edges while the preview used 57.6px on the right: the
+   corner stamp sat 25px away from where it would be exported.
+
+   Both overlays are now positioned in pixels from `brandRect` in
+   shared/branding.ts, which is the export's own rule. Left here as a
+   note so nobody reintroduces a percentage offset. */
+
+/* The frame is the positioning context for both. */
+.preview-frame { position: relative; }
+
+/* ── PREVIEW LAYER TOGGLES ───────────────────────────────────────────
+   In the timeline header beside the transport, because that is what
+   they affect: what is on screen now. Compact on purpose — two
+   checkboxes, no panel. */
+.tl-layers {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+}
+
+.tl-layer-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tl-layer-toggle input { accent-color: var(--accent, #6ea8fe); cursor: pointer; }
+.tl-layer-toggle:hover { color: var(--text); }
+
+.field-hint-warn { color: #e8a06a; }
+
+/* ── THE BRANDING LAYER IS THE PICTURE, NOT THE PANE ─────────────────
+ *
+ * The overlays used to be positioned against `.preview-frame`, which is
+ * the whole preview pane. The video is `object-fit: contain` inside it,
+ * so a 16:9 clip in an 876×385 pane renders 573 wide with a 152px black
+ * bar down each side — and `bottom-right: 3%` put the corner stamp
+ * entirely in that bar, off the film. It looked like permanent UI chrome
+ * rather than a layer over the video, and it did not show where the mark
+ * will actually be in the exported file.
+ *
+ * This element is sized in JS to the contain-fit rectangle, and both
+ * marks position against it. A percentage size and a corner offset now
+ * mean the same thing here as they do in the export.
+ */
+.preview-brand-layer {
+  position: absolute;
+  pointer-events: none;
+  z-index: 2;
+  overflow: hidden;
+}
+
+/* ── BRANDING FOR THE EXPORT ──────────────────────────────────────────
+   Two checkboxes, above the two export buttons they apply to. Styled
+   like the old format fieldset so the panel keeps one visual language;
+   what changed is what the control means, not how it looks.
+
+   These are NOT the timeline preview's toggles — those live in
+   `.tl-layers` and decide what is on screen. */
+.export-branding {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px 10px;
+  margin: 0 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.export-branding legend {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-mute);
+  padding: 0 4px;
+}
+
+.export-branding-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.export-branding-option:hover { background: var(--accent-soft); }
+.export-branding-option input { margin: 0; }

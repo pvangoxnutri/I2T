@@ -1,3 +1,4 @@
+import { currentPairEvidence } from './currentEvidence'
 import { join } from 'node:path'
 import type {
   AiProviderConfig,
@@ -8,6 +9,7 @@ import type {
   QueueJob,
   TransitionSettings
 } from '../../shared/types'
+import type { JobMetadata } from '../../shared/types'
 import { NATIVE_AUDIO_DEFAULT, transitionKey } from '../../shared/types'
 import { DEFAULT_PRICING, priceSnapshot } from '../../shared/pricing'
 import { promptForTransition } from '../../shared/prompts'
@@ -24,7 +26,21 @@ import {
 import { getSettingsJson, listProjects, saveProject } from '../db/projectsRepo'
 import { broadcastProjectUpdated } from '../events'
 import { listCostEntries, recordGenerationSpend, settleGenerationSpend } from '../db/costRepo'
-import { recordGeneration, archivePreviousGenerations } from '../db/generationCatalogueRepo'
+import {
+  recordGeneration,
+  archivePreviousGenerations,
+  archivePreviousMotionGenerations,
+  getGenerationsForPair,
+  setActiveGeneration
+} from '../db/generationCatalogueRepo'
+import { GEMINI_DEFAULT_MODEL } from '../analysis/providers/gemini/geminiConfig'
+import { reflectionEvidenceForPair } from '../../shared/reflectionRisk'
+import { resolvePairSpatialEvidence } from '../../shared/pairEvidence'
+import { evidenceFingerprintOf } from '../../shared/promptPlanner'
+import type { EvidenceSource } from '../../shared/pairAnalysis'
+import { readPairAnalysis } from '../db/pairAnalysisRepo'
+import { readTransitionDraft } from '../db/transitionAnalysisRepo'
+import { imageAnalysis } from '../../shared/propertyAnalysis'
 import {
   countsAsSpend,
   entryAmount,
@@ -36,8 +52,12 @@ import { projectImagesDir } from '../paths'
 import { randomUUID } from 'node:crypto'
 import { existsSync, rmSync, statSync } from 'node:fs'
 import { createProvider } from '../providers/registry'
+import { FAL_DEFAULT_MODEL_ID, resolveFalModel, falRunCost, clampDurationForModel } from '../providers/fal/falModels'
+import { motionSegments, type MotionType } from '../../shared/motionSegment'
+import { buildMotionPrompt } from '../../shared/motionPrompt'
 import type {
   GenerationRequest,
+  GenerationSubject,
   ProviderError,
   SanitizedRequestPreview,
   VideoProvider
@@ -45,7 +65,14 @@ import type {
 import { clipUrl, projectTransitionsDir as transitionsDir } from '../files'
 import { ensureDir, safeManagedPath } from '../paths'
 import { probeDurationSec } from './ffmpegService'
-import { enqueue, isJobCancelled, listJobs, registerRunner, updateJobProvider } from './queueService'
+import {
+  enqueue,
+  isJobCancelled,
+  listJobs,
+  registerRunner,
+  updateJobMetadata,
+  updateJobProvider
+} from './queueService'
 
 /**
  * Provider-aware AI transition generation.
@@ -123,11 +150,88 @@ function recordProviderFailure(jobId: string, error: ProviderError): void {
   }
 }
 
+/**
+ * The model the newest generation for this pair actually used.
+ *
+ * Read from the catalogue, which records the exact model per run. Null
+ * when the pair has never been generated, or when the row predates that
+ * column — an older row must not force a guess.
+ */
+function previousGenerationModel(projectId: string, pairKey: string): string | null {
+  const [fromImageId, toImageId] = pairKey.split('->') as [string, string]
+  try {
+    return getGenerationsForPair(projectId, fromImageId, toImageId)[0]?.model ?? null
+  } catch {
+    // History is a convenience here; never let it block a generation.
+    return null
+  }
+}
+
 function acceptedAnalysisFor(projectId: string): PropertyAnalysis {
   return applyImageOverrides(readAnalysis(projectId), listOverrides(projectId))
 }
 
-function activeProviderConfig(settings: AppSettings | null): AiProviderConfig | undefined {
+/**
+ * The two readiness inputs that describe THIS project's stored state.
+ *
+ * Built once and handed to `assessAiGenerationReadiness` so the
+ * confirmation dialog and the submit path ask the identical question.
+ * Two call sites deriving this separately is precisely how a screen came
+ * to say one thing while the paid path did another.
+ */
+export function readinessInputs(projectId: string): {
+  transitionFor: (pairKey: string) => TransitionSettings | undefined
+  currentEvidence: (pairKey: string) => {
+    source: EvidenceSource
+    fingerprint: string
+    operatorContextFingerprint?: string
+  } | null
+} {
+  const project = listProjects().find((p) => p.id === projectId)
+
+  return {
+    transitionFor: (pairKey) => project?.transitions[pairKey],
+    // ONE computation, shared with prompt stamping. The gate deriving
+    // precedence separately from the writer is what let a prompt be
+    // stamped `global-analysis` and then judged against `feed-analysis`.
+    currentEvidence: (pairKey) => {
+      const current = currentPairEvidence(projectId, pairKey, project)
+      if (!current) return null
+      return {
+        source: current.source,
+        fingerprint: current.fingerprint,
+        operatorContextFingerprint: current.operatorContextFingerprint
+      }
+    }
+  }
+}
+
+/**
+ * Record which stage of the work this job is in.
+ *
+ * Best-effort by design: a phase is a progress READOUT, and failing to
+ * write one must never abort a generation that is otherwise fine. The
+ * decisions are made from provider status and the quality verdict, both
+ * of which are written on their own paths.
+ */
+function setJobPhase(jobId: string, phase: NonNullable<JobMetadata['phase']>): void {
+  try {
+    const job = listJobs().find((j) => j.id === jobId)
+    if (!job) return
+    updateJobMetadata(jobId, { ...job.metadata, phase })
+  } catch (err) {
+    console.error('[generation] could not record the job phase', err)
+  }
+}
+
+/**
+ * Automatic post-generation quality validation has been removed from the
+ * product. The operator watches the clip; if it is wrong they re-analyse,
+ * edit the prompt and regenerate. Historical verdicts remain readable in
+ * the catalogue but nothing consults them.
+ */
+
+export function activeProviderConfig(settings: AppSettings | null): AiProviderConfig | undefined {
   const providers = settings?.providers ?? []
   if (settings?.activeProviderId) {
     const chosen = providers.find((p) => p.id === settings.activeProviderId)
@@ -170,7 +274,18 @@ function feedPairAt(
 export function buildGenerationRequest(
   projectId: string,
   pairKey: string,
-  settings: AppSettings | null
+  settings: AppSettings | null,
+  /**
+   * The model chosen for THIS run, when one was.
+   *
+   * ── WHY PER RUN ────────────────────────────────────────────────────
+   *
+   * The model was a single global setting, so comparing two models on
+   * the same transition meant changing a preference that then applied to
+   * every future generation. Choosing per run is the point of the
+   * selector; the global value is only where the dialog starts.
+   */
+  modelIdOverride?: string | null
 ): { ok: true; request: GenerationRequest } | { ok: false; reason: string } {
   const project = listProjects().find((p) => p.id === projectId)
   if (!project) return { ok: false, reason: 'Project no longer exists' }
@@ -212,7 +327,8 @@ export function buildGenerationRequest(
       resolution: settings?.exportDefaults?.resolution ?? '1080p',
       // Audio is never enabled implicitly — see NATIVE_AUDIO_DEFAULT.
       nativeAudio: NATIVE_AUDIO_DEFAULT,
-      modelId: config?.model ?? ''
+      // The run's model, then the global default, then the registry's.
+      modelId: modelIdOverride ?? config?.model ?? FAL_DEFAULT_MODEL_ID
     }
   }
 }
@@ -237,6 +353,8 @@ export function previewRequest(
 export function queueGeneration(
   projectId: string,
   pairKeys: string[],
+  /** The model chosen for this run; falls back to the global default. */
+  modelIdOverride: string | null | undefined,
   scheduledFor?: number | null
 ): QueueJob | null {
   const project = listProjects().find((p) => p.id === projectId)
@@ -260,7 +378,7 @@ export function queueGeneration(
   // money stays null unless a verified conversion exists.
   let estimatedCost: number | null = null
   let estimatedCredits: number | null = null
-  const first = buildGenerationRequest(projectId, pairKeys[0], settings)
+  const first = buildGenerationRequest(projectId, pairKeys[0], settings, modelIdOverride)
   if (first.ok) {
     const per = provider.estimateCost(first.request)
     if (per !== null) estimatedCost = Math.round(per * pairKeys.length * 100) / 100
@@ -272,7 +390,8 @@ export function queueGeneration(
 
   const providerState: ProviderJobState = {
     provider: config?.id ?? 'mock',
-    model: config?.model ?? null,
+    // The RUN's model — what is persisted, submitted and later compared.
+    model: modelIdOverride ?? config?.model ?? null,
     dryRun,
     providerTaskId: null,
     providerStatus: null,
@@ -395,6 +514,22 @@ export interface LiveConfirmation {
    * transition; it is the state that produced a moved sofa.
    */
   spatialGuidance: 'analysis' | 'none' | 'blocked'
+  /** The endpoint id of the model this run will use. */
+  modelId: string
+  /** FALSE when this model's contract has not been verified. */
+  modelConfirmed: boolean
+  /** Why it is unverified, when it is. Null for a confirmed model. */
+  modelNote: string | null
+  /**
+   * Capabilities of the SELECTED model.
+   *
+   * The dialog offers only what this model accepts, from the same
+   * registry the request mapper reads — so an operator cannot choose a
+   * duration the endpoint will reject.
+   */
+  modelDurations: number[]
+  modelResolutions: string[]
+  modelAudioSupport: boolean
   /** Present only for an override: what the operator is agreeing to. */
   overrideWarning: string | null
   /** Why the evidence is missing, for the same dialog. */
@@ -403,15 +538,46 @@ export interface LiveConfirmation {
   projectedAfterLabel: string
 }
 
-export function liveConfirmation(projectId: string, pairKey: string): LiveConfirmation | null {
+export function liveConfirmation(
+  projectId: string,
+  pairKey: string,
+  /**
+   * The model the dialog is currently showing. Changing it re-asks this
+   * function, so the duration, the resolution and the cost the operator
+   * sees are always the ones that model will actually use.
+   */
+  modelIdOverride?: string | null
+): LiveConfirmation | null {
   const settings = readSettings()
   const project = listProjects().find((p) => p.id === projectId)
   if (!project) return null
 
   const eligibility = liveEligibility(settings, 1)
-  const built = buildGenerationRequest(projectId, pairKey, settings)
+  const built = buildGenerationRequest(projectId, pairKey, settings, modelIdOverride)
   const provider = createProvider(activeProviderConfig(settings), settings)
   const meta = provider.metadata()
+  // The model this run will actually use — the per-run choice, else the
+  // global default, else the registry's. Resolved once and reused by the
+  // label, the capability lists and the price, so the dialog cannot show
+  // one model's durations beside another's cost.
+  // ── WHERE THE DIALOG STARTS ─────────────────────────────────────────
+  //
+  // An explicit choice first. Then, for a regeneration, the model the
+  // LAST attempt used — so "try this pair again" begins from what was
+  // actually tried, and switching model is a deliberate act rather than
+  // a silent one. Falls through to the global default when that model is
+  // no longer registered, which is also what an older row resolves to.
+  const previousModelId = previousGenerationModel(projectId, pairKey)
+  const runModel = resolveFalModel(
+    modelIdOverride ?? previousModelId ?? activeProviderConfig(settings)?.model
+  )
+  // The duration THIS model accepts, nearest to what the transition asks
+  // for — so the price quoted is the price of the run that will happen.
+  const runSeconds = built.ok
+    ? clampDurationForModel(runModel, built.request.durationSec)
+    : FALLBACK_DURATION_SEC
+  const runCost = falRunCost(runModel, runSeconds, NATIVE_AUDIO_DEFAULT)
+  const isFalRun = (activeProviderConfig(settings)?.id ?? 'fal') === 'fal'
   const model = meta.models.find((m) => m.id === (activeProviderConfig(settings)?.model ?? ''))
 
   // Human "Image X → Image Y" label + the exact frames, in FEED order —
@@ -432,11 +598,22 @@ export function liveConfirmation(projectId: string, pairKey: string): LiveConfir
   //
   // A confirmation that says "ok" for a pair the submit path will refuse
   // is a confirmation that teaches the operator to distrust the dialog.
+  // THE OPERATOR'S OWN EVIDENCE IS PART OF THE INPUT.
+  //
+  // Re-running the raw evaluator and concluding "still needs context"
+  // ignores the fact that the operator answered the question. The gate
+  // stays canonical; what changes is that it is asked with everything
+  // that is known, not only with what the analyzer found.
+  const confirmationInputs = readinessInputs(projectId)
   const readiness = assessAiGenerationReadiness(
     acceptedAnalysisFor(projectId),
     getFeedSequenceIds(project),
     pairKey,
-    project.transitions[pairKey]?.modeProvenance
+    project.transitions[pairKey]?.modeProvenance,
+    undefined,
+    project.transitions[pairKey]?.operatorContext,
+    confirmationInputs.transitionFor,
+    confirmationInputs.currentEvidence
   )
   const override = readiness.ok && readiness.kind === 'manual-override' ? readiness : null
 
@@ -460,7 +637,18 @@ export function liveConfirmation(projectId: string, pairKey: string): LiveConfir
     projectName: project.name,
     transitionLabel: label,
     provider: meta.label,
-    model: model?.label ?? activeProviderConfig(settings)?.model ?? 'unknown',
+    // ── THE SELECTED MODEL, FROM THE REGISTRY ───────────────────────
+    //
+    // Named from the canonical entry rather than from provider metadata
+    // or a settings string, so the dialog cannot show one model while
+    // the request carries another.
+    model: runModel.displayName,
+    modelId: runModel.id,
+    modelConfirmed: runModel.confirmed,
+    modelNote: runModel.confirmed ? null : runModel.verificationNote,
+    modelDurations: runModel.durationsSec,
+    modelResolutions: runModel.resolutions,
+    modelAudioSupport: runModel.audioSupport,
     // What will actually be sent, after the provider's own mapping.
     //
     // NEVER ZERO. This fell back to a literal 0 whenever the request could
@@ -483,15 +671,40 @@ export function liveConfirmation(projectId: string, pairKey: string): LiveConfir
     startImage,
     endImage,
     // Never invent a cost: unavailable stays unavailable.
-    estimatedCostLabel: usage ? usage.label : 'unavailable',
-    estimatedCostBasis: usage
-      ? `${usage.seconds}s × ${usage.rateLabel} · ${usage.resolution} · audio ${usage.nativeAudio ? 'on' : 'off'}`
-      : 'No verified rate for this combination.',
+    // ── PRICE OF THE SELECTED MODEL ─────────────────────────────────
+    //
+    // From the registry entry for THIS run. A model with no verified
+    // rate says so — a guessed price is worse than no price, because it
+    // gets reconciled against an invoice.
+    // fal prices per output second from the registry entry for THIS run.
+    // Kling bills in credits and keeps its own estimator — this must not
+    // impose a dollar rate on a provider that does not publish one.
+    estimatedCostLabel: isFalRun
+      ? runCost
+        ? `$${runCost.usd.toFixed(2)}`
+        : 'unavailable — rate not verified'
+      : usage
+        ? usage.label
+        : 'unavailable',
+    estimatedCostBasis: isFalRun
+      ? runCost
+        ? `${runSeconds}s × $${runCost.usdPerSecond}/s · ${runModel.displayName}`
+        : `No verified rate is published for ${runModel.displayName}.`
+      : usage
+        ? `${usage.seconds}s × ${usage.rateLabel} · ${usage.resolution} · audio ${usage.nativeAudio ? 'on' : 'off'}`
+        : 'No verified rate for this combination.',
     customerPriceLabel: `${price.totalPrice} ${price.currency}`,
-    warning:
+    // A non-blocking advisory rides along with the spend warning rather
+    // than becoming a second gate — see `advisory` in the readiness
+    // result. Today that is the mirror note on a hand-written prompt.
+    warning: [
       meta.id === 'fal'
         ? 'This sends one paid request to fal.ai.'
         : 'This action sends a paid request to Kling.',
+      readiness.ok && readiness.kind === 'analysis-backed' ? readiness.advisory : null
+    ]
+      .filter(Boolean)
+      .join(' '),
     ...productionSpendPreview(projectId, pairKey, usage?.money ?? null)
   }
 }
@@ -558,11 +771,30 @@ function productionSpendPreview(
  * call can happen. */
 export function queueLiveGeneration(
   projectId: string,
-  pairKeys: string[]
+  pairKeys: string[],
+  modelIdOverride?: string | null
 ): { ok: true; job: QueueJob } | { ok: false; reasons: string[] } {
   const settings = readSettings()
   const eligibility = liveEligibility(settings, pairKeys.length)
   if (!eligibility.allowed) return { ok: false, reasons: eligibility.reasons }
+
+  // ── AN UNVERIFIED MODEL IS NOT SUBMITTABLE ──────────────────────────
+  //
+  // Its endpoint path, field names, duration vocabulary and price have
+  // not been read from fal.ai. Submitting anyway would spend the
+  // operator's money to discover a 404 or a 422. Confirming a model is
+  // a small job; guessing on their behalf is not ours to do.
+  const runModel = resolveFalModel(modelIdOverride ?? activeProviderConfig(settings)?.model)
+  if (!runModel.confirmed) {
+    return {
+      ok: false,
+      reasons: [
+        runModel.displayName +
+          ' has not been verified against fal.ai yet, so it cannot be submitted. ' +
+          'Its endpoint, request fields, durations and price still need confirming.'
+      ]
+    }
+  }
 
   // ── PREFLIGHT: NOTHING STALE IS EVER PAID FOR ──────────────────────
   //
@@ -596,6 +828,7 @@ export function queueLiveGeneration(
   // is what produced a moved sofa and a duplicated television.
   const accepted = acceptedAnalysisFor(projectId)
   const feedIds = getFeedSequenceIds(project)
+  const submitInputs = readinessInputs(projectId)
   const readiness = pairKeys.map((key) => ({
     key,
     result: assessAiGenerationReadiness(
@@ -604,7 +837,13 @@ export function queueLiveGeneration(
       key,
       // An operator's own AI choice may proceed on their acknowledged
       // risk; one the analyzer made may not, without the map behind it.
-      project.transitions[key]?.modeProvenance
+      project.transitions[key]?.modeProvenance,
+      undefined,
+      project.transitions[key]?.operatorContext,
+      // THE SAME INPUTS THE CONFIRMATION USED. A dialog that says yes
+      // and a submit that says no is the failure mode this closes.
+      submitInputs.transitionFor,
+      submitInputs.currentEvidence
     )
   }))
   const unsupported = readiness.filter((r) => !r.result.ok)
@@ -616,7 +855,7 @@ export function queueLiveGeneration(
     }
   }
 
-  const job = queueGeneration(projectId, pairKeys, null)
+  const job = queueGeneration(projectId, pairKeys, modelIdOverride, null)
   if (!job) return { ok: false, reasons: ['Could not queue the generation.'] }
   return { ok: true, job }
 }
@@ -645,43 +884,174 @@ function validateDownloadedClip(path: string): { ok: true } | { ok: false; reaso
 export async function downloadAndAttachResult(
   provider: VideoProvider,
   projectId: string,
-  pairKey: string,
+  /**
+   * WHAT THE CLIP BELONGS TO.
+   *
+   * A bare string used to be enough because everything was a pair. It is
+   * accepted still — that string is a pairKey — so no existing caller
+   * changes meaning; a motion run passes its subject instead.
+   */
+  target: string | GenerationSubject,
   resultUrl: string,
-  queueJobId: string
-): Promise<{ ok: true; storedName: string } | { ok: false; reason: string }> {
+  queueJobId: string,
+  /** The model this run actually used, recorded with the generation. */
+  modelId: string | null
+): Promise<
+  // `ok: true` means the DOWNLOAD succeeded — the provider's work arrived
+  // intact. Whether the clip was adopted is a separate fact, carried in
+  // `quality`, because a clip that fails inspection is still a real
+  // delivered result that was paid for and kept.
+  { ok: true; storedName: string } | { ok: false; reason: string }
+> {
+  const subject: GenerationSubject =
+    typeof target === 'string' ? { kind: 'transition', pairKey: target } : target
+
   const dir = transitionsDir(projectId)
   ensureDir(dir)
   const storedName = `${randomUUID()}.mp4`
-  const target = safeManagedPath(dir, storedName)
+  const downloadPath = safeManagedPath(dir, storedName)
 
-  const fetched = await provider.fetchResult(resultUrl, target)
+  const fetched = await provider.fetchResult(resultUrl, downloadPath)
   if (!fetched.ok) {
-    rmSync(target, { force: true })
+    rmSync(downloadPath, { force: true })
     return { ok: false, reason: fetched.error.message }
   }
 
-  const valid = validateDownloadedClip(target)
+  const valid = validateDownloadedClip(downloadPath)
   if (!valid.ok) {
-    rmSync(target, { force: true })
+    rmSync(downloadPath, { force: true })
     return { ok: false, reason: valid.reason }
   }
 
   const project = listProjects().find((p) => p.id === projectId)
   if (!project) {
-    rmSync(target, { force: true })
+    rmSync(downloadPath, { force: true })
     return { ok: false, reason: 'Project no longer exists' }
   }
   // The clip source records WHICH provider produced it, but the structure is
   // the SAME one Attach Test Clip uses — one output type, no special cases.
   const providerId = provider.metadata().id
   const source: 'kling' | 'fal' = providerId === 'fal' ? 'fal' : 'kling'
-  const current = project.transitions[pairKey]
   const newClip = {
     storedName,
     originalName: `${source}-generation.mp4`,
     source,
     src: clipUrl(projectId, storedName)
   }
+
+  // ── SINGLE-IMAGE MOTION ───────────────────────────────────────────
+  //
+  // The download, the validation and the managed directory above are
+  // shared: a clip is a clip. What differs is where it is attached and
+  // what the catalogue row says it is — and that difference is here,
+  // once, rather than in a parallel copy of this whole function.
+  if (subject.kind === 'motion') {
+    const segments = motionSegments(project)
+    const existing = segments.find((s) => s.id === subject.segmentId)
+    if (!existing) {
+      rmSync(downloadPath, { force: true })
+      return { ok: false, reason: 'That motion clip was removed while it was generating.' }
+    }
+
+    // ── THE ROW RECORDS THE RUN, NOT THE SEGMENT ────────────────────
+    //
+    // Movement, prompt and length come from the JOB — `subject.motion`
+    // is what was submitted and `job` carries what was confirmed. The
+    // segment is live state that a later regeneration moves on, so a row
+    // built from it would silently rewrite itself: regenerate a Pan
+    // Right at 5s as a Smooth Forward at 10s and the OLD row would start
+    // claiming it had been Smooth Forward too. History has to describe
+    // what happened, not what is current.
+    const runJob = listJobs().find((j) => j.id === queueJobId)
+    const runMotion = (subject.motion as MotionType) ?? existing.motion
+    const generationId = recordGeneration({
+      queueJobId,
+      projectId,
+      // The SOURCE image, and an EMPTY end. See migration 30: an empty id
+      // matches no photograph, so a motion row can never be returned as
+      // the active generation for any pair.
+      fromImageId: existing.imageId,
+      toImageId: '',
+      motionSegmentId: existing.id,
+      motionType: runMotion,
+      durationSec: runJob?.metadata?.motionDurationSec ?? existing.durationSec,
+      provider: source,
+      model: modelId,
+      clip: newClip,
+      prompt: buildMotionPrompt(runMotion),
+      active: false
+    })
+
+    project.motionSegments = segments.map((s) =>
+      s.id === subject.segmentId
+        ? {
+            ...s,
+            status: 'completed' as const,
+            // The segment now IS what was just delivered, so the
+            // inspector and the timeline describe the clip that plays.
+            motion: runMotion,
+            durationSec: runJob?.metadata?.motionDurationSec ?? s.durationSec,
+            prompt: buildMotionPrompt(runMotion),
+            clip: newClip
+          }
+        : s
+    )
+    project.updatedAt = Date.now()
+
+    // The previous generation of THIS SEGMENT stops being current but
+    // stays in history — it was paid for, and a regeneration is not a
+    // decision to forget what came before.
+    archivePreviousMotionGenerations(projectId, existing.id)
+    setActiveGeneration(projectId, generationId)
+    setJobPhase(queueJobId, 'complete')
+
+    saveProject(project)
+    broadcastProjectUpdated(projectId)
+    return { ok: true, storedName }
+  }
+
+  const pairKey = subject.pairKey
+  const current = project.transitions[pairKey]
+
+  // CATALOGUE FIRST, AND NOT YET ACTIVE.
+  //
+  // The money is already spent, so the attempt is recorded whatever the
+  // inspection concludes. `active: false` is the load-bearing part: until
+  // the clip has been looked at it must not displace a good one that
+  // already has. See the regenerate case below.
+  const [fromImageId, toImageId] = pairKey.split('->') as [string, string]
+  const generationId = recordGeneration({
+    queueJobId, // IDEMPOTENCY: Same job = same catalogue row, even if called multiple times
+    projectId,
+    fromImageId,
+    toImageId,
+    provider: source,
+    // THE EXACT MODEL THIS RUN USED.
+    //
+    // Was null with a note that the source was 'sufficient'. It was not:
+    // comparing O3 against another model on the same transition is the
+    // reason the selector exists, and history that records only 'fal'
+    // cannot tell the two attempts apart afterwards.
+    model: modelId,
+    clip: newClip,
+    prompt: current?.prompt ?? '',
+    active: false
+  })
+
+  // ── THE CLIP IS THE RESULT. IT IS ATTACHED. ────────────────────────
+  //
+  // Automatic post-generation validation used to run here: sample frames,
+  // send them to a vision model, and refuse to attach the clip on its
+  // verdict. It is gone from the product flow by decision.
+  //
+  // The operator judges the clip by watching it, which is both cheaper
+  // and better than a second model's opinion — and if it is wrong the
+  // remedy is theirs: re-analyse, edit the prompt, regenerate. What the
+  // gate actually produced was a generation the operator had paid for,
+  // could see, and could not use without arguing with a dialog.
+  //
+  // Historical verdicts stay in the catalogue for old rows. They describe
+  // what happened at the time and are not consulted here.
   project.transitions[pairKey] = {
     ...(current ?? {
       prompt: '',
@@ -694,21 +1064,11 @@ export async function downloadAndAttachResult(
   }
   project.updatedAt = Date.now()
 
-  // CATALOGUE: Record this generation in the immutable history before saving.
-  // Parse pairKey to extract image IDs (format: "fromId->toId").
-  const [fromImageId, toImageId] = pairKey.split('->') as [string, string]
-  recordGeneration({
-    queueJobId, // IDEMPOTENCY: Same job = same catalogue row, even if called multiple times
-    projectId,
-    fromImageId,
-    toImageId,
-    provider: source,
-    model: null, // Model ID would require passing through from job context; persisting source is sufficient
-    clip: newClip,
-    prompt: current?.prompt ?? ''
-  })
-  // Archive previous generations of this pair so only newest shows as "active".
+  // Archive previous generations of this pair so only newest shows as
+  // "active" — reached only once the new clip has earned the place.
   archivePreviousGenerations(projectId, fromImageId, toImageId)
+  setActiveGeneration(projectId, generationId)
+  setJobPhase(queueJobId, 'complete')
 
   saveProject(project)
   // THE fix for "the clip generated but never showed up". The write above
@@ -840,18 +1200,32 @@ function recordSpendForSubmission(
   })
 }
 
-async function runLiveTransition(
+export async function runLiveGenerationJob(
   provider: VideoProvider,
   job: QueueJob,
-  pairKey: string,
+  /**
+   * WHAT IS BEING GENERATED.
+   *
+   * A pairKey string, as every existing caller passes, or a motion
+   * subject. The lifecycle below — submit, persist the task id, record
+   * the spend, poll, download — is identical either way, and that is the
+   * point: single-image motion gets the same idempotency, the same
+   * ledger and the same recovery, because it is the same code.
+   */
+  target: string | GenerationSubject,
   request: GenerationRequest,
   ctx: { onProgress: (pct: number) => void }
 ): Promise<{ ok: true } | { ok: false; endpointUnverified?: true; reason: string }> {
+  const subject: GenerationSubject =
+    typeof target === 'string' ? { kind: 'transition', pairKey: target } : target
+  // Only used for the ledger's human label and log lines.
+  const pairKey = subject.kind === 'transition' ? subject.pairKey : subject.segmentId
   const action = resolveGenerationAction(job.provider, job.note)
   const label = provider.metadata().label
   let taskId = job.provider?.providerTaskId ?? null
 
   if (action === 'submit') {
+    setJobPhase(job.id, 'submitting')
     const submitted = await provider.submitGeneration(request)
     if (!submitted.ok) {
       // CLASSIFY THE REFUSAL, DON'T JUST DESCRIBE IT.
@@ -876,9 +1250,17 @@ async function runLiveTransition(
         providerTaskId: taskId,
         providerStatus: submitted.providerStatus,
         submittedAt: Date.now(),
-        providerMeta: submitted.meta,
+        // ── THE MODEL, ONTO THE TASK METADATA ────────────────────────
+        //
+        // The poll path derives its queue urls from meta.model. Without
+        // this it falls back to the default model id — which happens to
+        // resolve to the same {owner}/{app} for every Kling endpoint, so
+        // it would work today by coincidence and break the first time a
+        // non-Kling model is registered.
+        providerMeta: { ...(submitted.meta ?? {}), model: request.modelId },
         dryRun: false
       })
+      setJobPhase(job.id, 'generating')
       if (!updated || updated.provider?.providerTaskId !== taskId) {
         throw new Error('verification failed')
       }
@@ -993,7 +1375,15 @@ async function runLiveTransition(
 
   // ── Download → validate → attach ───────────────────────────────────────
   ctx.onProgress(85)
-  const attached = await downloadAndAttachResult(provider, job.projectId, pairKey, resultUrl, job.id)
+  setJobPhase(job.id, 'downloading')
+  const attached = await downloadAndAttachResult(
+    provider,
+    job.projectId,
+    subject,
+    resultUrl,
+    job.id,
+    job.provider?.model ?? null
+  )
   if (!attached.ok) {
     // The remote task metadata is intentionally preserved so the DOWNLOAD
     // can be retried without paying for a new generation.
@@ -1087,7 +1477,7 @@ registerRunner('ai-generation', async (job, ctx) => {
     if (!eligibility.allowed) {
       throw new Error(`Live generation refused: ${eligibility.reasons.join(' ')}`)
     }
-    const outcome = await runLiveTransition(provider, job, pairKey, built.request, ctx)
+    const outcome = await runLiveGenerationJob(provider, job, pairKey, built.request, ctx)
     if (!outcome.ok && outcome.endpointUnverified) {
       // The remote task is alive and paid for — the transition really IS
       // generating, we just cannot read its status yet. Record that truth

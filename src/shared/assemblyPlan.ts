@@ -37,12 +37,32 @@ import {
  * implementation instead of two.
  */
 
-export type SegmentKind = 'clip' | 'still'
+/**
+ * ── AND A SINGLE PHOTOGRAPH CAN MOVE ─────────────────────────────────
+ *
+ * A motion segment is one image with gentle camera movement. In the
+ * timeline it occupies exactly the place its photograph would otherwise
+ * have occupied, which makes the no-duplicated-time rule simple:
+ *
+ *   a motion clip REPLACES that image's still hold.
+ *
+ * It never adds one on top. And it does not duplicate frames against the
+ * transitions around it either: the clip before it ENDS on that image,
+ * the motion clip BEGINS on it, and the clip after it begins on it too —
+ * the same frame continuing, which is what a seam of zero means
+ * everywhere else in this file. What would duplicate time is holding the
+ * still as well, and that is precisely what coverage now prevents.
+ */
+
+export type SegmentKind = 'clip' | 'still' | 'motion'
 
 export interface AssemblySegment {
   kind: SegmentKind
   /** For a clip: the pair it was generated for. */
   pairKey?: string
+  /** For a motion segment: its own id, and what it does. */
+  motionSegmentId?: string
+  motionLabel?: string
   /** For a clip: the managed file. */
   clipPath?: string
   /** For a still: the image to hold, and for how long. */
@@ -63,6 +83,20 @@ export interface AssemblyPlanInput {
   imagePaths: string[]
   /** The project's seam setting, used between two AI clips. */
   seamBlend: SeamBlend
+  /**
+   * Single-image motion segments, if the project has any. Optional so
+   * every existing caller keeps its exact current behaviour.
+   */
+  motions?: PlannedMotion[]
+}
+
+export interface PlannedMotion {
+  segmentId: string
+  imageId: string
+  /** Human wording for the plan readout, e.g. `SINGLE IMAGE · PAN LEFT`. */
+  label: string
+  /** The generated file, or null when it has not been generated yet. */
+  clipPath: string | null
 }
 
 export interface AssemblyPlan {
@@ -74,6 +108,8 @@ export interface AssemblyPlan {
   seamSeconds: number[]
   /** AI pairs whose clip is missing — the only thing that blocks a build. */
   missingClipPairs: string[]
+  /** Motion segments the operator added but never generated. */
+  missingMotionSegments: string[]
   /** Pairs that need no clip at all. */
   cutPairs: string[]
   crossfadePairs: string[]
@@ -121,6 +157,14 @@ export function planAssembly(input: AssemblyPlanInput): AssemblyPlan {
     covered.add(imageIds[i + 1])
   })
 
+  // A generated motion clip puts its photograph on screen, and for longer
+  // and more deliberately than a hold would. So it counts as coverage —
+  // that single line is what stops the still being emitted as well.
+  const motions = (input.motions ?? []).filter((m) => imageIds.includes(m.imageId))
+  const missingMotionSegments = motions.filter((m) => !m.clipPath).map((m) => m.label)
+  const usableMotions = motions.filter((m) => m.clipPath)
+  usableMotions.forEach((m) => covered.add(m.imageId))
+
   // ── 3. Walk the sequence, emitting segments in order ─────────────────
   //
   // An uncovered image becomes a hold; a usable pair becomes its clip. The
@@ -141,6 +185,21 @@ export function planAssembly(input: AssemblyPlanInput): AssemblyPlan {
         covers: [imageIds[i]]
       })
     }
+    // Then whatever motion the operator gave this photograph, in the
+    // position the photograph itself holds. It sits AFTER any still
+    // branch — which cannot have run for this image — and BEFORE the
+    // transition that leaves it, so the movement reads as the approach
+    // to the doorway rather than an interruption after it.
+    for (const m of usableMotions.filter((x) => x.imageId === imageIds[i])) {
+      segments.push({
+        kind: 'motion',
+        motionSegmentId: m.segmentId,
+        motionLabel: m.label,
+        clipPath: m.clipPath ?? undefined,
+        imageId: m.imageId,
+        covers: [m.imageId]
+      })
+    }
     if (i < modes.length && usable[i]) {
       segments.push({
         kind: 'clip',
@@ -156,6 +215,7 @@ export function planAssembly(input: AssemblyPlanInput): AssemblyPlan {
       segments: [],
       seamSeconds: [],
       missingClipPairs,
+      missingMotionSegments,
       cutPairs,
       crossfadePairs,
       ok: false,
@@ -197,12 +257,19 @@ export function planAssembly(input: AssemblyPlanInput): AssemblyPlan {
     segments,
     seamSeconds,
     missingClipPairs,
+    missingMotionSegments,
     cutPairs,
     crossfadePairs,
-    ok: missingClipPairs.length === 0,
+    // A motion segment the operator added but never generated blocks the
+    // build for the same reason a missing transition clip does: it is a
+    // deliberate part of the sequence, and dropping it silently would
+    // ship a video that is not the one shown on the timeline.
+    ok: missingClipPairs.length === 0 && missingMotionSegments.length === 0,
     reason:
       missingClipPairs.length > 0
         ? `Missing transition clips: ${missingClipPairs.join(', ')}`
-        : undefined
+        : missingMotionSegments.length > 0
+          ? `Motion clips not generated: ${missingMotionSegments.join(', ')}`
+          : undefined
   }
 }

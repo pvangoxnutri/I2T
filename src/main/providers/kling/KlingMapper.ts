@@ -42,7 +42,9 @@ export function prepareImagesForDryRun(request: GenerationRequest): PreparedImag
   return {
     mode: 'reference',
     start: imageReference(request.startImagePath),
-    end: imageReference(request.endImagePath)
+    // Kling has no single-image endpoint in this product, and the
+    // provider refuses a motion request before reaching here.
+    end: imageReference(request.endImagePath ?? '')
   }
 }
 

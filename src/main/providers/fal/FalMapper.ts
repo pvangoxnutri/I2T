@@ -1,7 +1,8 @@
 import { basename } from 'node:path'
 import type { GenerationRequest, ModelCapabilities } from '../types'
 import { fitPromptToLimit } from '../../../shared/prompts'
-import { FAL_FIELDS, FAL_PROMPT_MAX_CHARS } from './falConfig'
+import { FAL_PROMPT_MAX_CHARS } from './falConfig'
+import { clampDurationForModel, resolveFalModel } from './falModels'
 
 /**
  * FrameToFrame → fal.ai request mapping. Pure functions only: no I/O, no
@@ -73,15 +74,25 @@ export function buildFalBody(
     )
   }
 
-  return {
-    [FAL_FIELDS.startImage]: startImage,
-    [FAL_FIELDS.endImage]: endImage,
-    [FAL_FIELDS.prompt]: fitted.prompt,
-    [FAL_FIELDS.duration]: String(mapDuration(request.durationSec, model)),
-    // Explicitly off: the field name is confirmed, so we send it rather than
-    // relying on a default we do not control. Audio also costs 33 % more.
-    [FAL_FIELDS.generateAudio]: request.nativeAudio === true
-  }
+  // ── THE MODEL SHAPES ITS OWN BODY ─────────────────────────────────
+  //
+  // Field names were a single global map applied to every endpoint. That
+  // is exactly the 'generic payload sent hopefully' shape: a model whose
+  // end-frame field is named differently, or which has no audio flag,
+  // would receive a field it does not support and reject the request
+  // whole. Each registry entry states its own body, and a field a model
+  // does not support is never emitted.
+  const entry = resolveFalModel(request.modelId)
+  return entry.buildBody({
+    startImage,
+    endImage,
+    prompt: fitted.prompt,
+    durationSec: clampDurationForModel(entry, request.durationSec),
+    resolution: mapResolution(request.resolution, model),
+    // Audio is never enabled implicitly, and never sent to a model that
+    // does not accept it.
+    nativeAudio: entry.audioSupport && request.nativeAudio === true
+  })
 }
 
 // ── Response readers (defensive, even though the shape is confirmed) ──────

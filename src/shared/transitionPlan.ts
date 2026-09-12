@@ -1,4 +1,20 @@
-import { DEFAULT_TRANSITION_PROMPT } from './prompts'
+import { expectedReflectionContent, isReflectiveLandmark } from './reflectionRisk'
+import {
+  isContextActive,
+  reflectionHintsFrom,
+  type OperatorSpatialContext
+} from './operatorContext'
+import {
+  DEFAULT_TRANSITION_PROMPT,
+  PRESET_PARTS,
+  REFLECTION_SAFETY_BLOCK,
+  REFLECTION_SAFETY_BLOCK_COMPACT,
+  assemblePrompt,
+  expectedMirrorContentBlock,
+  expectedMirrorContentBlockCompact,
+  motionBlock,
+  type PromptPart
+} from './prompts'
 import {
   evaluateTransitionSafety,
   type TransitionSafetyVerdict
@@ -67,7 +83,7 @@ export type MotionSpeed = 'slow' | 'moderate'
  * rotation, no bearing and no architecture.
  */
 export const NEUTRAL_MOTION =
-  'Use restrained cinematic camera movement that preserves visible geometry and converges exactly to the end frame. Do not imply movement through unseen architecture.'
+  'Move the viewpoint with restraint, preserving visible geometry and converging exactly to the end frame. Do not imply movement through unseen architecture.'
 
 export interface ContinuityHints {
   /** Rotation the previous clip finished on, if any. */
@@ -76,9 +92,16 @@ export interface ContinuityHints {
   outgoingRotation: RotationDirection
   speed: MotionSpeed
   /**
-   * Every I2T clip must settle on its exact end frame, so this is always
-   * true. It is carried explicitly so the renderer cannot forget it and
-   * so a future plan type cannot quietly opt out.
+   * Every I2T clip ENDS ON its exact end frame — the composition is
+   * reproduced, and the clip does not overshoot past it or stop short.
+   *
+   * It does not mean the move decelerates into that frame. It used to:
+   * the field was documented as "must settle on its exact end frame",
+   * and "settle" is the deceleration the constant-velocity contract now
+   * forbids. The end frame is reached AT travel speed, so that several
+   * transitions in sequence read as one continuous take.
+   *
+   * Carried explicitly so a future plan type cannot quietly opt out.
    */
   staticEndpoint: true
 }
@@ -174,20 +197,36 @@ function renderMotion(
     parts.push(`rotating ${rotation}`)
   }
 
-  if (evidence.sharedLandmarks.length > 0) {
-    parts.push(`keeping the ${evidence.sharedLandmarks[0]} continuously in view`)
+  // ── A MIRROR IS NEVER A CAMERA ANCHOR ───────────────────────────────
+  //
+  // The landmarks below are used to phrase the move: "turning away from
+  // the X toward the Y". A real bathroom clip was planned as "turning
+  // away from the mirror reflection toward the wall toilet", because the
+  // analyzer had recorded "mirror reflection" as an ordinary landmark.
+  // Asking a model to turn away from a reflection forces it to decide
+  // what that reflection contains, and it answered with a person holding
+  // a camera.
+  //
+  // Reflectors are dropped from the phrasing only. They remain in the
+  // evidence, where `evaluateTransitionSafety` treats them as the hazard
+  // they are — this is wording, not the safety decision.
+  const anchors = (list: string[]): string[] => list.filter((lm) => !isReflectiveLandmark(lm))
+  const sharedAnchors = anchors(evidence.sharedLandmarks)
+  const leaving = anchors(evidence.leavingLandmarks)
+  const entering = anchors(evidence.enteringLandmarks)
+
+  if (sharedAnchors.length > 0) {
+    parts.push(`keeping the ${sharedAnchors[0]} continuously in view`)
   }
 
   // What leaves and enters frame is real, observed, and different for
   // every pair — which is exactly what a generic template could not be.
-  if (evidence.leavingLandmarks.length > 0 && evidence.enteringLandmarks.length > 0) {
-    parts.push(
-      `turning away from the ${evidence.leavingLandmarks[0]} toward the ${evidence.enteringLandmarks[0]}`
-    )
-  } else if (evidence.enteringLandmarks.length > 0) {
-    parts.push(`bringing the ${evidence.enteringLandmarks[0]} into frame`)
-  } else if (evidence.leavingLandmarks.length > 0) {
-    parts.push(`letting the ${evidence.leavingLandmarks[0]} leave frame`)
+  if (leaving.length > 0 && entering.length > 0) {
+    parts.push(`turning away from the ${leaving[0]} toward the ${entering[0]}`)
+  } else if (entering.length > 0) {
+    parts.push(`bringing the ${entering[0]} into frame`)
+  } else if (leaving.length > 0) {
+    parts.push(`letting the ${leaving[0]} leave frame`)
   }
 
   if (parts.length === 0) return null
@@ -339,7 +378,16 @@ export function planSequence(
    * Ground-truth verdicts, keyed by connection fact key. Optional — with
    * no reviews the evidence rules apply exactly as before.
    */
-  reviews?: Map<string, ReviewVerdict>
+  reviews?: Map<string, ReviewVerdict>,
+  /**
+   * Operator-written spatial facts, keyed by pairKey.
+   *
+   * Passed through rather than looked up here: the planner reads an
+   * ANALYSIS, and this comes from the project's transition rows. Keeping
+   * the lookup at the caller stops this file needing a second source of
+   * truth about pairs.
+   */
+  contexts?: Map<string, OperatorSpatialContext>
 ): TransitionPlan[] {
   const plans: TransitionPlan[] = []
   for (let i = 0; i < imageIds.length - 1; i++) {
@@ -370,7 +418,14 @@ export function planSequence(
       // different conclusions about the same pair. Everything above
       // describes how the camera should MOVE when a move is allowed,
       // which is a separate question.
-      safetyVerdict: evaluateTransitionSafety(analysis, from, to, reviews)
+      safetyVerdict: evaluateTransitionSafety(
+        analysis,
+        from,
+        to,
+        reviews,
+        null,
+        contexts?.get(`${from}->${to}`) ?? null
+      )
     })
   }
   return plans
@@ -409,7 +464,12 @@ export function renderMotionInstruction(
         'Do NOT depict travel through any doorway or opening, since none is confirmed visible in the start frame.'
       )
     }
-    parts.push('Settle into a still final frame that matches the end frame exactly.')
+    // NOTHING ABOUT HOW IT ENDS. This function renders the PATH; the one
+    // canonical statement about speed and arrival is MOTION_QUALITY. A
+    // line here saying "stop on a still final frame" was a second
+    // injector, and once the contract changed to reaching the end frame
+    // AT travel speed it was also a direct contradiction — the last
+    // sentence the model read told it to halt.
     return parts.join(' ')
   }
 
@@ -448,17 +508,187 @@ export function renderMotionInstruction(
       `Continuity: the previous shot ended rotating ${plan.continuity.incomingRotation}; prefer to continue in that direction rather than reversing abruptly, unless reaching the end frame requires otherwise.`
     )
   }
-  parts.push('Settle into a still final frame that matches the end frame exactly.')
-
+  // PATH ONLY — see the note in the branch above. Speed and arrival are
+  // stated once, in MOTION_QUALITY.
   return parts.join(' ')
 }
 
-/** base + motion. The safety contract always leads. */
+/**
+ * THE WHOLE PROMPT, ASSEMBLED TO FIT.
+ *
+ * ── WHAT THIS USED TO DO, AND WHAT IT COST ───────────────────────────
+ *
+ * It concatenated: preset, then operator context, then the reflection
+ * escalation, then the pair's movement instruction LAST. On a reflective
+ * pair with operator context that is about 3400 characters against a
+ * 2500-character provider limit, and the only thing the length fitter
+ * could give up was the 80-character style line. It then cut the tail.
+ *
+ * So the block that said where THIS pair actually goes — the output of
+ * the analysis, the reason the pair was planned at all — was the block
+ * that never got sent. Measured on eight stored transitions in the
+ * operator's own database: six were submitting without it.
+ *
+ * ── THE ORDER NOW ────────────────────────────────────────────────────
+ *
+ *   what the scene is → the two frames → WHERE THIS PAIR GOES →
+ *   at what speed → geometry → the operator's own facts →
+ *   reflection escalation → nobody is here → tone
+ *
+ * The reflection block no longer sits immediately before the movement,
+ * because the movement is no longer last. The original reason for that
+ * adjacency still holds and is still satisfied: the failing bathroom
+ * prompt ENDED on "turning away from the mirror reflection", and what
+ * ends this one is the non-existence list, not an invitation to consider
+ * a mirror.
+ *
+ * Reflection is added only for pairs where a reflector was found. The
+ * unconditional occupancy and non-existence rules cover a missed mirror;
+ * spending its characters everywhere would crowd out geometry.
+ *
+ * @throws when the mandatory blocks cannot fit even compacted — see
+ *         `assemblePrompt`. Silently sending a prompt with a mandatory
+ *         block missing is the outcome this whole function exists to
+ *         stop, so it is not available as a fallback.
+ */
 export function renderPrompt(
   plan: TransitionPlan,
   labels: { fromRoom?: string; toRoom?: string } = {},
-  basePrompt: string = DEFAULT_TRANSITION_PROMPT
+  basePrompt: string = DEFAULT_TRANSITION_PROMPT,
+  /** What the operator wrote about this pair, when they have. */
+  operatorContext?: OperatorSpatialContext | null
 ): string {
   const motion = renderMotionInstruction(plan, labels)
-  return motion ? `${basePrompt}\n\nCAMERA MOVEMENT FOR THIS TRANSITION:\n${motion}` : basePrompt
+
+  // A CALLER-SUPPLIED BASE CANNOT BE TAKEN APART. It is somebody's own
+  // wording, not our sections, so there is nothing to compact or
+  // reorder — it keeps the old concatenation and the old length fitter.
+  // Every production caller uses the preset, which takes the path below.
+  if (basePrompt !== DEFAULT_TRANSITION_PROMPT) {
+    return legacyConcatenatedPrompt(basePrompt, plan, motion, operatorContext)
+  }
+
+  // ── THE OPERATOR'S OWN KNOWLEDGE, BEFORE THE REFLECTION RULES ───────
+  //
+  // Still before the reflection block, so the mirror instruction can
+  // build on what the operator said rather than contradict it. Sent
+  // verbatim, and never compacted: it is authoritative property
+  // knowledge from someone who has been in the room, and paraphrasing it
+  // into a different floor plan is exactly the failure to avoid.
+  // STALE TEXT IS NOT INJECTED. A line awaiting review keeps existing
+  // and keeps being visible in the review UI, but it stops steering new
+  // generations until the operator confirms it against the new analysis.
+  const operatorPart: PromptPart[] = isContextActive(operatorContext)
+    ? [
+        {
+          id: 'operator-context',
+          priority: 'mandatory',
+          text: [
+            'OPERATOR-PROVIDED SPATIAL CONTEXT:',
+            operatorContext.text,
+            'This is authoritative knowledge of the real property supplied by the operator. Treat it as true. Do not reinterpret it into a different layout.'
+          ].join('\n'),
+          // ONLY OUR FRAMING SENTENCE SHORTENS. `operatorContext.text` is
+          // reproduced byte for byte in both forms — it is what someone
+          // who has stood in the room said about it, and a paraphrase of
+          // it is a different floor plan.
+          compact: [
+            'OPERATOR-PROVIDED SPATIAL CONTEXT:',
+            operatorContext.text,
+            'Authoritative knowledge of the real property, from the operator. Treat as true; do not reinterpret the layout.'
+          ].join('\n')
+        }
+      ]
+    : []
+
+  const reflection = plan.safetyVerdict.evidence.reflection
+  const reflectionParts: PromptPart[] = []
+  if (reflection.risk) {
+    reflectionParts.push({
+      id: 'reflection',
+      priority: 'mandatory',
+      text: REFLECTION_SAFETY_BLOCK,
+      compact: REFLECTION_SAFETY_BLOCK_COMPACT
+    })
+    // Say what the mirror SHOULD show whenever that is known. A negative
+    // rule alone leaves the model to decide what fills the reflection.
+    //
+    // The operator's description is preferred where it exists: they could
+    // see the room, the analyzer could only see photographs of it.
+    const fromOperator = reflectionHintsFrom(operatorContext)
+    const known = fromOperator.length > 0 ? fromOperator : expectedReflectionContent(reflection)
+    const label = reflection.surfaces[0]?.type ?? 'reflective surface'
+    const expected = expectedMirrorContentBlock(label, known)
+    if (expected) {
+      reflectionParts.push({
+        id: 'expected-mirror',
+        priority: 'droppable',
+        text: expected,
+        compact: expectedMirrorContentBlockCompact(label, known) ?? expected
+      })
+    }
+  }
+
+  // ONE header, defined in prompts.ts. Three files hardcoded their own
+  // copy of "CAMERA MOVEMENT FOR THIS TRANSITION" and appended it LAST —
+  // so the final line the model read, after every constraint denying a
+  // camera, announced camera movement. In a room with a mirror that is an
+  // instruction to draw the thing the rest of the prompt just forbade.
+  const movement = motionBlock(motion)
+  const movementParts: PromptPart[] = movement
+    ? [{ id: 'movement', priority: 'mandatory', text: movement }]
+    : []
+
+  const assembled = assemblePrompt([
+    PRESET_PARTS.opening,
+    PRESET_PARTS.frames,
+    ...movementParts,
+    PRESET_PARTS.motionQuality,
+    PRESET_PARTS.geometry,
+    ...operatorPart,
+    ...reflectionParts,
+    PRESET_PARTS.occupancy,
+    PRESET_PARTS.nonexistent,
+    PRESET_PARTS.style
+  ])
+
+  if (!assembled.ok) throw new Error(`Prompt does not fit for this transition. ${assembled.reason}`)
+  return assembled.prompt
+}
+
+/**
+ * The pre-sections assembly, kept for a caller-supplied base prompt.
+ *
+ * Not used by any production path. It exists so passing a hand-written
+ * base still behaves the way it always did rather than silently losing
+ * the blocks this module can no longer address inside it.
+ */
+function legacyConcatenatedPrompt(
+  basePrompt: string,
+  plan: TransitionPlan,
+  motion: string | null,
+  operatorContext?: OperatorSpatialContext | null
+): string {
+  const parts = [basePrompt]
+  if (isContextActive(operatorContext)) {
+    parts.push(
+      [
+        'OPERATOR-PROVIDED SPATIAL CONTEXT:',
+        operatorContext.text,
+        'This is authoritative knowledge of the real property supplied by the operator. Treat it as true. Do not reinterpret it into a different layout.'
+      ].join('\n')
+    )
+  }
+  const reflection = plan.safetyVerdict.evidence.reflection
+  if (reflection.risk) {
+    parts.push(REFLECTION_SAFETY_BLOCK)
+    const fromOperator = reflectionHintsFrom(operatorContext)
+    const known = fromOperator.length > 0 ? fromOperator : expectedReflectionContent(reflection)
+    const label = reflection.surfaces[0]?.type ?? 'reflective surface'
+    const expected = expectedMirrorContentBlock(label, known)
+    if (expected) parts.push(expected)
+  }
+  const movement = motionBlock(motion)
+  if (movement) parts.push(movement)
+  return parts.join('\n\n')
 }

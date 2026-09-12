@@ -1,4 +1,4 @@
-import type { LiveConfirmationPayload } from '../../../../preload/index'
+import type { FalModelOption, LiveConfirmationPayload } from '../../../../preload/index'
 
 /**
  * The paid-request confirmation. Deliberately explicit: it names the exact
@@ -9,11 +9,19 @@ import type { LiveConfirmationPayload } from '../../../../preload/index'
 export function LiveGenerateDialog({
   data,
   busy,
+  models,
+  selectedModel,
+  onSelectModel,
   onCancel,
   onConfirm
 }: {
   data: LiveConfirmationPayload
   busy: boolean
+  /** Every registered model. ONE list, from main's canonical registry. */
+  models: FalModelOption[]
+  selectedModel: string
+  /** Changing it re-asks main, so cost and capabilities follow the choice. */
+  onSelectModel: (modelId: string) => void
   onCancel: () => void
   onConfirm: () => void
 }): React.JSX.Element {
@@ -32,6 +40,38 @@ export function LiveGenerateDialog({
         <p className="dialog-body">
           This will create a new paid {data.provider} generation.
         </p>
+
+        {/* ── MODEL ────────────────────────────────────────────────────
+            Chosen per RUN. The global default is where this starts, and
+            changing it here does not change that default — comparing two
+            models on one transition must not require editing a
+            preference. Changing it re-asks main, so the duration, the
+            resolution and the price below describe the model now
+            selected rather than the one the dialog opened with. */}
+        <label className="confirm-model">
+          <span className="confirm-model-label">Model</span>
+          <select
+            className="select-input"
+            value={selectedModel}
+            disabled={busy}
+            onChange={(e) => onSelectModel(e.target.value)}
+          >
+            {models.map((m) => (
+              <option key={m.id} value={m.id} disabled={!m.confirmed}>
+                {m.displayName}
+                {m.confirmed ? '' : ' — not verified yet'}
+              </option>
+            ))}
+          </select>
+        </label>
+        {/* What the last attempt used, so a regeneration is a deliberate
+            comparison rather than a guess about what changed. */}
+        {data.isRegeneration && (
+          <p className="field-hint">Previous generation: {data.model}</p>
+        )}
+        {!data.modelConfirmed && data.modelNote && (
+          <p className="field-hint provider-warning">{data.modelNote}</p>
+        )}
 
         {/* The EXACT frames being sent — a backwards pair is caught here. */}
         {data.startImage && data.endImage && (

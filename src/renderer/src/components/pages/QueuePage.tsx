@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useAppState } from '../../state/AppState'
-import type { JobClipStatus, JobKind, JobStatus, QueueJob } from '../../types'
+import type { JobClipStatus, JobKind, JobStatus, Project, QueueJob } from '../../types'
+import { getFeedImages } from '../../../../shared/feedSequence'
+import { MOTION_SHORT_LABEL, type MotionType } from '../../../../shared/motionSegment'
 import { formatPrice } from '../../../../shared/pricing'
 import { canResumeProviderTask } from '../../../../shared/generationState'
 
@@ -19,6 +21,9 @@ const STATUS_LABEL: Record<JobStatus, string> = {
 
 const KIND_LABEL: Record<JobKind, string> = {
   'ai-generation': 'AI transitions',
+  // Named for what it is, so a queue row is never mistaken for a
+  // transition between two rooms.
+  'motion-generation': 'Single image motion',
   transitions: 'AI transitions',
   assembly: 'Video assembly',
   'preview-export': 'Preview export (watermarked)',
@@ -55,9 +60,27 @@ function remoteSucceeded(providerStatus: string | null | undefined): boolean {
   return /succe|complete|finish/i.test(providerStatus ?? '')
 }
 
-function JobRow({ job, canReorder }: { job: QueueJob; canReorder: boolean }): React.JSX.Element {
+/** A stored motion type as the phrase the rest of the app uses. */
+function motionWord(motion: string): string {
+  return MOTION_SHORT_LABEL[motion as MotionType] ?? motion
+}
+
+/** The tail of an endpoint id — the dropdown name, not the full path. */
+function shortModel(id: string): string {
+  return id.split('/').slice(-3).join('/')
+}
+
+function JobRow({
+  job,
+  canReorder,
+  projects
+}: {
+  job: QueueJob
+  canReorder: boolean
+  /** Only to turn a stored image id into its position in the feed. */
+  projects: Project[]
+}): React.JSX.Element {
   const waiting = job.status === 'queued' || job.status === 'scheduled'
-  const [copied, setCopied] = useState(false)
   const [resumeError, setResumeError] = useState<string | null>(null)
   const [clips, setClips] = useState<JobClipStatus[]>([])
   const [playing, setPlaying] = useState<string | null>(null)
@@ -75,7 +98,29 @@ function JobRow({ job, canReorder }: { job: QueueJob; canReorder: boolean }): Re
 
   // What this job actually produced. Re-read whenever the job moves, so a
   // clip that lands mid-poll shows up without a restart.
-  const isGeneration = job.kind === 'ai-generation' || job.kind === 'transitions'
+  // ── A MOTION JOB IS A GENERATION ──────────────────────────────────
+  //
+  // This listed only the pair kinds, so a single-image job took the
+  // export branch everywhere below: no clip lookup, and a cost cell
+  // reading "—" with the tooltip "export jobs run locally through FFmpeg
+  // — no provider is charged" on a job that charges fal.ai $0.35.
+  const isMotion = job.kind === 'motion-generation'
+  const isGeneration = job.kind === 'ai-generation' || job.kind === 'transitions' || isMotion
+
+  /**
+   * `IMAGE 05`, from the CURRENT feed.
+   *
+   * The job stores the image id, not a position: a position is a fact
+   * about the feed at a moment in time, and storing it would make an old
+   * queue row lie the first time the operator reorders.
+   */
+  const motionImageLabel = (): string => {
+    const imageId = job.metadata?.motionImageId
+    if (!imageId) return 'IMAGE (unknown)'
+    const project = projects.find((p) => p.id === job.projectId)
+    const at = project ? getFeedImages(project).findIndex((i) => i.id === imageId) : -1
+    return at >= 0 ? `IMAGE ${String(at + 1).padStart(2, '0')}` : 'IMAGE (not in feed)'
+  }
   useEffect(() => {
     if (!isGeneration) return
     let cancelled = false
@@ -173,8 +218,27 @@ function JobRow({ job, canReorder }: { job: QueueJob; canReorder: boolean }): Re
           {providerName && <span className="queue-row-provider">{providerName}</span>}
           {job.metadata?.mock && <span className="queue-row-mock">awaiting provider</span>}
         </div>
-        <div className="queue-row-meta">
-          {job.transitionCount} transitions · created {timeAgo(job.createdAt)}
+        {/* ── WHAT THIS JOB IS FOR ─────────────────────────────────────
+            A motion job names its photograph and its movement. Pair
+            notation would describe a journey between two rooms that
+            never happened. */}
+        {isMotion && (
+          <div className="queue-row-subject">
+            <span className="queue-row-subject-kind">SINGLE IMAGE MOTION</span>
+            <span className="queue-row-subject-detail">
+              {motionImageLabel()}
+              {job.metadata?.motionType ? ` · ${motionWord(job.metadata.motionType)}` : ''}
+              {job.provider?.model ? ` · ${shortModel(job.provider.model)}` : ''}
+            </span>
+          </div>
+        )}
+        <div className="queue-row-meta" title={taskId ? `Remote task ${taskId}` : undefined}>
+          {/* "1 transitions" is wrong for a job that generates no
+              transition at all — it counts clips, so say clips. */}
+          {isMotion
+            ? `${job.transitionCount} motion clip${job.transitionCount === 1 ? '' : 's'}`
+            : `${job.transitionCount} transitions`}{' '}
+          · created {timeAgo(job.createdAt)}
           {job.scheduledFor ? ` · runs ${formatWhen(job.scheduledFor)}` : ''}
           {job.note ? <span className="queue-row-note"> — {job.note}</span> : null}
           {job.status === 'completed' && job.outputPath ? (
@@ -184,30 +248,12 @@ function JobRow({ job, canReorder }: { job: QueueJob; canReorder: boolean }): Re
             </span>
           ) : null}
         </div>
-        {/* The remote task id — the only handle on a paid generation if our
-            status path is wrong. Always visible once it exists. */}
-        {taskId && (
-          <div className="queue-task">
-            <span className="queue-task-label">{providerName ?? 'Remote'} task</span>
-            <code className="queue-task-id" title={taskId}>
-              {taskId}
-            </code>
-            <button
-              type="button"
-              className="btn btn-ghost btn-tiny"
-              onClick={() =>
-                void window.f2f.queue.copyTaskId(job.id).then((id) => {
-                  if (id) {
-                    setCopied(true)
-                    window.setTimeout(() => setCopied(false), 1600)
-                  }
-                })
-              }
-            >
-              {copied ? 'Copied ✓' : 'Copy Task ID'}
-            </button>
-          </div>
-        )}
+        {/* THE REMOTE TASK ID IS DIAGNOSTIC, NOT OPERATIONAL.
+            It was printed in full with a Copy button on every row. An
+            operator preparing a property video has no use for a fal
+            request uuid; it made a working queue look like a debugger.
+            It is still on the row's tooltip below for support, and the
+            recovery actions that actually depend on it are unchanged. */}
         {endpointUnverified && (
           <p className="queue-endpoint-warning">
             Remote task submitted — status endpoint needs verification. The task is still running
@@ -237,7 +283,8 @@ function JobRow({ job, canReorder }: { job: QueueJob; canReorder: boolean }): Re
                   {clip.exists ? (
                     <>
                       <span className="queue-clip-ok">
-                        Clip ready · {formatBytes(clip.bytes)}
+                        Clip ready{' '}
+                        · {formatBytes(clip.bytes)}
                         {clip.source === 'fal'
                           ? ' · fal.ai'
                           : clip.source === 'kling'
@@ -269,7 +316,37 @@ function JobRow({ job, canReorder }: { job: QueueJob; canReorder: boolean }): Re
                   )}
                 </div>
                 {playing === clip.pairKey && clip.src && (
-                  <video className="queue-clip-player" src={clip.src} controls autoPlay playsInline />
+                  // Same as the catalogue player: the `autoPlay` attribute
+                  // is blocked by Chromium's autoplay policy because React
+                  // mounts this after the click's activation window, so the
+                  // clip loads fully and then sits at 0:00. Started
+                  // explicitly instead, with the refusal reported rather
+                  // than swallowed.
+                  <video
+                    className="queue-clip-player"
+                    src={clip.src}
+                    controls
+                    playsInline
+                    preload="metadata"
+                    ref={(el) => {
+                      if (el && el.paused && !el.dataset.started) {
+                        el.dataset.started = '1'
+                        void el.play().catch((err: Error) => {
+                          console.warn(
+                            `[queue] playback did not start pair=${clip.pairKey} ${err.name}: ${err.message}`
+                          )
+                        })
+                      }
+                    }}
+                    onError={(e) => {
+                      const el = e.currentTarget
+                      console.error(
+                        `[queue] clip failed to load pair=${clip.pairKey} src=${clip.src}` +
+                          ` code=${el.error?.code ?? '?'} message=${el.error?.message ?? ''}` +
+                          ` networkState=${el.networkState} readyState=${el.readyState}`
+                      )
+                    }}
+                  />
                 )}
               </div>
             ))}
@@ -425,7 +502,7 @@ function JobRow({ job, canReorder }: { job: QueueJob; canReorder: boolean }): Re
 }
 
 export function QueuePage(): React.JSX.Element {
-  const { queue, queuePaused } = useAppState()
+  const { queue, queuePaused, projects } = useAppState()
 
   const scheduled = queue
     .filter((j) => j.status === 'scheduled')
@@ -467,7 +544,7 @@ export function QueuePage(): React.JSX.Element {
           {scheduled.length === 0 ? (
             <p className="queue-empty">Nothing scheduled.</p>
           ) : (
-            scheduled.map((j) => <JobRow key={j.id} job={j} canReorder />)
+            scheduled.map((j) => <JobRow key={j.id} job={j} projects={projects} canReorder />)
           )}
         </section>
 
@@ -479,7 +556,7 @@ export function QueuePage(): React.JSX.Element {
           {active.length === 0 ? (
             <p className="queue-empty">Nothing queued right now.</p>
           ) : (
-            active.map((j) => <JobRow key={j.id} job={j} canReorder />)
+            active.map((j) => <JobRow key={j.id} job={j} projects={projects} canReorder />)
           )}
         </section>
 
@@ -488,7 +565,7 @@ export function QueuePage(): React.JSX.Element {
           {history.length === 0 ? (
             <p className="queue-empty">No finished jobs yet.</p>
           ) : (
-            history.map((j) => <JobRow key={j.id} job={j} canReorder={false} />)
+            history.map((j) => <JobRow key={j.id} job={j} projects={projects} canReorder={false} />)
           )}
         </section>
       </div>

@@ -152,3 +152,72 @@ export function ImagePickerButton({
     </>
   )
 }
+
+/**
+ * ONE API KEY, AS SIMPLE AS IT CAN BE.
+ *
+ * A password field, whether a key is stored, Save, and a way to remove
+ * it. Nothing else — no mode, no lock, no provider routing, and never the
+ * stored key itself, which main refuses to send back.
+ *
+ * The empty field with "Connected" beside it is the point: it says a key
+ * is stored without showing it, and typing a new one replaces it.
+ */
+export function ApiKeyRow({
+  label,
+  hint,
+  connected,
+  draft,
+  onDraft,
+  onSave,
+  onClear
+}: {
+  label: string
+  hint: string
+  connected: boolean
+  draft: string
+  onDraft: (value: string) => void
+  onSave: () => void
+  onClear: () => void
+}): React.JSX.Element {
+  return (
+    <div className="api-key-row">
+      <div className="api-key-head">
+        <span className="api-key-label">{label}</span>
+        <span
+          className={`status-chip ${connected ? 'status-chip-completed' : 'status-chip-queued'}`}
+        >
+          {connected ? 'Connected' : 'Missing'}
+        </span>
+      </div>
+      <p className="field-hint">{hint}</p>
+      <div className="api-key-controls">
+        <input
+          className="text-input api-key-input"
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder={connected ? '•••••••••••••••• stored' : 'Paste the key'}
+          value={draft}
+          onChange={(e) => onDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && draft.trim().length > 0) onSave()
+          }}
+        />
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={draft.trim().length === 0}
+          onClick={onSave}
+        >
+          Save
+        </button>
+        {connected && (
+          <button type="button" className="btn btn-ghost" onClick={onClear}>
+            Remove
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}

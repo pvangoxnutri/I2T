@@ -8,6 +8,15 @@
  */
 
 import type { TransitionMode } from './transitionMode'
+import type { OperatorSpatialContext } from './operatorContext'
+import type { EvidenceSource } from './pairAnalysis'
+import type { MotionSegment } from './motionSegment'
+import type {
+  QualityOverride,
+  QualityStatus,
+  QualityValidationMode,
+  SuspiciousFrame
+} from './qualityValidation'
 export type { TransitionMode }
 
 // ── Images & transitions ─────────────────────────────────────────────────
@@ -51,9 +60,31 @@ export interface TransitionClip {
 /** Historical record of one generation in the project catalogue. */
 export interface GenerationRecord {
   id: string
+  /** The queue job that produced it — a job's output is a fact about the job. */
+  queueJobId: string
   projectId: string
   fromImageId: string
+  /**
+   * The END photograph — EMPTY STRING on a single-image motion row.
+   *
+   * Empty rather than a repeat of `fromImageId`, so no pair lookup can
+   * ever return a motion generation and nothing can render it as
+   * "Image 11 → Image 11". Read `motionSegmentId` to tell the two apart;
+   * never infer it from these two fields being equal.
+   */
   toImageId: string
+  /** Set only when this generation was a single-image motion clip. */
+  motionSegmentId?: string | null
+  motionType?: string | null
+  /**
+   * The length THIS run was submitted at.
+   *
+   * NULL on rows written before it was recorded, and read as "not
+   * recorded" — never back-filled from the segment, whose duration is
+   * whatever the LATEST run chose. Borrowing it was how regenerating a
+   * 5s clip at 10s made the old 5s row appear to have been 10s.
+   */
+  durationSec?: number | null
   provider: string
   model: string | null
   createdAt: number
@@ -64,6 +95,32 @@ export interface GenerationRecord {
   generationCost: number | null
   generationCredits: number | null
   active: boolean
+  /**
+   * WHAT THE POST-GENERATION INSPECTION FOUND.
+   *
+   * Deliberately separate from `status`, which records what the PROVIDER
+   * did. A provider can succeed technically and return a clip with a
+   * person in it; collapsing the two would make the catalogue claim the
+   * generation failed when it did not, break the resume/retry state
+   * machine that reads provider status, and hide a real charge from cost
+   * history.
+   */
+  qualityStatus: QualityStatus
+  qualityReason: string | null
+  qualityCheckedAt: number | null
+  suspiciousFrames: SuspiciousFrame[]
+  qualityValidator: string | null
+  /** 'manual' when an operator knowingly accepted a failed clip. */
+  qualityOverride: QualityOverride
+  /**
+   * Whether this pair contains mirrors or glass.
+   *
+   * DERIVED at read time from the accepted analysis, not stored: it is a
+   * property of the photographs, and re-analysis can change it. Carried
+   * on the record so the override dialog can warn about reflections
+   * without the renderer needing its own copy of the risk rules.
+   */
+  reflectionRisk?: boolean
 }
 
 /** Settings for the AI transition between two specific images. Keyed by the
@@ -109,6 +166,34 @@ export interface TransitionSettings {
    * permissive branch. Only an explicit marker unlocks it.
    */
   modeProvenance?: 'analysis' | 'manual'
+  /**
+   * WHAT THE OPERATOR KNOWS THAT THE PHOTOGRAPHS DO NOT SHOW.
+   *
+   * First-class evidence, stored on the pair rather than folded into the
+   * prompt. In the prompt it would be indistinguishable from generated
+   * wording, and the next prompt rebuild would erase the one sentence no
+   * analyzer could reproduce.
+   *
+   * It resolves UNKNOWNS — an unreadable mirror, an unconfirmed wall
+   * relationship. It never overrides a proven contradiction; that still
+   * requires the deliberate manual override.
+   */
+  operatorContext?: OperatorSpatialContext
+  /**
+   * WORDING A RE-ANALYSIS PRODUCED FOR A PROMPT A HUMAN WROTE.
+   *
+   * Held rather than applied. A hand-edited prompt is a judgement about
+   * one transition, and new evidence does not make that sentence wrong —
+   * but it may make a better one available, and the operator is the only
+   * one who may choose. Silently replacing their text is the failure
+   * this field exists to prevent.
+   */
+  promptSuggestion?: {
+    text: string
+    createdAt: number
+    evidenceSource: EvidenceSource
+    evidenceFingerprint: string
+  }
 }
 
 export const defaultTransitionSettings = (durationSec: number): TransitionSettings => ({
@@ -209,6 +294,19 @@ export interface Project {
   feedSequence?: string[]
   /** Transition settings per image pair (see transitionKey). */
   transitions: Record<string, TransitionSettings>
+  /**
+   * VIDEO SEGMENTS MADE FROM ONE PHOTOGRAPH.
+   *
+   * Their own list, with their own ids, because every transition in this
+   * app is DERIVED from feed adjacency and keyed by 'from->to'. A
+   * single-image clip has no pair, and encoding one as `A -> A` would
+   * enter the spatial analysis as evidence that a room connects to
+   * itself. See shared/motionSegment.ts.
+   *
+   * Absent on every project written before this existed, which reads as
+   * none.
+   */
+  motionSegments?: MotionSegment[]
   watermark: PreviewWatermark
   signature: BrandSignature
   /** Persisted, user-set status (never `queued`/`generating`). */
@@ -224,6 +322,14 @@ export type JobStatus = 'scheduled' | 'queued' | 'processing' | 'completed' | 'f
 
 export type JobKind =
   | 'ai-generation'
+  /**
+   * One single-image motion clip.
+   *
+   * Its own kind so nothing that walks an `ai-generation` job's
+   * `pairKeys` can ever be handed one — the runner for that kind assumes
+   * every entry names a pair, and a motion job has no pair to name.
+   */
+  | 'motion-generation'
   | 'transitions'
   | 'assembly'
   | 'preview-export'
@@ -236,6 +342,19 @@ export interface JobMetadata {
   mock?: boolean
   /** Transition pair keys an AI-generation job covers. */
   pairKeys?: string[]
+  /**
+   * Motion-generation jobs: which segment, its photograph, its movement.
+   *
+   * Self-describing like everything else here, so a queued motion run
+   * survives a restart without consulting the project — and so the queue
+   * row can say SINGLE IMAGE MOTION without inventing a pair.
+   */
+  motionSegmentId?: string
+  motionImageId?: string
+  motionType?: string
+  /** The length this run was queued at. The runner uses THIS, not the
+   *  segment, so a later edit cannot change what a queued job does. */
+  motionDurationSec?: number
   /** Export jobs: which branding layers apply and where output goes. */
   exportKind?: 'preview' | 'final'
   outputPath?: string
@@ -250,6 +369,29 @@ export interface JobMetadata {
    * default.
    */
   exportFormat?: 'computer' | 'instagram'
+  /**
+   * What the post-generation inspection concluded, for the queue row.
+   *
+   * Copied onto the job so History can show provider outcome and content
+   * outcome side by side without querying the catalogue per row. Absent
+   * on every job written before quality validation existed, and absent
+   * whenever the check did not run — neither of which means passed.
+   */
+  /**
+   * WHERE THIS GENERATION IS, as work rather than as a provider state.
+   *
+   * `providerStatus` answers "what is the remote task doing" and drives
+   * resume/retry. It cannot answer "is this clip usable yet", because
+   * the provider is finished and paid long before the clip has been
+   * looked at — which is why the UI used to say "Generating…" right up
+   * until a verdict appeared, and then jump.
+   *
+   * Three separate facts, deliberately: phase (where the work is),
+   * providerStatus (what the remote task did), quality (what the content
+   * turned out to be). Absent on jobs written before phases existed.
+   */
+  phase?: 'submitting' | 'generating' | 'downloading' | 'quality-checking' | 'complete'
+  quality?: { status: QualityStatus; reason: string | null }
   /** Provider attribution for AI work. */
   provider?: string
   model?: string
@@ -354,6 +496,17 @@ export interface JobClipStatus {
   /** Whether the bytes are really there — a row alone proves nothing. */
   exists: boolean
   bytes: number
+  /**
+   * What the post-generation inspection concluded about THIS file.
+   *
+   * Null for jobs that predate the catalogue. A downloaded-then-rejected
+   * clip has  and a failing verdict — the state that used
+   * to render as "No local clip".
+   */
+  quality: QualityStatus | null
+  qualityReason: string | null
+  /** The file is here, but deliberately not the transition's active clip. */
+  downloadedButNotActive: boolean
 }
 
 // ── Pricing ──────────────────────────────────────────────────────────────
@@ -504,6 +657,15 @@ export interface AnalyzerSettings {
   apiKey: string
   /** Dry Run builds and validates the request without sending it. */
   mode: ProviderMode
+  /**
+   * WHEN TO INSPECT A GENERATED CLIP FOR PEOPLE AND CAMERAS.
+   *
+   * Optional so settings rows written before this existed hydrate to the
+   * default rather than to `off`. It is a per-clip vision request with a
+   * real cost, so the scope is a visible setting rather than something
+   * switched on everywhere by a release note.
+   */
+  qualityValidationMode?: QualityValidationMode
 }
 
 export interface AppSettings {
@@ -515,6 +677,14 @@ export interface AppSettings {
   exportDefaults: ExportDefaults
   /** Defaults applied to NEW projects' FrameToFrame signature. */
   defaultSignature: BrandSignature
+  /**
+   * Defaults applied to NEW projects' large video watermark.
+   *
+   * OPTIONAL so settings rows written before Settings could configure
+   * it hydrate unchanged — absent reads as "use the built-in default",
+   * which is what every existing installation already has.
+   */
+  defaultWatermark?: PreviewWatermark
   /** Customer pricing. */
   pricing: PricingSettings
   production: ProductionSettings

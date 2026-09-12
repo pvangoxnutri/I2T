@@ -10,10 +10,16 @@ import { initQueue, stopQueue } from './services/queueService'
 // Importing these registers their job runners with the queue.
 import './services/exportService'
 import './services/generationService'
+import './services/motionGenerationService'
+import { reconcileMotionSegments } from './services/motionGenerationService'
 import { runSmokeTest } from './smoke'
 import { runDbDiagnostics } from './dbDiagnostics'
 import { cleanSmokeOrphans } from './orphanCleanup'
 import { runUiProbe } from './uiProbe'
+import { pinUserDataDir } from './paths'
+import { runReanalyseProof } from './reanalyseProof'
+import { runExportProof } from './exportProof'
+import { repairRetiredPromptOntology } from './services/promptOntologyRepair'
 
 /**
  * FrameToFrame — Electron main process.
@@ -43,6 +49,25 @@ const CONTENT_TYPES: Record<string, string> = {
 function contentTypeFor(path: string): string {
   return CONTENT_TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream'
 }
+
+// ── THE DATA DIRECTORY, BEFORE ANYTHING READS A PATH ─────────────────
+//
+// `pinUserDataDir` existed, was documented as required, and was called
+// from nowhere. The consequence is the one its own comment predicts:
+// Electron derives userData from the product name, the product was
+// renamed to "Image 2 Transition", and the app started reading
+// %APPDATA%/Image 2 Transition — an empty database — while the
+// operator's 37 images, 84 transitions and 10 stored prompts sat in
+// %APPDATA%/FrameToFrame. The library came up empty with nothing lost
+// and nothing said.
+//
+// Measured, both present on this machine right now:
+//   FrameToFrame        1,515,520 bytes  1 project, 37 images
+//   Image 2 Transition    737,280 bytes  0 projects, 0 images
+//
+// Must precede app ready — Electron caches its userData location the
+// first time anything asks for it.
+pinUserDataDir()
 
 // Must run before app ready: gives f2f:// standard-URL semantics.
 protocol.registerSchemesAsPrivileged([
@@ -83,6 +108,25 @@ function createWindow(): void {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
+
+/**
+ * ── WHY THERE IS NO SINGLE-INSTANCE LOCK HERE ──────────────────────
+ *
+ * There was one, briefly, and it made the app unstartable.
+ *
+ * On Windows Electron's lock is a file in userData. A process killed
+ * hard — a crash, Task Manager, a CI teardown — never removes it, and
+ * every launch afterwards gets `false` from
+ * `requestSingleInstanceLock()` and exits silently. Observed here: one
+ * force-kill left a zero-byte `lockfile` behind and the next four
+ * launches did nothing at all, with no window and no output.
+ *
+ * A database that two processes can clobber is a real hazard, but an
+ * app that will not start is a worse one. The guard that remains is the
+ * narrow one that matters: a maintenance command that WRITES refuses
+ * while another process has the database open, decided by a heartbeat
+ * that goes stale on its own — see db/owner.ts.
+ */
 
 app.whenReady().then(async () => {
   await openDatabase()
@@ -168,6 +212,66 @@ app.whenReady().then(async () => {
     return
   }
 
+  // Prompt-contract repair: `electron . --f2f-prompt-repair [--confirm]`.
+  //
+  // DRY RUN unless --confirm is passed, because this rewrites stored
+  // prompts — work the operator may have planned and paid to plan.
+  // Hand-edited prompts are reported and never rewritten.
+  //
+  // Pair it with --user-data-dir to audit a COPY of the real database:
+  //   electron . --f2f-prompt-repair --user-data-dir=<copy>
+  // Electron's own switch is the thing that moves userData; setting
+  // APPDATA or an app-specific env var does NOT, and an audit run that
+  // way hits the real database while reporting that it did not.
+  if (process.argv.includes('--f2f-prompt-repair')) {
+    let code = 0
+    try {
+      repairRetiredPromptOntology(undefined, !process.argv.includes('--confirm'))
+    } catch (err) {
+      console.error('[prompt-ontology] FAILED:', err)
+      code = 1
+    }
+    flushNow()
+    app.exit(code)
+    return
+  }
+
+  // Re-analyse consistency proof: `electron . --f2f-reanalyse-proof`.
+  //
+  // Runs the real Re-analyse workflow with a canned analyzer response —
+  // no network, no key, no spend — and reports whether the prompt it
+  // leaves behind is the canonical one. It WRITES, so point it at a copy
+  // with --user-data-dir.
+  if (process.argv.includes('--f2f-reanalyse-proof')) {
+    let code = 0
+    try {
+      code = await runReanalyseProof()
+    } catch (err) {
+      console.error('[reanalyse-proof] FAILED:', err)
+      code = 1
+    }
+    flushNow()
+    app.exit(code)
+    return
+  }
+
+  // Export geometry proof: `electron . --f2f-export-proof`.
+  //
+  // Encodes a real clip through the real assemble() at both formats and
+  // reads the pixels back. Local files only; writes to a temp directory
+  // and touches nothing in the project.
+  if (process.argv.includes('--f2f-export-proof')) {
+    let code = 0
+    try {
+      code = await runExportProof()
+    } catch (err) {
+      console.error('[export-proof] FAILED:', err)
+      code = 1
+    }
+    app.exit(code)
+    return
+  }
+
   // Headless persistence smoke test: `electron . --f2f-smoke`.
   // The queue is NOT started for the smoke run — the tests drive the
   // scheduler deterministically instead of racing a live worker.
@@ -187,6 +291,24 @@ app.whenReady().then(async () => {
   // Loads persisted jobs, recovers interrupted/overdue ones, starts the
   // scheduler tick.
   initQueue()
+
+  // ── STALE "ALREADY RUNNING" MARKERS ────────────────────────────────
+  //
+  // A motion segment’s status is a cache of what the queue says. A
+  // process killed mid-run leaves that cache claiming a run that ended
+  // long ago, and the operator has no way to clear it. Reconciling here
+  // means the lock cannot outlive the job it belonged to across a
+  // restart.
+  //
+  // Runs AFTER initQueue so the jobs it reads are the persisted ones it
+  // recovered, and it never widens a status: a segment whose job holds a
+  // real provider task stays `generating`, so Resume — not a second
+  // payment — is the remedy.
+  try {
+    reconcileMotionSegments()
+  } catch (err) {
+    console.error('[motion] reconciliation skipped', err)
+  }
 
   createWindow()
 

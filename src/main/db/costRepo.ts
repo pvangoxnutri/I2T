@@ -290,6 +290,80 @@ export function recordAnalysisSpend(input: RecordAnalysisSpendInput): Generation
 }
 
 /**
+ * A post-generation quality check, as its own ledger line.
+ *
+ * ── WHY NOT ADDED TO THE GENERATION'S COST ───────────────────────────
+ *
+ * Because it is a different purchase. Folding it in would make a clip
+ * appear to cost more than the provider's published rate, and would hide
+ * that this particular spend is optional and switchable — which is
+ * exactly the fact an operator needs in order to decide about it.
+ *
+ * ── WHY NO MONEY VALUE ───────────────────────────────────────────────
+ *
+ * Gemini bills per token, and this project does not publish a rate table
+ * for the validator model. Inventing a number would be worse than
+ * recording none: the row proves the request happened and can be counted,
+ * without claiming a price nobody verified.
+ */
+export function recordQualityValidationSpend(input: {
+  projectId: string
+  pairKey: string
+  validator: string
+}): GenerationCostEntry {
+  const entry: GenerationCostEntry = {
+    id: randomUUID(),
+    projectId: input.projectId,
+    pairKey: input.pairKey,
+    transitionPair: `Quality validation · ${input.validator}`,
+    provider: 'gemini',
+    model: input.validator,
+    durationSec: null,
+    resolution: null,
+    createdAt: Date.now(),
+    remoteTaskId: null,
+    jobId: null,
+    attemptNumber: nextAttemptNumber(listCostEntries(input.projectId), input.pairKey),
+    estimatedCost: null,
+    actualCost: null,
+    currency: 'USD',
+    status: 'succeeded',
+    isRegeneration: false,
+    category: 'quality-validation'
+  }
+
+  getDb().run(
+    `INSERT INTO generation_cost_entries (
+       id, project_id, pair_key, transition_pair, provider, model, duration_sec,
+       resolution, created_at, remote_task_id, job_id, attempt_number,
+       estimated_cost, actual_cost, currency, status, is_regeneration, category
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      entry.id,
+      entry.projectId,
+      entry.pairKey,
+      entry.transitionPair,
+      entry.provider,
+      entry.model,
+      null,
+      null,
+      entry.createdAt,
+      null,
+      null,
+      entry.attemptNumber,
+      null,
+      null,
+      entry.currency,
+      entry.status,
+      0,
+      'quality-validation'
+    ]
+  )
+  scheduleFlush()
+  return entry
+}
+
+/**
  * Remove every ledger row for a project.
  *
  * NOT part of normal operation — the ledger is append-only precisely so

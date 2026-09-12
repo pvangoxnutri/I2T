@@ -77,6 +77,49 @@ export interface RoomRecord {
   notes?: string
 }
 
+/**
+ * A surface in the frame that can show a reflection.
+ *
+ * ── WHY THIS IS NOT JUST ANOTHER LANDMARK ────────────────────────────
+ *
+ * It already was one, and that is exactly how a photographer with a
+ * camera ended up in a bathroom mirror. The analyzer had written
+ * `landmarks: ["mirror reflection", "floating vanity", "shower panel"]`
+ * — the mirror was seen and recorded, but a landmark is MATCHING
+ * evidence: the safety gate counts landmarks visible in both frames as
+ * proof the two viewpoints see the same region. So the mirror did not
+ * merely fail to raise a warning, it actively helped authorise the
+ * generation, and the motion planner then wrote a camera path defined
+ * relative to it.
+ *
+ * A reflective surface is a HAZARD, and hazards need their own field so
+ * they can never again be counted as reassurance.
+ *
+ * ── expectedVisibleContent IS THE POINT ──────────────────────────────
+ *
+ * Telling a model what must not appear leaves it to invent what should.
+ * Naming the surfaces the mirror actually returns gives it something
+ * true to draw instead, which is the only form of this instruction that
+ * has a positive target. Empty is honest and normal; it means the
+ * analyzer could not read the reflection, and that itself is a reason to
+ * refuse AI rather than to guess.
+ */
+export interface ReflectiveSurface {
+  /** "wall mirror", "mirrored wardrobe", "shower glass", "TV screen". */
+  type: string
+  /** Where it sits in the frame, in the analyzer's own words. */
+  locationDescription?: string
+  /** True when it occupies a large part of the frame — the risky case. */
+  dominant: boolean
+  /**
+   * What the reflection actually shows, when it can be read: "beige
+   * wall", "vanity", "ceiling light". NEVER a guess — an empty list
+   * means unknown, and unknown is a reason to cut.
+   */
+  expectedVisibleContent: string[]
+  confidence?: AnalysisConfidence
+}
+
 export interface ImageAnalysis {
   imageId: string
   roomId: string | null
@@ -87,6 +130,16 @@ export interface ImageAnalysis {
   landmarks: string[]
   /** Openings visible in THIS image — the only basis for "move through". */
   openings: string[]
+  /**
+   * Mirrors, glass and polished surfaces visible in THIS image.
+   *
+   * Optional because every analysis written before this field existed
+   * lacks it — including the one that produced the mirrored photographer.
+   * Absent is therefore NOT "no mirrors": see `reflectionEvidence`, which
+   * falls back to reading the older text fields rather than treating a
+   * missing field as an all-clear.
+   */
+  reflectiveSurfaces?: ReflectiveSurface[]
   /**
    * Other images sharing a region of the same space. Overlap is what makes
    * a camera move between two viewpoints plausible, so it is recorded
@@ -133,7 +186,13 @@ export interface TransitionSafety {
   /** safe: strong visual evidence supports this transition without invented geometry
    *  uncertain: evidence is weak or requires inference
    *  unsafe: would require invented/hidden geometry */
-  level: 'safe' | 'uncertain' | 'unsafe'
+  /**
+   * 'needs-context' is the third outcome: a determinable fact is
+   * missing, which is different from evidence that the move will not
+   * work. 'uncertain' is kept so drafts written before the distinction
+   * existed still parse.
+   */
+  level: 'safe' | 'needs-context' | 'uncertain' | 'unsafe'
   /** Short explanation of why (e.g., "Same sofa and window visible in both frames" or "No visible path between pool and interior") */
   reasoning: string
   /** Visualconfidence 0-1 based on overlap, shared landmarks, visible openings */

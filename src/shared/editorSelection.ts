@@ -23,6 +23,22 @@ import { transitionKey } from './types'
 export type EditorSelection =
   | { kind: 'image'; imageId: string }
   | { kind: 'transition'; pairKey: string }
+  // A single-image motion clip is its own selectable thing. It is added
+  // to the union rather than kept as a fourth piece of state beside it,
+  // for the reason the comment above gives: two sources of "what is
+  // selected" is precisely the drift this type exists to prevent.
+  | { kind: 'motion'; segmentId: string }
+  /**
+   * THE FINAL EDIT IS SELECTED.
+   *
+   * Carries the playhead, because the playhead IS the selection when the
+   * timeline owns the preview: what is on screen is "the film at 17.4s",
+   * not "a clip". Held here rather than inside the timeline component so
+   * there is exactly one answer to "what is the preview showing" — two
+   * states would let a feed click and a timeline click each believe they
+   * won, which is the drift §13 exists to prevent.
+   */
+  | { kind: 'timeline'; itemId: string | null; atSec: number }
   | { kind: 'full' }
 
 export const selectImage = (imageId: string): EditorSelection => ({ kind: 'image', imageId })
@@ -30,22 +46,66 @@ export const selectTransition = (pairKey: string): EditorSelection => ({
   kind: 'transition',
   pairKey
 })
+export const selectMotion = (segmentId: string): EditorSelection => ({
+  kind: 'motion',
+  segmentId
+})
+/**
+ * The timeline, at a position.
+ *
+ * `atSec` is ABSOLUTE timeline time. Every consumer resolves it through
+ * `locateAtTime`, so the frame the preview shows, the item highlighted
+ * and the frame a split lands on are the same one by construction.
+ */
+export const selectTimeline = (itemId: string | null, atSec: number): EditorSelection => ({
+  kind: 'timeline',
+  itemId,
+  atSec
+})
+
 export const selectFullVideo = (): EditorSelection => ({ kind: 'full' })
 
 export const selectedImageId = (s: EditorSelection): string | null =>
   s.kind === 'image' ? s.imageId : null
 export const selectedPairKey = (s: EditorSelection): string | null =>
   s.kind === 'transition' ? s.pairKey : null
+export const selectedMotionId = (s: EditorSelection): string | null =>
+  s.kind === 'motion' ? s.segmentId : null
+export const selectedTimelineItemId = (s: EditorSelection): string | null =>
+  s.kind === 'timeline' ? s.itemId : null
 
-/** What the preview shows. One value, derived — never set independently. */
-export type PreviewMode = 'image' | 'transition' | 'full'
+/**
+ * What the preview shows. One value, derived — never set independently.
+ *
+ * ── WHOEVER ACTED LAST OWNS THE PREVIEW ──────────────────────────────
+ *
+ * Because this is DERIVED from the single selection, that rule needs no
+ * enforcement: clicking a transition replaces the selection, and so does
+ * clicking a timeline item. There is no second state for one to leave
+ * behind, so a stale cross-selection is not something that can happen.
+ */
+export type PreviewMode = 'image' | 'transition' | 'motion' | 'timeline' | 'full'
 export const previewModeFor = (s: EditorSelection): PreviewMode =>
-  s.kind === 'image' ? 'image' : s.kind === 'transition' ? 'transition' : 'full'
+  s.kind === 'image'
+    ? 'image'
+    : s.kind === 'transition'
+      ? 'transition'
+      : s.kind === 'motion'
+        ? 'motion'
+        : s.kind === 'timeline'
+          ? 'timeline'
+          : 'full'
 
 /** Which bottom inspector is shown. */
-export type InspectorMode = 'image' | 'transition' | 'none'
+export type InspectorMode = 'image' | 'transition' | 'motion' | 'none'
 export const inspectorModeFor = (s: EditorSelection): InspectorMode =>
-  s.kind === 'image' ? 'image' : s.kind === 'transition' ? 'transition' : 'none'
+  s.kind === 'image'
+    ? 'image'
+    : s.kind === 'transition'
+      ? 'transition'
+      : s.kind === 'motion'
+        ? 'motion'
+        : 'none'
 
 // ── Sequence-aware helpers ─────────────────────────────────────────────
 
@@ -70,13 +130,22 @@ export function pairKeysFor(imageIds: string[]): string[] {
  */
 export function reconcileSelection(
   selection: EditorSelection,
-  imageIds: string[]
+  imageIds: string[],
+  motionIds: string[] = []
 ): EditorSelection {
   if (selection.kind === 'image') {
     return imageIds.includes(selection.imageId) ? selection : selectFullVideo()
   }
   if (selection.kind === 'transition') {
     return pairKeysFor(imageIds).includes(selection.pairKey) ? selection : selectFullVideo()
+  }
+  if (selection.kind === 'motion') {
+    // Defaulted to empty, so a caller that has not been taught about
+    // motion segments keeps a motion selection rather than silently
+    // clearing it — the same "still present, keep it" rule as above,
+    // applied to the absence of information instead of to its content.
+    if (motionIds.length === 0) return selection
+    return motionIds.includes(selection.segmentId) ? selection : selectFullVideo()
   }
   return selection
 }

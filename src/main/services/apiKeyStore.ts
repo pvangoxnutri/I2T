@@ -1,6 +1,7 @@
 import type { AiProviderConfig, AppSettings, ProviderId } from '../../shared/types'
 import { getSettingsJson, saveSettingsJson } from '../db/projectsRepo'
 import { sanitizeApiKey } from '../providers/keyHygiene'
+import { normalizeProductSettings } from './productSettings'
 import { FAL_MODEL_ID } from '../providers/fal/falConfig'
 
 /**
@@ -40,7 +41,9 @@ export function storeProviderApiKey(providerId: ProviderId, rawKey: string): boo
     stored.providers = [...providers, fresh]
   }
 
-  saveSettingsJson(JSON.stringify(stored))
+  // Storing a key is the intent to use it: the product rule derives
+  // live mode and the production lock from exactly this.
+  saveSettingsJson(JSON.stringify(normalizeProductSettings(stored)))
   return true
 }
 

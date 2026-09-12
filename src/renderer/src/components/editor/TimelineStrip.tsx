@@ -1,4 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
+import { feedTransitionState } from '../../../../shared/feedTransitionState'
+import {
+  MOTION_LABEL,
+  motionSegmentsForImage,
+  type MotionSegment
+} from '../../../../shared/motionSegment'
+import type { GenerationRecord } from '../../../../shared/types'
 import { useAppState } from '../../state/AppState'
 import { transitionKey, type Project, type TransitionStatus } from '../../types'
 import { resolveGenerationAction } from '../../../../shared/generationState'
@@ -54,16 +61,39 @@ export function TimelineStrip({
   analysis,
   selection,
   modes,
+  generations,
+  scrollToSelectionNonce,
+  selectedMotionId,
   onSelectImage,
-  onSelectTransition
+  onSelectTransition,
+  onSelectMotion
 }: {
   project: Project
   analysis: PropertyAnalysis | null
   selection: EditorSelection
   /** How each transition will behave. Resolved once in main. */
   modes: ResolvedModeRow[]
+  /**
+   * Every generation in the project.
+   *
+   * The feed cannot describe a transition from its stored row alone: a
+   * clip held back by quality is on disk and playable while the row
+   * carries no clip at all. Without this the timeline called that FAILED.
+   */
+  generations: GenerationRecord[]
+  /**
+   * Changes ONLY when keyboard navigation moved the selection.
+   *
+   * The scroll-into-view effect keys off this rather than off the
+   * selection itself, so a mouse click — which can only ever land on
+   * something already visible — never moves the track.
+   */
+  scrollToSelectionNonce: number
+  /** The selected single-image motion segment, when one is selected. */
+  selectedMotionId?: string | null
   onSelectImage: (imageId: string) => void
   onSelectTransition: (pairKey: string) => void
+  onSelectMotion?: (segmentId: string) => void
 }): React.JSX.Element {
   const { moveFeedImage, queue } = useAppState()
   const [dragIndex, setDragIndex] = useState<number | null>(null)
@@ -87,17 +117,37 @@ export function TimelineStrip({
    * on every keypress makes a sequence impossible to read.
    */
   useEffect(() => {
+    // ── ONLY KEYBOARD NAVIGATION MAY MOVE THE TRACK ──────────────────
+    //
+    // This used to depend on the SELECTION, so every mouse click ran it.
+    // Clicking a transition after scrolling right therefore dragged the
+    // strip back leftwards — the operator had just scrolled to something,
+    // and selecting it moved it out from under the pointer.
+    //
+    // A click cannot reach anything off-screen: they clicked what they
+    // could see, so there is nothing to bring into view and the correct
+    // scroll adjustment is none. Arrow-key review genuinely can step onto
+    // an off-screen item, and that is the only case this serves.
+    //
+    // Nonce-driven, not selection-driven: the value changes only in the
+    // keyboard handler, so no other cause of a selection change — a
+    // click, a reorder, a reconcile after a feed edit — can reach it.
+    if (scrollToSelectionNonce === 0) return
     const id = selectedImageId ?? selectedPairKey
     if (!id) return
     const track = trackRef.current
     const cell = cellRefs.current.get(id)
     if (!track || !cell) return
+    // Minimal movement, and never to the left edge: `scrollIntoViewOffset`
+    // returns null when the item is already visible and otherwise the
+    // smallest offset that reveals it.
     const offset = scrollIntoViewOffset(
       { left: cell.offsetLeft, width: cell.offsetWidth },
       { scrollLeft: track.scrollLeft, width: track.clientWidth }
     )
     if (offset !== null) track.scrollTo({ left: offset, behavior: 'smooth' })
-  }, [selectedImageId, selectedPairKey])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollToSelectionNonce])
 
   const roomLabel = (imageId: string): string | null =>
     analysis ? (roomOfImage(analysis, imageId)?.label ?? null) : null
@@ -110,6 +160,26 @@ export function TimelineStrip({
         (j.metadata?.pairKeys ?? []).includes(pairKey) &&
         resolveGenerationAction(j.provider) === 'download'
     )
+
+  /**
+   * The newest generation for a pair, whatever became of it.
+   *
+   * Newest rather than active on purpose: the active one is already on
+   * the transition, and what the feed is missing is the attempt that
+   * produced a file nobody adopted.
+   */
+  const latestFor = (pairKey: string): GenerationRecord | null => {
+    const [from, to] = pairKey.split('->')
+    return (
+      generations
+        .filter((g) => g.fromImageId === from && g.toImageId === to)
+        .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null
+    )
+  }
+
+  /** The motion clips anchored to one photograph, in the order added. */
+  const motionsFor = (imageId: string): MotionSegment[] =>
+    motionSegmentsForImage(project, imageId)
 
   const endDrag = (): void => {
     dragRef.current = null
@@ -171,17 +241,13 @@ export function TimelineStrip({
           const transition = key ? project.transitions[key] : undefined
           const room = roomLabel(image.id)
           const pending = key ? downloadPending(key) : false
-          const status: TransitionStatus = transition?.status ?? 'not-generated'
-          const word = pending ? 'Download pending' : STATUS_WORD[status]
-          const stateClass = pending
-            ? 'pending'
-            : transition?.clip
-              ? 'ready'
-              : status === 'failed'
-                ? 'failed'
-                : status === 'generating' || status === 'queued'
-                  ? 'busy'
-                  : 'missing'
+          // ONE derivation, from three facts. `transition.status` alone
+          // cannot tell a fal rejection from a clip the inspection held
+          // back — and it reported both as FAILED.
+          const latestGeneration = key ? latestFor(key) : null
+          const view = feedTransitionState(transition, latestGeneration, pending)
+          const word = view.word
+          const stateClass = view.tone
 
           // The one status worth a badge on the photo itself: nothing knows
           // where it is, so every transition touching it stays generic.
@@ -248,6 +314,49 @@ export function TimelineStrip({
                 </span>
               </button>
 
+              {/* ── SINGLE-IMAGE MOTION, WHERE IT PLAYS ──────────────────
+                  After this photograph is shown and before the transition
+                  that leaves it.
+
+                  Labelled in WORDS, with its own shape and tint, because
+                  the one thing that must never happen is an operator
+                  reading a moving still as a journey between two rooms.
+                  An icon alone would not carry that. */}
+              {motionsFor(image.id).map((segment) => (
+                <button
+                  key={segment.id}
+                  type="button"
+                  className={`timeline-motion${
+                    selectedMotionId === segment.id ? ' is-selected' : ''
+                  }`}
+                  onClick={() => onSelectMotion?.(segment.id)}
+                  aria-pressed={selectedMotionId === segment.id}
+                  title={`One photograph in motion — ${MOTION_LABEL[segment.motion]}`}
+                >
+                  <span className="timeline-motion-kind">SINGLE IMAGE</span>
+                  <span className="timeline-motion-type">
+                    {MOTION_LABEL[segment.motion].toUpperCase()}
+                  </span>
+                  <span className="timeline-motion-state">
+                    <span
+                      className={`state-dot state-dot-${
+                        segment.clip
+                          ? 'ready'
+                          : segment.status === 'failed'
+                            ? 'failed'
+                            : 'missing'
+                      }`}
+                      aria-hidden
+                    />
+                    {segment.clip
+                      ? 'Ready'
+                      : segment.status === 'failed'
+                        ? 'Failed'
+                        : 'Missing'}
+                  </span>
+                </button>
+              ))}
+
               {key && next && (
                 <button
                   type="button"
@@ -288,6 +397,17 @@ export function TimelineStrip({
                       <>
                         <span className={`state-dot state-dot-${stateClass}`} aria-hidden />
                         AI · {word}
+                        {/* RULE F. The transition works — an older clip is
+                            still in use — and the newest attempt does not.
+                            Hiding the second fact would leave a paid
+                            regeneration silently waiting; letting it
+                            overwrite the first would make a usable
+                            transition look broken. Both, ranked. */}
+                        {view.secondaryWord && (
+                          <span className="timeline-transition-secondary">
+                            {view.secondaryWord}
+                          </span>
+                        )}
                       </>
                     ) : (
                       <>

@@ -1,14 +1,47 @@
 import { getFeedSequenceIds } from '../../shared/feedSequence'
-import { transitionKey } from '../../shared/types'
+import { transitionKey, type Project } from '../../shared/types'
+import type { OperatorSpatialContext } from '../../shared/operatorContext'
+import { resolvePairSpatialEvidence } from '../../shared/pairEvidence'
+import { evidenceFingerprintOf } from '../../shared/promptPlanner'
+import type { EvidenceSource } from '../../shared/pairAnalysis'
+import { readPairAnalysis } from '../db/pairAnalysisRepo'
+import { readTransitionDraft } from '../db/transitionAnalysisRepo'
 import {
   canRebuildPrompt,
   planTransitionPrompt,
   provenanceFromPlan,
   type RebuildPlanSummary
 } from '../../shared/promptPlanner'
-import { planSequence, renderMotionInstruction, renderPrompt } from '../../shared/transitionPlan'
-import { roomOfImage } from '../../shared/propertyAnalysis'
+import { planSequence, renderMotionInstruction, type TransitionPlan } from '../../shared/transitionPlan'
+import { createPromptFinalizer } from './promptFinalizer'
+
+/**
+ * ONE finish, for every pair this file rebuilds.
+ *
+ * These three entrypoints used to call `renderPrompt` directly with the
+ * property-map plan, which quietly discarded an accepted individual
+ * analysis: a pair the operator had re-analysed got its route replaced
+ * by the general derivation the next time prompts were rebuilt. Going
+ * through the finalizer means every path resolves the same evidence and
+ * assembles the same way.
+ *
+ * A pair outside the feed cannot happen here — these loops iterate the
+ * feed — but if it ever did, falling back to the plan's own rendering is
+ * closer to right than throwing away the rebuild.
+ */
+function finalizePair(
+  finalizer: ReturnType<typeof createPromptFinalizer>,
+  plan: TransitionPlan,
+  contexts: Map<string, OperatorSpatialContext>
+): string {
+  const pairKey = transitionKey(plan.fromImageId, plan.toImageId)
+  const result = finalizer.finalize(pairKey, { operatorContext: contexts.get(pairKey) ?? null })
+  if (result.ok) return result.prompt
+  throw new Error(`Could not build a prompt for ${pairKey}: ${result.reason}`)
+}
+import { roomOfImage, type PropertyAnalysis } from '../../shared/propertyAnalysis'
 import { DEFAULT_TRANSITION_PROMPT } from '../../shared/prompts'
+import { currentPairEvidence } from './currentEvidence'
 import { listProjects, saveProject } from '../db/projectsRepo'
 import { readAnalysis } from '../db/analysisRepo'
 import { listOverrides } from '../db/overrideRepo'
@@ -18,6 +51,55 @@ import { logicalTransitionCount, logicalTransitions } from '../../shared/logical
 import { getSettingsJson } from '../db/projectsRepo'
 import type { AppSettings } from '../../shared/types'
 import { broadcastProjectUpdated } from '../events'
+
+
+/**
+ * Operator-written spatial facts for this project, keyed by pair.
+ *
+ * Read once per run so every prompt path — All, Selected and a single
+ * apply — sees the same evidence. Without it a rebuild would quietly
+ * drop the one sentence the analyzer could never have produced.
+ */
+/**
+ * The evidence stamp for one rebuilt prompt.
+ *
+ * Resolved through `resolvePairSpatialEvidence` — the same function the
+ * generation gate consults — so a freshly rebuilt prompt is current by
+ * construction rather than by coincidence. Deriving the source here
+ * independently would be a second opinion about precedence, which is
+ * the class of bug this codebase keeps removing.
+ */
+function basisFor(
+  project: Project,
+  analysis: PropertyAnalysis,
+  pairKey: string
+): {
+  evidenceSource: EvidenceSource
+  evidenceFingerprint: string
+  operatorContextFingerprint?: string
+  pairKey: string
+} {
+  // ONE computation, shared with generation preflight. This used to
+  // resolve precedence locally; two local copies is how a prompt came to
+  // be stamped `global-analysis` while the gate resolved `feed-analysis`.
+  const current = currentPairEvidence(project.id, pairKey, project)
+  return {
+    evidenceSource: current?.source ?? 'unknown',
+    evidenceFingerprint: current?.fingerprint ?? 'unknown',
+    operatorContextFingerprint: current?.operatorContextFingerprint,
+    pairKey
+  }
+}
+
+function operatorContexts(project: Project): Map<string, OperatorSpatialContext> {
+  const out = new Map<string, OperatorSpatialContext>()
+  for (const [pairKey, t] of Object.entries(project.transitions)) {
+    if (t?.operatorContext && t.operatorContext.text.trim().length > 0) {
+      out.set(pairKey, t.operatorContext)
+    }
+  }
+  return out
+}
 
 /**
  * The default clip length, for transitions that have no stored row yet.
@@ -106,7 +188,9 @@ export function planPromptRebuild(projectId: string): RebuildPlanSummary {
   // `project.images` meant feed position N looked up the plan for library
   // position N — a different pair entirely whenever the feed had been
   // reordered, which is exactly what accepting a proposal does.
-  const plans = planSequence(analysis, getFeedSequenceIds(project))
+  const contexts = operatorContexts(project)
+  const plans = planSequence(analysis, getFeedSequenceIds(project), undefined, contexts)
+  const finalizer = createPromptFinalizer(project)
 
   const rebuildable: RebuildPlanSummary['rebuildable'] = []
   const preserved: RebuildPlanSummary['preserved'] = []
@@ -143,7 +227,7 @@ export function planPromptRebuild(projectId: string): RebuildPlanSummary {
 
     const plan = plans[t.position]
     const labels = labelsFor(analysis, t.startImageId, t.endImageId)
-    const nextPrompt = renderPrompt(plan, labels)
+    const nextPrompt = finalizePair(finalizer, plan, contexts)
 
     // A pair whose prompt is ALREADY what the analysis would produce is
     // reported as unchanged rather than as work — the counts are what the
@@ -178,6 +262,15 @@ export function planPromptRebuild(projectId: string): RebuildPlanSummary {
 export interface RebuildResult {
   rebuiltCount: number
   preservedCount: number
+  /**
+   * Pairs whose evidence is still incomplete.
+   *
+   * Skipped rather than written with a guess: a prompt built over an
+   * unresolved unknown would look finished while resting on nothing. The
+   * count is reported so the operator is told what is waiting on them
+   * instead of quietly getting fewer prompts than pairs.
+   */
+  needsContextCount: number
 }
 
 /**
@@ -188,12 +281,13 @@ export interface RebuildResult {
  */
 export function rebuildPromptsFromAnalysis(projectId: string): RebuildResult {
   const project = listProjects().find((p) => p.id === projectId)
-  if (!project) return { rebuiltCount: 0, preservedCount: 0 }
+  if (!project) return { rebuiltCount: 0, preservedCount: 0, needsContextCount: 0 }
 
   const analysis = plannerAnalysis(projectId)
   const now = Date.now()
   let rebuiltCount = 0
   let preservedCount = 0
+  let needsContextCount = 0
 
   // Planned as a SEQUENCE. A manually edited transition is skipped for
   // writing but still occupies its slot in the plan list, so the clips
@@ -203,7 +297,9 @@ export function rebuildPromptsFromAnalysis(projectId: string): RebuildResult {
   // `project.images` meant feed position N looked up the plan for library
   // position N — a different pair entirely whenever the feed had been
   // reordered, which is exactly what accepting a proposal does.
-  const plans = planSequence(analysis, getFeedSequenceIds(project))
+  const contexts = operatorContexts(project)
+  const plans = planSequence(analysis, getFeedSequenceIds(project), undefined, contexts)
+  const finalizer = createPromptFinalizer(project)
 
   // EVERY logical transition, not only the ones with a stored row. The
   // `if (!transition) continue` that used to be here is what made a
@@ -219,6 +315,12 @@ export function rebuildPromptsFromAnalysis(projectId: string): RebuildResult {
       continue
     }
 
+    // An unresolved question is not something to write wording over.
+    if ((plans[t.position]?.safetyVerdict.decision ?? 'cut') === 'needs-context') {
+      needsContextCount++
+      continue
+    }
+
     if (!canRebuildPrompt(t.persisted?.promptProvenance)) {
       preservedCount++
       continue
@@ -227,7 +329,7 @@ export function rebuildPromptsFromAnalysis(projectId: string): RebuildResult {
     const plan = plans[t.position]
     const labels = labelsFor(analysis, t.startImageId, t.endImageId)
     const motion = renderMotionInstruction(plan, labels)
-    const prompt = renderPrompt(plan, labels)
+    const prompt = finalizePair(finalizer, plan, contexts)
 
     // ── DO NOT WRITE WHAT WOULD NOT CHANGE ─────────────────────────────
     //
@@ -262,7 +364,15 @@ export function rebuildPromptsFromAnalysis(projectId: string): RebuildResult {
         rationale: plan.rationale,
         manuallyEdited: false,
         plannedAt: now,
-        analysisUpdatedAt: analysis.updatedAt || null
+        analysisUpdatedAt: analysis.updatedAt || null,
+        // WHAT THIS WORDING WAS BUILT FROM.
+        //
+        // Stamped through the SAME resolver generation preflight uses.
+        // Without it a rebuilt prompt carries no recorded basis, which
+        // preflight correctly reads as unknown — so a rebuild would have
+        // left every pair permanently blocked by the gate it was meant
+        // to satisfy.
+        ...basisFor(project, analysis, t.pairKey)
       }
     }
     rebuiltCount++
@@ -271,12 +381,12 @@ export function rebuildPromptsFromAnalysis(projectId: string): RebuildResult {
   // A rebuild that wrote nothing must not touch the project at all.
   // Bumping `updatedAt` marks the assembled editor preview stale, and a
   // no-op should never cost someone a re-render of a finished video.
-  if (rebuiltCount === 0) return { rebuiltCount, preservedCount }
+  if (rebuiltCount === 0) return { rebuiltCount, preservedCount, needsContextCount }
 
   project.updatedAt = now
   saveProject(project)
   broadcastProjectUpdated(projectId)
-  return { rebuiltCount, preservedCount }
+  return { rebuiltCount, preservedCount, needsContextCount }
 }
 
 /**
@@ -310,7 +420,9 @@ export function applyAnalysisPromptToTransition(
   // `project.images` meant feed position N looked up the plan for library
   // position N — a different pair entirely whenever the feed had been
   // reordered, which is exactly what accepting a proposal does.
-  const plans = planSequence(analysis, getFeedSequenceIds(project))
+  const contexts = operatorContexts(project)
+  const plans = planSequence(analysis, getFeedSequenceIds(project), undefined, contexts)
+  const finalizer = createPromptFinalizer(project)
 
   for (const t of logicalTransitions(project, defaultDurationSec())) {
     if (t.pairKey !== pairKey) continue
@@ -319,7 +431,7 @@ export function applyAnalysisPromptToTransition(
     const plan = plans[t.position]
     const labels = labelsFor(analysis, t.startImageId, t.endImageId)
     const motion = renderMotionInstruction(plan, labels)
-    const prompt = renderPrompt(plan, labels)
+    const prompt = finalizePair(finalizer, plan, contexts)
 
     // Works for an unconfigured pair too: `t.settings` supplies defaults,
     // and the row is created here because there is now something to store.
@@ -341,7 +453,20 @@ export function applyAnalysisPromptToTransition(
         rationale: plan.rationale,
         manuallyEdited: false,
         plannedAt: now,
-        analysisUpdatedAt: analysis.updatedAt || null
+        analysisUpdatedAt: analysis.updatedAt || null,
+        // WHAT THE ADOPTED WORDING IS BASED ON.
+        //
+        // This wrote no evidence fields at all, which `isPromptBasisCurrent`
+        // reads as "no recorded basis" and therefore stale. So the button
+        // whose entire purpose is to make a prompt current produced one
+        // that was, by construction, immediately out of date — and
+        // generation refused it. Found in the operator's own database:
+        // the pair they had just adopted a prompt for was the single pair
+        // stamped NULL.
+        //
+        // Stamped from the resolver, never from the plan that produced the
+        // text: the plan knows what it read, not what governs the pair.
+        ...basisFor(project, analysis, pairKey)
       }
     }
     project.updatedAt = now

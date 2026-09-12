@@ -4,6 +4,15 @@ import type { CameraOrientation, PropertyAnalysis } from '../../../../shared/pro
 import type { ImageFacts, OverrideField } from '../../../../shared/imageFacts'
 import { imageRoomFactKey, type ReviewVerdict } from '../../../../shared/analysisReview'
 import { getFeedImages } from '../../../../shared/feedSequence'
+import {
+  DEFAULT_MOTION_SECONDS,
+  MOTION_LABEL,
+  MOTION_TYPES,
+  motionSegmentLabel,
+  motionSegmentsForImage,
+  type MotionType
+} from '../../../../shared/motionSegment'
+import type { MotionGenerationReadiness } from '../../../../shared/motionGenerationReadiness'
 
 type Tab = 'basics' | 'spatial' | 'analysis' | 'advanced'
 
@@ -176,6 +185,7 @@ export function ImageInspector({
                 facts.room.source === 'manual' ? () => clearOverride('roomLabel') : undefined
               }
             />
+            <MotionClips project={project} imageId={imageId} inFeed={sequencePosition !== null} />
           </div>
         )}
 
@@ -376,6 +386,140 @@ export function ImageInspector({
         )}
       </div>
     </section>
+  )
+}
+
+/**
+ * SINGLE-IMAGE MOTION CLIPS FOR THIS PHOTOGRAPH.
+ *
+ * On the Basics tab, not Advanced: giving one photograph gentle movement
+ * is an ordinary presentation choice in the normal feed workflow, not a
+ * setting someone should have to go hunting for.
+ *
+ * Adding one costs nothing — it records the intent. The paid run happens
+ * later, through the same confirmation and model selector as every other
+ * generation in the product.
+ */
+function MotionClips({
+  project,
+  imageId,
+  inFeed
+}: {
+  project: Project
+  imageId: string
+  inFeed: boolean
+}): React.JSX.Element {
+  const [motion, setMotion] = useState<MotionType>('push-in')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const existing = motionSegmentsForImage(project, imageId)
+
+  const add = async (): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    const res = await window.f2f.projects.motion.add(project.id, imageId, motion, DEFAULT_MOTION_SECONDS)
+    setBusy(false)
+    if (!res.ok) setError(res.reason ?? 'Could not add the motion clip.')
+  }
+
+  const remove = async (segmentId: string): Promise<void> => {
+    setBusy(true)
+    await window.f2f.projects.motion.remove(project.id, segmentId)
+    setBusy(false)
+  }
+
+  return (
+    <div className="inspector-span">
+      <div className="inspector-label">Single image motion</div>
+
+      {existing.length > 0 && (
+        <ul className="motion-list">
+          {existing.map((s) => (
+            <li key={s.id} className="motion-list-row">
+              {/* Spelled out, never an icon alone: on the timeline this
+                  is what tells an operator the segment is one photograph
+                  moving and not an AI transition between two rooms. */}
+              <span className="motion-list-label">{motionSegmentLabel(s)}</span>
+              <span className="motion-list-meta">
+                {s.durationSec}s · {s.status === 'completed' ? 'Generated' : s.status}
+              </span>
+              <MotionGenerateButton projectId={project.id} segmentId={s.id} busy={busy} />
+              <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => remove(s.id)}>
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {inFeed ? (
+        <div className="motion-add">
+          <select
+            className="input"
+            value={motion}
+            disabled={busy}
+            onChange={(e) => setMotion(e.target.value as MotionType)}
+          >
+            {MOTION_TYPES.map((m) => (
+              <option key={m} value={m}>
+                {MOTION_LABEL[m]}
+              </option>
+            ))}
+          </select>
+          <button className="btn btn-secondary" disabled={busy} onClick={() => void add()}>
+            Add motion clip
+          </button>
+        </div>
+      ) : (
+        <p className="inspector-hint">
+          Add this photograph to the Transition Feed first — a motion clip for an image outside the
+          sequence would be paid for and never play.
+        </p>
+      )}
+
+      {error && <p className="inspector-hint inspector-hint-warn">{error}</p>}
+    </div>
+  )
+}
+
+/**
+ * GENERATE THIS MOTION CLIP.
+ *
+ * It asks the main process the same question the paid path asks, so the
+ * button's state and the refusal behind it come from ONE evaluator. When
+ * no verified model can generate from a single image the button is
+ * disabled and says exactly why — rather than opening a confirmation for
+ * a run the provider would reject after taking the operator's attention.
+ *
+ * The confirmation itself is the canonical paid dialog, with the model
+ * selector restricted to the models this evaluator returned. No
+ * single-image run reaches fal.ai without passing through it.
+ */
+function MotionGenerateButton({
+  projectId,
+  segmentId,
+  busy
+}: {
+  projectId: string
+  segmentId: string
+  busy: boolean
+}): React.JSX.Element {
+  const [readiness, setReadiness] = useState<MotionGenerationReadiness | null>(null)
+
+  useEffect(() => {
+    void window.f2f.projects.motion.confirmation(projectId, segmentId).then(setReadiness)
+  }, [projectId, segmentId])
+
+  const blocked = !readiness || !readiness.ok
+  return (
+    <button
+      className="btn btn-primary btn-sm"
+      disabled={busy || blocked}
+      title={readiness && !readiness.ok ? readiness.reason : 'Generate this motion clip'}
+    >
+      Generate…
+    </button>
   )
 }
 

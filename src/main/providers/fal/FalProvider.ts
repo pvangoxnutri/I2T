@@ -1,3 +1,4 @@
+import { buildSingleImageBody, falModelCapabilities, falRunCost, resolveFalModel } from './falModels'
 import {
   providerError,
   type CancelResult,
@@ -23,12 +24,11 @@ import {
   mapResolution,
   sanitizeMeta
 } from './FalMapper'
-import { readFramePair } from './FalImages'
+import { readFrameBytes, readFramePair } from './FalImages'
 import { sanitizeApiKey } from '../keyHygiene'
 import { randomUUID } from 'node:crypto'
 import {
   falCostRate,
-  falSubmitUrl,
   falUploadInitiateUrl,
   FAL_CURRENCY,
   FAL_DOCS_URL,
@@ -106,7 +106,9 @@ export class FalProvider implements VideoProvider {
     return {
       id: 'fal',
       label: 'fal.ai',
-      models: FAL_MODELS.filter((m) => m.startFrame && m.endFrame),
+      // Derived from the canonical registry — see falModelCapabilities.
+      // Every model the selector offers is one this provider validates.
+      models: falModelCapabilities(),
       supportsRemoteCancel: FAL_SUPPORTS_REMOTE_CANCEL,
       docsUrl: FAL_DOCS_URL
     }
@@ -150,26 +152,66 @@ export class FalProvider implements VideoProvider {
         )
       }
     }
-    // The product IS start-frame → end-frame; refuse anything less.
-    if (!model.startFrame || !model.endFrame) {
-      return {
-        ok: false,
-        error: providerError(
-          'unsupported-capability',
-          `Model "${model.label}" does not support start + end frame generation.`
-        )
+    // ── TWO SHAPES, ONE PROVIDER ──────────────────────────────────────
+    //
+    // A transition is start-frame → end-frame. A single-image motion is
+    // a start frame alone, and only on a model whose published contract
+    // marks the end frame optional. Which one this is comes from the
+    // REQUEST's subject, never from noticing that a field happens to be
+    // empty — an accidentally-missing end frame on a transition must
+    // still be an error, not a silently cheaper different product.
+    const singleImage = request.subject?.kind === 'motion'
+    const entry = resolveFalModel(request.modelId)
+
+    if (singleImage) {
+      if (!entry.supportsStartFrameOnly) {
+        return {
+          ok: false,
+          error: providerError(
+            'unsupported-capability',
+            `${entry.displayName} requires an end frame and cannot generate from a single image.`
+          )
+        }
       }
-    }
-    if (!request.startImagePath || !request.endImagePath) {
-      return {
-        ok: false,
-        error: providerError('invalid-image', 'Both a start and an end image are required.')
+      if (!request.startImagePath) {
+        return {
+          ok: false,
+          error: providerError('invalid-image', 'A source image is required.')
+        }
       }
-    }
-    if (request.startImagePath === request.endImagePath) {
-      return {
-        ok: false,
-        error: providerError('invalid-request', 'Start and end frames must be different images.')
+      // And it must NOT have been handed an end frame: a motion run that
+      // quietly carried one would be billed as, and behave as, something
+      // the operator did not ask for.
+      if (request.endImagePath) {
+        return {
+          ok: false,
+          error: providerError(
+            'invalid-request',
+            'A single-image motion run must not carry an end frame.'
+          )
+        }
+      }
+    } else {
+      if (!model.startFrame || !model.endFrame) {
+        return {
+          ok: false,
+          error: providerError(
+            'unsupported-capability',
+            `Model "${model.label}" does not support start + end frame generation.`
+          )
+        }
+      }
+      if (!request.startImagePath || !request.endImagePath) {
+        return {
+          ok: false,
+          error: providerError('invalid-image', 'Both a start and an end image are required.')
+        }
+      }
+      if (request.startImagePath === request.endImagePath) {
+        return {
+          ok: false,
+          error: providerError('invalid-request', 'Start and end frames must be different images.')
+        }
       }
     }
     if (!request.prompt.trim()) {
@@ -201,7 +243,7 @@ export class FalProvider implements VideoProvider {
     return {
       provider: 'fal',
       model: model.id,
-      endpoint: falSubmitUrl(),
+      endpoint: resolveFalModel(request.modelId).endpoint,
       method: 'POST',
       // Header VALUES are redacted — the key never reaches the preview.
       headers: FalClient.redactHeaders(this.client.authHeaders()),
@@ -211,7 +253,10 @@ export class FalProvider implements VideoProvider {
         request,
         model,
         imagePlaceholder(request.startImagePath),
-        imagePlaceholder(request.endImagePath)
+        // Empty when there is no end frame, so the preview shows the
+        // single-image body exactly as it will be sent — including the
+        // absent `end_image_url`.
+        request.endImagePath ? imagePlaceholder(request.endImagePath) : ''
       ),
       display: {
         startImage: request.startImageName,
@@ -250,9 +295,45 @@ export class FalProvider implements VideoProvider {
 
     const model = this.model(request.modelId)!
 
+    // ── SINGLE IMAGE: ONE FRAME, ONE UPLOAD ───────────────────────────
+    //
+    // The pair-specific assertions below exist to stop a collapsed pair
+    // being paid for. None of them applies when there is deliberately
+    // only one frame, so this path is separate rather than being an
+    // exception threaded through them — an assertion with a carve-out
+    // is an assertion that no longer asserts anything.
+    if (request.subject?.kind === 'motion') {
+      const frame = readFrameBytes(request.startImagePath)
+      if (!frame.ok) return { ok: false, error: frame.error }
+
+      const upload = await this.client.uploadFile(
+        frame.image.bytes,
+        frame.image.fileName,
+        frame.image.contentType
+      )
+      if (!upload.ok) return { ok: false, error: upload.error }
+      if (!upload.url) {
+        return {
+          ok: false,
+          error: providerError('invalid-image', 'The source image must be uploaded before submitting.')
+        }
+      }
+
+      // Built through the model's own mapper with NO end frame, so the
+      // field is omitted rather than sent empty.
+      const motionBody = buildSingleImageBody(resolveFalModel(request.modelId), {
+        startImage: upload.url,
+        prompt: request.prompt,
+        durationSec: request.durationSec,
+        resolution: request.resolution,
+        nativeAudio: request.nativeAudio
+      })
+      return this.postAndReadQueue(resolveFalModel(request.modelId).endpoint, motionBody)
+    }
+
     // Read both frames first: a failure here must happen BEFORE anything is
     // uploaded, let alone submitted.
-    const frames = readFramePair(request.startImagePath, request.endImagePath)
+    const frames = readFramePair(request.startImagePath, request.endImagePath!)
     if (!frames.ok) return { ok: false, error: frames.error }
 
     // Official fal.ai storage upload — start frame, then end frame.
@@ -288,7 +369,26 @@ export class FalProvider implements VideoProvider {
     }
 
     const body = buildFalBody(request, model, startUpload.url, endUpload.url)
-    const res = await this.client.post(falSubmitUrl(), body, 'submit')
+    // THE SELECTED MODEL'S ENDPOINT.  returns the global
+    // default, which would have sent every run to O3 however the dialog
+    // was set — the exact silent-fallback this pass exists to remove.
+    return this.postAndReadQueue(resolveFalModel(request.modelId).endpoint, body)
+  }
+
+  /**
+   * Submit a built body and read fal's queue acknowledgement.
+   *
+   * Shared by the transition and single-image paths so a PAID request is
+   * acknowledged, identified and recorded by exactly one piece of code.
+   * The two paths differ in what they upload and what body they build —
+   * they must not also differ in how they learn the request id, because
+   * losing that id is how a paid task becomes unreachable.
+   */
+  private async postAndReadQueue(
+    endpoint: string,
+    body: Record<string, unknown>
+  ): Promise<SubmitResult> {
+    const res = await this.client.post(endpoint, body, 'submit')
     if (!res.ok) return { ok: false, error: res.error }
 
     const data = (res.data ?? {}) as Record<string, unknown>
@@ -511,21 +611,28 @@ export class FalProvider implements VideoProvider {
     const seconds = mapDuration(request.durationSec, model)
     const resolution = mapResolution(request.resolution, model)
     const nativeAudio = request.nativeAudio === true
-    const rate = falCostRate(model.id, nativeAudio)
-    if (!rate) return null
 
-    // Round to cents: fal bills in dollars, and a long float in a paid
-    // confirmation dialog reads like a bug.
-    const amount = Math.round(seconds * rate.usdPerSecond * 100) / 100
+    // ── THE REGISTRY'S RATE, NOT A SECOND PRICE TABLE ─────────────────
+    //
+    // This read `falCostRate` from falConfig, which lists only O3. Any
+    // other model therefore priced as "unavailable" — the same
+    // two-lists fault that made the provider reject models the selector
+    // offered. Per-model rates live in the registry entry, so the price
+    // quoted is the price of the model that will actually run.
+    const run = falRunCost(resolveFalModel(model.id), seconds, nativeAudio)
+    if (!run) return null
+
     return {
       seconds,
       resolution,
       nativeAudio,
       credits: null,
       creditsPerSecond: null,
-      money: { amount, currency: FAL_CURRENCY },
-      rateLabel: `$${rate.usdPerSecond}/s`,
-      label: `$${amount.toFixed(2)}`
+      // Already rounded to cents by falRunCost: fal bills in dollars, and
+      // a long float in a paid confirmation dialog reads like a bug.
+      money: { amount: run.usd, currency: FAL_CURRENCY },
+      rateLabel: `$${run.usdPerSecond}/s`,
+      label: `$${run.usd.toFixed(2)}`
     }
   }
 

@@ -1,0 +1,8 @@
+<!doctype html><html><head>
+<!-- THE APP'S EXACT CSP. Without it the harness proves nothing about
+     media loading: a policy that blocks f2f: media would be invisible
+     here and fail only in the shipped product. -->
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: f2f:; media-src 'self' f2f:" />
+</head><body><div id="root"></div>
+<script type="module" src="./main.tsx"></script></body></html>

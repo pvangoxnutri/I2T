@@ -4,12 +4,15 @@ import type {
   BrandSignature,
   ClipSource,
   Project,
+  TransitionClip,
   TransitionMode,
   TransitionSettings
 } from '../../shared/types'
-import type { PromptPlanBasis } from '../../shared/promptPlanner'
+import type { PromptPlanBasis, PromptProvenance } from '../../shared/promptPlanner'
+import type { EvidenceSource } from '../../shared/pairAnalysis'
 import { getDb, scheduleFlush } from './index'
 import { clipUrl, imageUrl } from '../files'
+import type { MotionSegment, MotionType } from '../../shared/motionSegment'
 
 /**
  * All project persistence. The renderer works with the full Project object
@@ -62,6 +65,20 @@ interface ImageRow {
   stored_name: string
 }
 
+interface MotionSegmentRow {
+  id: string
+  project_id: string
+  image_id: string
+  motion: string
+  duration_sec: number
+  status: string
+  clip_name: string | null
+  clip_original_name: string | null
+  clip_source: string | null
+  prompt: string
+  created_at: number
+}
+
 interface TransitionRow {
   project_id: string
   pair_key: string
@@ -81,6 +98,17 @@ interface TransitionRow {
   prompt_analysis_at: number | null
   mode: string | null
   mode_provenance: string | null
+  operator_context_text: string | null
+  operator_context_at: number | null
+  operator_context_status: string | null
+  operator_context_fingerprint: number | null
+  prompt_evidence_source: string | null
+  prompt_evidence_fingerprint: string | null
+  prompt_operator_fingerprint: string | null
+  prompt_suggestion: string | null
+  prompt_suggestion_at: number | null
+  prompt_suggestion_source: string | null
+  prompt_suggestion_fingerprint: string | null
 }
 
 export function listProjects(): Project[] {
@@ -108,6 +136,13 @@ export function listProjects(): Project[] {
     db,
     'SELECT * FROM transitions WHERE project_id IN (SELECT id FROM projects)'
   )
+  // Single-image motion segments live in their own table — see the
+  // migration note. A project written before it existed has no rows,
+  // which reads as none.
+  const motionRows = all<MotionSegmentRow>(
+    db,
+    'SELECT * FROM motion_segments WHERE project_id IN (SELECT id FROM projects) ORDER BY created_at'
+  )
 
   return projects.map((p) => ({
     id: p.id,
@@ -131,6 +166,26 @@ export function listProjects(): Project[] {
         src: imageUrl(p.id, i.stored_name)
       })),
     feedSequence: p.feed_sequence_json ? JSON.parse(p.feed_sequence_json) as string[] : undefined,
+    motionSegments: motionRows
+      .filter((m) => m.project_id === p.id)
+      .map((m) => ({
+        id: m.id,
+        kind: 'single-motion' as const,
+        imageId: m.image_id,
+        motion: m.motion as MotionType,
+        durationSec: m.duration_sec,
+        status: m.status as MotionSegment['status'],
+        clip: m.clip_name
+          ? {
+              storedName: m.clip_name,
+              originalName: m.clip_original_name ?? m.clip_name,
+              source: (m.clip_source ?? 'fal') as TransitionClip['source'],
+              src: clipUrl(p.id, m.clip_name)
+            }
+          : null,
+        prompt: m.prompt,
+        createdAt: m.created_at
+      })),
     customer: p.customer_details_json ? JSON.parse(p.customer_details_json) : undefined,
     transitions: Object.fromEntries(
       transitions
@@ -149,6 +204,34 @@ export function listProjects(): Project[] {
             modeProvenance:
               t.mode_provenance === 'manual' || t.mode_provenance === 'analysis'
                 ? t.mode_provenance
+                : undefined,
+            // Evidence the operator supplied, kept beside the analyzer's.
+            operatorContext:
+              t.operator_context_text && t.operator_context_text.trim().length > 0
+                ? {
+                    text: t.operator_context_text,
+                    createdAt: t.operator_context_at ?? 0,
+                    source: 'operator' as const,
+                    analysisFingerprintAtCreation:
+                      t.operator_context_fingerprint ?? undefined,
+                    // Absent reads as 'current': rows written before the
+                    // lifecycle existed were current when written, and
+                    // demoting them all on upgrade would invalidate real
+                    // operator knowledge nobody asked to re-check.
+                    status: (t.operator_context_status === 'needs-review'
+                      ? 'needs-review'
+                      : 'current') as 'current' | 'needs-review'
+                  }
+                : undefined,
+            promptSuggestion:
+              t.prompt_suggestion && t.prompt_suggestion.trim().length > 0
+                ? {
+                    text: t.prompt_suggestion,
+                    createdAt: t.prompt_suggestion_at ?? 0,
+                    evidenceSource: (t.prompt_suggestion_source ??
+                      'individual-analysis') as EvidenceSource,
+                    evidenceFingerprint: t.prompt_suggestion_fingerprint ?? ''
+                  }
                 : undefined,
             clip: t.clip_name
               ? {
@@ -173,7 +256,15 @@ export function listProjects(): Project[] {
                     rationale: t.prompt_rationale ?? '',
                     manuallyEdited: t.prompt_manually_edited === 1,
                     plannedAt: t.prompt_planned_at ?? 0,
-                    analysisUpdatedAt: t.prompt_analysis_at ?? null
+                    analysisUpdatedAt: t.prompt_analysis_at ?? null,
+                    // Absent reads as "we do not know what this was built
+                    // from", which makes the wording stale rather than
+                    // assumed to match the evidence in force today.
+                    evidenceSource:
+                      (t.prompt_evidence_source as PromptProvenance['evidenceSource']) ?? undefined,
+                    evidenceFingerprint: t.prompt_evidence_fingerprint ?? undefined,
+                    operatorContextFingerprint: t.prompt_operator_fingerprint ?? undefined,
+                    pairKey: t.pair_key
                   }
           } as TransitionSettings
         ])
@@ -181,10 +272,26 @@ export function listProjects(): Project[] {
   }))
 }
 
+/**
+ * Savepoint names must be UNIQUE per invocation.
+ *
+ * SQLite's RELEASE frees the named savepoint AND every savepoint opened
+ * after it. `saveProject` is now called from inside larger operations
+ * that themselves call it again (Accept, then the prompt rebuild), so a
+ * shared name meant an inner RELEASE silently discarded the outer one —
+ * and the outer RELEASE then failed with "no such savepoint", masking
+ * whatever had actually gone wrong.
+ */
+let savepointSeq = 0
+
 /** Insert-or-replace the whole project graph in one transaction. */
 export function saveProject(project: Project): void {
   const db = getDb()
-  db.run('BEGIN')
+  // SAVEPOINT, not BEGIN: this is called from inside larger operations
+  // (Accept, and the prompt rebuild it triggers), and SQLite refuses a
+  // nested BEGIN. A savepoint behaves as a transaction when outermost.
+  const sp = `save_project_${++savepointSeq}`
+  db.run(`SAVEPOINT ${sp}`)
   try {
     run(
       db,
@@ -230,6 +337,38 @@ export function saveProject(project: Project): void {
       )
     })
 
+    // ── MOTION SEGMENTS, REPLACED WHOLE LIKE THE TRANSITIONS ──────────
+    //
+    // Only when the project actually carries the field. `undefined` means
+    // a caller that predates single-image motion and knows nothing about
+    // it — deleting the rows on its behalf would silently drop segments
+    // an older code path never intended to touch.
+    if (project.motionSegments !== undefined) {
+      run(db, 'DELETE FROM motion_segments WHERE project_id = ?', [project.id])
+      for (const segment of project.motionSegments) {
+        run(
+          db,
+          `INSERT INTO motion_segments
+             (id, project_id, image_id, motion, duration_sec, status,
+              clip_name, clip_original_name, clip_source, prompt, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            segment.id,
+            project.id,
+            segment.imageId,
+            segment.motion,
+            segment.durationSec,
+            segment.status,
+            segment.clip?.storedName ?? null,
+            segment.clip?.originalName ?? null,
+            segment.clip?.source ?? null,
+            segment.prompt,
+            segment.createdAt
+          ]
+        )
+      }
+    }
+
     run(db, 'DELETE FROM transitions WHERE project_id = ?', [project.id])
     for (const [pairKey, t] of Object.entries(project.transitions)) {
       run(
@@ -239,8 +378,14 @@ export function saveProject(project: Project): void {
             clip_name, clip_original_name, clip_source,
             prompt_base, prompt_motion, prompt_effective, prompt_basis,
             prompt_rationale, prompt_manually_edited, prompt_planned_at,
-            prompt_analysis_at, mode, mode_provenance)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            prompt_analysis_at, mode, mode_provenance,
+            operator_context_text, operator_context_at,
+            operator_context_status, operator_context_fingerprint,
+            prompt_evidence_source, prompt_evidence_fingerprint,
+            prompt_operator_fingerprint, prompt_suggestion,
+            prompt_suggestion_at, prompt_suggestion_source,
+            prompt_suggestion_fingerprint)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           project.id,
           pairKey,
@@ -264,14 +409,44 @@ export function saveProject(project: Project): void {
           // but never the other.
           t.mode && t.mode !== 'auto' ? t.mode : null,
           // Only meaningful alongside a stored mode; auto has no author.
-          t.mode && t.mode !== 'auto' ? (t.modeProvenance ?? null) : null
+          t.mode && t.mode !== 'auto' ? (t.modeProvenance ?? null) : null,
+          // Written whenever it exists, independent of mode: it is a fact
+          // about the property, not a decision about the transition, and
+          // it must outlive any mode the pair happens to carry.
+          t.operatorContext?.text ?? null,
+          t.operatorContext?.createdAt ?? null,
+          // Written explicitly rather than left to the column default:
+          // the whole point of the lifecycle is that `needs-review` must
+          // persist, and a default of 'current' would silently re-trust
+          // text the operator has not confirmed.
+          t.operatorContext?.status ?? 'current',
+          t.operatorContext?.analysisFingerprintAtCreation ?? null,
+          // What the wording was built from. Absent reads downstream as
+          // "unknown", which makes the prompt stale rather than assumed
+          // to match — see isPromptBasisCurrent.
+          t.promptProvenance?.evidenceSource ?? null,
+          t.promptProvenance?.evidenceFingerprint ?? null,
+          t.promptProvenance?.operatorContextFingerprint ?? null,
+          // A suggestion held beside a hand-written prompt, never in it.
+          t.promptSuggestion?.text ?? null,
+          t.promptSuggestion?.createdAt ?? null,
+          t.promptSuggestion?.evidenceSource ?? null,
+          t.promptSuggestion?.evidenceFingerprint ?? null
         ]
       )
     }
 
-    db.run('COMMIT')
+    db.run(`RELEASE ${sp}`)
   } catch (err) {
-    db.run('ROLLBACK')
+    // The ORIGINAL error is what matters. A failed rollback — the
+    // savepoint already gone because an outer unit unwound first —
+    // must not replace it with a confusing "no such savepoint".
+    try {
+      db.run(`ROLLBACK TO ${sp}`)
+      db.run(`RELEASE ${sp}`)
+    } catch (rollbackErr) {
+      console.error('[projects] rollback could not run', rollbackErr)
+    }
     throw err
   }
   scheduleFlush()
