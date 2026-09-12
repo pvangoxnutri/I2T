@@ -5,6 +5,40 @@ const SUCCESS = { ok: true, message: 'Thank you. Your inquiry has been sent.' };
 const SEND_ERROR = 'We couldn’t send your inquiry. Please try again or email contact@image2transition.com.';
 const TYPES = { video: 'Create a video', agency: 'Software / Agency', partnership: 'Partnership', other: 'Other' };
 const ALLOWED_FIELDS = new Set(['name', 'email', 'company', 'message', 'website', 'inquiryType']);
+const ENV_NAMES = ['RESEND_API_KEY', 'CONTACT_TO_EMAIL', 'CONTACT_FROM_EMAIL'];
+// Development conveniences, never production values. `onboarding@resend.dev`
+// is Resend's sandbox sender and may only deliver to the Resend account's own
+// address, so a production deployment that silently adopted it would fail with
+// a 403 on every real inquiry. `requireExplicitEnv` keeps both out of the
+// production path — see where they are applied below.
+const DEV_RECIPIENT = 'contact@image2transition.com';
+const DEV_SENDER = 'onboarding@resend.dev';
+const PROVIDER_ERROR_NAMES = new Set([
+  'validation_error', 'missing_api_key', 'invalid_api_key', 'restricted_api_key',
+  'invalid_access', 'rate_limit_exceeded', 'application_error', 'internal_server_error',
+  'missing_required_field', 'invalid_parameter', 'not_found', 'method_not_allowed',
+  'invalid_region', 'invalid_idempotent_request', 'concurrent_idempotent_requests',
+  'daily_quota_exceeded', 'monthly_quota_exceeded'
+]);
+
+function safeProviderError(body) {
+  // Only fixed, reviewed descriptions enter logs. Provider messages can echo
+  // credentials or visitor fields, so never log raw bodies or arbitrary text.
+  const name = PROVIDER_ERROR_NAMES.has(body?.name) ? body.name : 'unknown_error';
+  const message = typeof body?.message === 'string' ? body.message : '';
+  const descriptions = [
+    [/^The [a-z0-9.-]+ domain is not verified\./i, 'The sending domain is not verified in Resend.'],
+    [/^You can only send testing emails to your own email address/i, 'The development sender is restricted to the Resend account email address.'],
+    [/^(?:API key is invalid|Invalid API key)\.?$/i, 'The API key is invalid.'],
+    [/^Missing API key\.?$/i, 'The API key is missing.'],
+    [/^This API key is restricted/i, 'The API key does not have the required sending permission.'],
+    [/^Invalid `?from`? field/i, 'The sender field is invalid.'],
+    [/^Too many requests/i, 'Resend rate limit exceeded.'],
+    [/^You have reached your (?:daily|monthly) email/i, 'Resend email quota exceeded.'],
+    [/^Same idempotency key used with different request payload/i, 'The retry identifier was reused with a different email payload.']
+  ];
+  return { name, message: descriptions.find(([pattern]) => pattern.test(message))?.[1] || 'Provider message omitted; inspect the Resend dashboard for further details.' };
+}
 
 function response(status, body, extraHeaders = {}) {
   return Response.json(body, { status, headers: {
@@ -91,8 +125,13 @@ export function createRateLimiter({ limit = 5, windowMs = 10 * 60_000, maxClient
   };
 }
 
-export function createInquiryHandler({ fetchImpl = fetch, now = () => Date.now(), rateLimit = createRateLimiter() } = {}) {
-  return async function handleInquiry(request, env, { clientKey = 'unknown' } = {}) {
+export function createInquiryHandler({ fetchImpl = fetch, now = () => Date.now(), rateLimit = createRateLimiter(), logger = console } = {}) {
+  return async function handleInquiry(request, env = {}, { clientKey = 'unknown', requireExplicitEnv = false } = {}) {
+    // ANSWERS "DID THE REQUEST REACH THE FUNCTION AT ALL". Without this, a
+    // deployment or routing fault and a configuration fault look identical
+    // from the browser, because both end at the same generic message. The
+    // method is the only field logged: no headers, no body, no visitor data.
+    logger.info('[inquiry]', { event: 'request_received', method: request.method });
     if (request.method !== 'POST') return response(405, { ok: false, error: 'Use the inquiry form to send a message.' }, { Allow: 'POST' });
     const ownOrigin = new URL(request.url).origin;
     if (request.headers.get('origin') !== ownOrigin || request.headers.get('sec-fetch-site') === 'cross-site') {
@@ -111,10 +150,29 @@ export function createInquiryHandler({ fetchImpl = fetch, now = () => Date.now()
     // Bots receive the same success response, but no email is sent.
     if (data.website) return response(200, SUCCESS);
 
-    const key = env.RESEND_API_KEY?.trim();
-    const to = env.CONTACT_TO_EMAIL?.trim() || 'contact@image2transition.com';
-    const from = env.CONTACT_FROM_EMAIL?.trim() || 'onboarding@resend.dev';
-    if (!key || !validEmail(to) || !validEmail(from)) return response(503, { ok: false, error: SEND_ERROR });
+    const config = Object.fromEntries(ENV_NAMES.map(name => [name, typeof env[name] === 'string' ? env[name].trim() : '']));
+    const required = requireExplicitEnv ? ENV_NAMES : ['RESEND_API_KEY'];
+    const missing = required.filter(name => !config[name]);
+    if (missing.length) {
+      logger.error('[inquiry]', { event: 'configuration_missing', missing });
+      return response(503, { ok: false, error: SEND_ERROR });
+    }
+    const key = config.RESEND_API_KEY;
+    // ── THE SANDBOX SENDER CANNOT REACH PRODUCTION ──────────────────
+    //
+    // Production passes `requireExplicitEnv`, so an empty address was
+    // already refused above with a named 503. Stating the condition here
+    // too means the fallback is unreachable by construction rather than
+    // by the ordering of an earlier check: no future edit can let a
+    // missing CONTACT_FROM_EMAIL quietly become the restricted Resend
+    // sandbox sender on the live site.
+    const to = config.CONTACT_TO_EMAIL || (requireExplicitEnv ? '' : DEV_RECIPIENT);
+    const from = config.CONTACT_FROM_EMAIL || (requireExplicitEnv ? '' : DEV_SENDER);
+    const invalid = [['CONTACT_TO_EMAIL', to], ['CONTACT_FROM_EMAIL', from]].filter(([, value]) => !validEmail(value)).map(([name]) => name);
+    if (invalid.length) {
+      logger.error('[inquiry]', { event: 'configuration_invalid', invalid });
+      return response(503, { ok: false, error: SEND_ERROR });
+    }
     const suppliedId = request.headers.get('idempotency-key');
     if (suppliedId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(suppliedId)) {
       return response(400, { ok: false, error: 'Please reload the page and try again.' });
@@ -129,6 +187,16 @@ export function createInquiryHandler({ fetchImpl = fetch, now = () => Date.now()
       '<h2>Image2Transition website inquiry</h2>' +
       details.map(([label, value]) => `<p><strong>${label}:</strong> ${escapeHtml(value)}</p>`).join('') +
       `<h3>Message</h3><p>${escapeHtml(data.message).replace(/\n/g, '<br>')}</p></body></html>`;
+    // ANSWERS "WAS THE PROVIDER EVER CALLED". A log line here with no
+    // matching resend_response means the request died in transport rather
+    // than being rejected by Resend. The booleans say whether the two
+    // addresses came from configuration, which is what separates a real
+    // sender from a development default; neither address is logged.
+    logger.info('[inquiry]', {
+      event: 'resend_attempt',
+      fromConfigured: Boolean(config.CONTACT_FROM_EMAIL),
+      toConfigured: Boolean(config.CONTACT_TO_EMAIL)
+    });
     try {
       const sent = await fetchImpl('https://api.resend.com/emails', {
         method: 'POST',
@@ -137,15 +205,20 @@ export function createInquiryHandler({ fetchImpl = fetch, now = () => Date.now()
           subject: `Image2Transition website inquiry — ${data.name}`, text, html }),
         signal: AbortSignal.timeout(10_000)
       });
+      logger.info('[inquiry]', { event: 'resend_response', status: sent.status });
       if (!sent.ok) {
-        // Log only a status code. Never log provider bodies, keys, or visitor data.
-        console.warn(`[inquiry] Email provider returned HTTP ${sent.status}.`);
+        const providerError = await readLimitedJson(sent).catch(() => null);
+        logger.error('[inquiry]', { event: 'resend_error', status: sent.status, ...safeProviderError(providerError) });
         return response(502, { ok: false, error: SEND_ERROR });
       }
-      const result = await sent.json();
-      if (typeof result?.id !== 'string' || !result.id) return response(502, { ok: false, error: SEND_ERROR });
+      const result = await readLimitedJson(sent).catch(() => null);
+      if (typeof result?.id !== 'string' || !result.id) {
+        logger.error('[inquiry]', { event: 'resend_invalid_response', status: sent.status });
+        return response(502, { ok: false, error: SEND_ERROR });
+      }
       return response(200, SUCCESS);
-    } catch {
+    } catch (error) {
+      logger.error('[inquiry]', { event: 'resend_request_failed', reason: ['TimeoutError', 'AbortError'].includes(error?.name) ? 'timeout' : 'transport_error' });
       return response(502, { ok: false, error: SEND_ERROR });
     }
   };

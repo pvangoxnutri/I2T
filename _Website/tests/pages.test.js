@@ -38,4 +38,25 @@ test('Pages route sends through server env bindings on the production HTTPS orig
   }), env: {} });
   assert.equal(missing.status, 503);
   assert.equal(calls.length, 1, 'Missing Pages bindings do not fall back to local secrets');
+
+  // ── THE SANDBOX SENDER MUST NEVER REACH PRODUCTION ────────────────
+  //
+  // The live failure mode this pins: a deployment that has the API key and
+  // the recipient but no CONTACT_FROM_EMAIL. Falling back to Resend's
+  // restricted `onboarding@resend.dev` would send every real inquiry into a
+  // 403. Production must refuse the request instead, and name the binding.
+  let clientIp = 3;
+  for (const partial of [
+    { RESEND_API_KEY: 'mock-pages-secret', CONTACT_TO_EMAIL: 'contact@image2transition.com' },
+    { RESEND_API_KEY: 'mock-pages-secret', CONTACT_FROM_EMAIL: 'contact@image2transition.com' },
+    { CONTACT_TO_EMAIL: 'contact@image2transition.com', CONTACT_FROM_EMAIL: 'contact@image2transition.com' }
+  ]) {
+    const refused = await onRequest({ request: new Request(origin + '/api/inquiry', {
+      method: 'POST',
+      headers: { origin, 'content-type': 'application/json', 'CF-Connecting-IP': `192.0.2.${clientIp++}` },
+      body: JSON.stringify({ name: 'Pages test', email: 'visitor@example.com', message: 'Partial binding test.' })
+    }), env: partial });
+    assert.equal(refused.status, 503, 'an incomplete production environment is refused');
+    assert.equal(calls.length, 1, 'and no email is attempted with a defaulted address');
+  }
 });
