@@ -114,19 +114,78 @@ export function outputDims(defaults: ExportDefaults): { w: number; h: number } {
 
 // ── Probing ──────────────────────────────────────────────────────────────
 
-/** Clip duration in seconds via ffmpeg's own header dump (no ffprobe in
- * ffmpeg-static). */
-export function probeDurationSec(file: string): number {
+/**
+ * What a clip is, read from ffmpeg's own header dump.
+ *
+ * ONE SPAWN FOR BOTH FACTS. The assembly needs each clip's duration to
+ * plan seams and its frame rate to decide the output rate, and probing
+ * twice would double the number of processes an export starts — 44 clips
+ * is a real project, not a hypothetical one.
+ *
+ * (ffmpeg-static ships no ffprobe, which is why this parses stderr.)
+ */
+export function probeStreamInfo(file: string): { durationSec: number; fps: number } {
   const res = spawnSync(ffmpegPath(), ['-hide_banner', '-i', file], {
     encoding: 'utf8',
     timeout: 20_000
   })
-  // ffmpeg exits non-zero without an output file — the Duration line is in
+  // ffmpeg exits non-zero without an output file — the header lines are in
   // stderr regardless.
-  const match = `${res.stderr}`.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/)
-  if (!match) return 0
-  const [, h, m, s, cs] = match
-  return Number(h) * 3600 + Number(m) * 60 + Number(s) + Number(`0.${cs}`)
+  const text = `${res.stderr}`
+  const duration = text.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/)
+  const rate = text.match(/,\s*([0-9]+(?:\.[0-9]+)?)\s*fps\b/)
+  const fps = rate ? Number(rate[1]) : 0
+  return {
+    durationSec: duration
+      ? Number(duration[1]) * 3600 + Number(duration[2]) * 60 + Number(duration[3]) +
+        Number(`0.${duration[4]}`)
+      : 0,
+    // A nonsense rate is treated as unknown rather than propagated into the
+    // filter graph, where it would decide the timebase of the whole export.
+    fps: Number.isFinite(fps) && fps > 0 && fps <= 240 ? fps : 0
+  }
+}
+
+/** Clip duration in seconds. */
+export function probeDurationSec(file: string): number {
+  return probeStreamInfo(file).durationSec
+}
+
+/**
+ * WHAT THE FINAL ENCODE COSTS AND KEEPS.
+ *
+ * Two profiles, one of which is the product's. See `quality` on
+ * AssembleOptions for which callers use which, and the encoder arguments
+ * below for why these numbers.
+ */
+export type QualityProfile = 'high' | 'standard'
+
+export const QUALITY_PROFILES: Record<QualityProfile, { preset: string; crf: string }> = {
+  high: { preset: 'slow', crf: '16' },
+  standard: { preset: 'medium', crf: '18' }
+}
+
+/**
+ * THE RATE THE SOURCES ARE ALREADY IN.
+ *
+ * ── WHY THE CONFIGURED RATE IS NOT SIMPLY OBEYED ─────────────────────
+ *
+ * Every clip the provider returns is 24 fps, and the export default was
+ * 25. Retiming 24 to 25 duplicates roughly one frame per second, and a
+ * duplicated frame in a slow continuous camera move is visible as a
+ * stutter — the one artefact a "cinematic" tour cannot have. Nothing was
+ * gained in exchange: the sources hold no 25th frame to show.
+ *
+ * So when every clip agrees on a rate, that rate is the output rate and
+ * no frame is invented or dropped. When they disagree there is no single
+ * honest answer, and the operator's configured rate decides, exactly as
+ * before. Stills have no rate of their own and never vote.
+ */
+export function sourceFrameRate(rates: number[], configured: number): number {
+  const known = rates.filter((rate) => rate > 0)
+  if (known.length === 0) return configured
+  const first = Math.round(known[0] * 1000)
+  return known.every((rate) => Math.round(rate * 1000) === first) ? known[0] : configured
 }
 
 // ── Assembly ─────────────────────────────────────────────────────────────
@@ -175,20 +234,44 @@ export interface AssembleOptions {
   seamOverrideSec?: (number | null)[]
   /**
    * How source frames meet the output frame. Defaults to `contain`, the
-   * long-standing behaviour. `cover` crops to fill and is what a vertical
-   * export needs — see shared/exportFormat. Neither ever stretches.
+   * editor/comparison behaviour. Both customer export formats pass
+   * `cover` explicitly — see shared/exportFormat. Neither ever stretches.
    */
   fit?: FrameFit
   /**
    * Background where a `contain` fit leaves the frame unfilled.
    *
-   * Defaults to black, which is what every export did before formats
-   * existed and what a desktop letterbox should be. Passed per export
-   * rather than set globally: making it white everywhere changed the
-   * normal export for every non-16:9 source.
+   * Defaults to black for internal contain assemblies. Customer exports
+   * use cover, so this colour does not enter their filter graph.
    */
   padColor?: 'black' | 'white'
   defaults: ExportDefaults
+  /**
+   * HOW MUCH THE ENCODER IS ALLOWED TO SPEND.
+   *
+   * Defaults to `high`, because the default caller is a file a customer
+   * receives and keeps. `standard` exists for the renders the operator
+   * throws away — the editor preview is rebuilt after every trim, and
+   * making them wait for a near-lossless encode of a working file buys
+   * nothing they can see at preview size.
+   *
+   * Deliberately not a setting: the product has one delivery quality.
+   */
+  quality?: QualityProfile
+  /**
+   * THE RATE THE FINISHED FILE RUNS AT, when it differs from the sources.
+   *
+   * Set by the customer export path to CUSTOMER_EXPORT_FPS. Each clip is
+   * raised to it by motion-compensated interpolation, never by repeating
+   * frames. Omitted — every internal render — means the output follows
+   * its sources exactly as before, which is what keeps the editor
+   * preview cheap.
+   *
+   * The SEAM ARITHMETIC does not move with it. Seams trim one SOURCE
+   * frame at each blended joint, so that trim stays measured in source
+   * frames and the timeline's duration is unchanged by this setting.
+   */
+  targetFps?: number
   /** Full-frame transparent PNG overlays, applied bottom-up in order
    * (watermark first, signature last so it stays on top). */
   overlayPngPaths: string[]
@@ -207,7 +290,7 @@ export interface AssembleHandle {
 }
 
 /**
- * Normalizes every clip (scale-with-pad to the target frame, square pixels,
+ * Normalizes every clip (cover/crop or contain/pad, square pixels,
  * uniform fps, audio dropped), concatenates them in order and composites
  * the overlay layers — one FFmpeg pass, H.264/yuv420p MP4 out.
  */
@@ -215,8 +298,8 @@ export function assemble(options: AssembleOptions): AssembleHandle {
   const { clipPaths, defaults, overlayPngPaths, outputPath, onProgress } = options
   const fit: FrameFit = options.fit ?? 'contain'
   const padColor = options.padColor ?? 'black'
+  const profile = QUALITY_PROFILES[options.quality ?? 'high']
   const { w, h } = outputDims(defaults)
-  const fps = defaults.fps
   const blend: SeamBlend = options.seamBlend ?? defaults.seamBlend ?? 'subtle'
 
   // A plain clip list is the ordinary case and stays exactly as it was.
@@ -235,16 +318,33 @@ export function assemble(options: AssembleOptions): AssembleHandle {
   // A stated OUT point needs the trim filter even when the IN point is 0
   // and no seam applies — otherwise the tail of the file would play on.
   const hasOutPoint = segments.map((s) => s.kind !== 'still' && s.sourceEndSec !== undefined)
+  // One probe per clip, read once for both the duration and the rate.
+  const probes = segments.map((s) =>
+    s.kind === 'still' ? { durationSec: 0, fps: 0 } : probeStreamInfo(s.path)
+  )
   const durations = segments.map((s, i) => {
     if (s.kind === 'still') return s.holdSeconds ?? 1.5
-    const full = probeDurationSec(s.path)
+    const full = probes[i].durationSec
     const end = s.sourceEndSec !== undefined ? Math.min(s.sourceEndSec, full) : full
     return Math.max(0, Math.round((end - sourceIn[i]) * 1000) / 1000)
   })
+  // ── TWO RATES, AND THEY ARE NOT THE SAME QUESTION ──────────────────
+  //
+  // `sourceFps` is what the material IS. It owns the seam arithmetic,
+  // because a seam trims one source frame — the duplicated key frame the
+  // provider renders at both sides of a joint. Measuring that trim in
+  // output frames instead would leave most of the duplicate in place AND
+  // change the timeline's total duration.
+  //
+  // `outputFps` is what the finished file RUNS at. It owns the filter
+  // graph's timebase and the encoder. For a customer export it is higher
+  // than the source, and the gap is filled by interpolation below.
+  const sourceFps = sourceFrameRate(probes.map((p) => p.fps), defaults.fps)
+  const outputFps = options.targetFps ?? sourceFps
   const plan = planSeams({
     durationsSec: durations,
     blend,
-    fps,
+    fps: sourceFps,
     seamOverrideSec: options.seamOverrideSec,
     // A held still has no duplicated key frame to remove, so trimming one
     // would only shorten the hold.
@@ -260,7 +360,13 @@ export function assemble(options: AssembleOptions): AssembleHandle {
       // A looped image for a fixed duration. `-t` before `-i` bounds the
       // input itself, so the still can never run forever if a downstream
       // filter changes.
-      args.push('-loop', '1', '-framerate', String(fps), '-t', String(segment.holdSeconds ?? 1.5))
+      //
+      // Generated at the OUTPUT rate. A photograph has no motion to
+      // interpolate, so it is simply held at the timeline's rate and
+      // arrives already matching everything it will be joined to.
+      args.push(
+        '-loop', '1', '-framerate', String(outputFps), '-t', String(segment.holdSeconds ?? 1.5)
+      )
     }
     args.push('-i', segment.path)
   }
@@ -299,32 +405,78 @@ export function assemble(options: AssembleOptions): AssembleHandle {
     //   contain  scale down until it fits, pad the remainder black
     //   cover    scale up until it fills, crop the overflow evenly
     //
-    // `cover` is what makes a vertical export a vertical video rather
-    // than a landscape clip marooned in a tall black rectangle. The crop
-    // is centred, so the middle of every frame survives.
+    // Both customer formats use cover. FFmpeg's default crop offsets
+    // are (iw-ow)/2 and (ih-oh)/2: the crop is centred. outputDims makes
+    // the cropped frame even before yuv420p conversion and H.264 encoding;
+    // the intermediate scale can be odd without reaching the encoder.
+    // Overlays are composited later, in the final frame's coordinates.
     //
-    // ── AND WHEN PADDING DOES HAPPEN, THE FORMAT DECIDES ITS COLOUR ─
+    // ── THE SCALER IS NAMED, NOT INHERITED ──────────────────────────
     //
-    // `cover` never pads: it scales up until the frame is filled and
-    // crops the overflow, which is what makes a vertical export a
-    // vertical video. `contain` pads, and the colour comes from the
-    // export format — black for the desktop letterbox it has always
-    // been, white where a fallback should read as margin.
+    // Every customer export is an UPSCALE: the provider returns about
+    // 1176x784 and the frame is 1920x1080, a factor of 1.63. swscale's
+    // default is bicubic, which on that kind of enlargement softens
+    // exactly the edges a property video is judged on — window frames,
+    // tile grout, skirting boards. Lanczos keeps them, at a cost in
+    // encode time nobody watching the file will ever see.
+    //
+    // The aspect ratio is preserved by `force_original_aspect_ratio`
+    // BEFORE the crop, so the scaler never stretches; lanczos changes
+    // how the pixels are resampled, never their geometry.
     const fitChain =
       fit === 'cover'
-        ? `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}`
-        : `scale=${w}:${h}:force_original_aspect_ratio=decrease,` +
+        ? `scale=${w}:${h}:force_original_aspect_ratio=increase:flags=lanczos,crop=${w}:${h}`
+        : `scale=${w}:${h}:force_original_aspect_ratio=decrease:flags=lanczos,` +
           `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=${padColor}`
 
+    // ── REACHING THE OUTPUT RATE ────────────────────────────────────
+    //
+    // PER SEGMENT, AND BEFORE THE JOINTS. Interpolating the finished
+    // timeline instead would run motion estimation straight across every
+    // cut and every crossfade: at a cut it would invent frames morphing
+    // one room into another, and in a dissolve it would be estimating
+    // motion on a picture that is two rooms superimposed. Interpolating
+    // each segment on its own means the estimator only ever sees one
+    // continuous camera move, which is what it is good at, and the
+    // joints are then made between streams that already run at the
+    // output rate.
+    //
+    // A STILL IS HELD, NOT INTERPOLATED. There is no motion between two
+    // identical frames, so `fps` simply presents the photograph at the
+    // timeline's rate. Spending minutes of motion estimation to compute
+    // the same pixels would be waste, not quality.
+    //
+    // ── AND WHY `fps` STILL FOLLOWS IT ──────────────────────────────
+    //
+    // `minterpolate` emits frames BETWEEN input frames, so its output
+    // stops at the LAST input frame rather than at the end of that
+    // frame's screen time. Every interpolated segment therefore came out
+    // about one source frame short, and across a timeline that
+    // accumulated: 1.60s segments delivered 1.53s and a four-segment
+    // export lost 0.15s. Seam offsets are computed in seconds from the
+    // planned lengths, so segments that quietly run short also drag the
+    // crossfades out of position.
+    //
+    // `fps` closes exactly that final gap and nothing else: everywhere
+    // before it the timestamps already sit on the output grid and pass
+    // straight through. The one repeated frame it adds at the tail is
+    // not an invention — during that interval the source shows that same
+    // frame held, which is what is reproduced.
+    const clipFps = probes[i].fps || sourceFps
+    const interpolated = segments[i].kind === 'clip' && outputFps > clipFps + 0.001
+    const rateChain = interpolated
+      ? `minterpolate=fps=${outputFps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir,fps=${outputFps}`
+      : `fps=${outputFps}`
+
     chains.push(
-      `[${i}:v]${trimmed}${fitChain},setsar=1,fps=${fps},` +
+      `[${i}:v]${trimmed}${fitChain},setsar=1,${rateChain},` +
         // A COMMON TIMEBASE. A looped still enters the graph with a
         // different one from a decoded video, and xfade refuses to join
         // two inputs whose timebases disagree — "does not match the
         // corresponding second input link xfade timebase". Concat is more
         // forgiving, which is why this only surfaced once cuts and
         // crossfades put stills and clips in the same timeline.
-        `settb=1/${fps},format=yuv420p[v${i}]`
+        `settb=1/${outputFps},format=yuv420p[v${i}]`
     )
     labels.push(`[v${i}]`)
   })
@@ -348,11 +500,11 @@ export function assemble(options: AssembleOptions): AssembleHandle {
         chains.push(
           `[${previous}][v${i + 1}]xfade=transition=fade:` +
             `duration=${plan.seamSec[i]}:offset=${plan.offsetSec[i]},` +
-            `settb=1/${fps},setpts=PTS-STARTPTS[${out}]`
+            `settb=1/${outputFps},setpts=PTS-STARTPTS[${out}]`
         )
       } else {
         chains.push(
-          `[${previous}][v${i + 1}]concat=n=2:v=1:a=0,settb=1/${fps},setpts=PTS-STARTPTS[${out}]`
+          `[${previous}][v${i + 1}]concat=n=2:v=1:a=0,settb=1/${outputFps},setpts=PTS-STARTPTS[${out}]`
         )
       }
       previous = out
@@ -378,16 +530,43 @@ export function assemble(options: AssembleOptions): AssembleHandle {
     chains.join(';'),
     '-map',
     `[${current}]`,
+    // ── THE ONE LOSSY STEP IN THE WHOLE CHAIN ───────────────────────
+    //
+    // The raw provider clip reaches this encoder untouched — there is no
+    // intermediate render between them — so whatever this pass discards
+    // is discarded for good, and it is the only place worth spending on.
+    //
+    // WHAT WAS WRONG. `veryfast` at CRF 19 wrote a 1920x1080 file at
+    // about 4.2 Mb/s from sources carrying 5.9 Mb/s at 1176x784 — a
+    // third of the bits per pixel the source had, on material that had
+    // just been ENLARGED and so needed more, not fewer. The result was
+    // visibly softer than the clips it was built from.
+    //
+    // `slow` at CRF 16 is the customer-facing default. CRF 16 is close
+    // to visually lossless for this material, and `slow` is what makes
+    // that affordable in bits: the same quality target costs markedly
+    // less bitrate than a fast preset, because the encoder is allowed to
+    // actually look for redundancy. An export is rendered once and
+    // watched many times, so the trade runs the right way.
+    //
+    // `high` is stated rather than left to libx264's default so the
+    // profile is a decision on the record; it is what an 8-bit 4:2:0
+    // desktop/social deliverable should be, and every target platform
+    // has taken High for a decade. No maxrate or bufsize is set: a cap
+    // would reintroduce exactly the starvation this change removes, and
+    // no delivery target here demands one.
     '-c:v',
     'libx264',
+    '-profile:v',
+    'high',
     '-preset',
-    'veryfast',
+    profile.preset,
     '-crf',
-    '19',
+    profile.crf,
     '-pix_fmt',
     'yuv420p',
     '-r',
-    String(fps),
+    String(outputFps),
     '-an',
     '-movflags',
     '+faststart',

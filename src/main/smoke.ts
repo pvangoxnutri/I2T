@@ -54,7 +54,7 @@ import {
 import { assessAnalysisQuality, qualityHeadline } from '../shared/analysisQuality'
 import { assessAiGenerationReadiness } from '../shared/aiGenerationReadiness'
 import { feedAnalysisStatus } from '../shared/feedAnalysisState'
-import { applyExportFormat } from '../shared/exportFormat'
+import { applyExportFormat, CUSTOMER_EXPORT_FPS } from '../shared/exportFormat'
 import { outputDims } from './services/ffmpegService'
 import { getFeedImages, getFeedSequenceIds } from '../shared/feedSequence'
 import { pairIndexOf } from '../shared/previewSource'
@@ -93,7 +93,7 @@ import {
   resolveImageRequest
 } from './files'
 import { projectDir, projectImagesDir, projectsRoot } from './paths'
-import { assemble, ffmpegPath, ffmpegStatus, probeDurationSec } from './services/ffmpegService'
+import { assemble, ffmpegPath, ffmpegStatus, probeDurationSec, probeStreamInfo } from './services/ffmpegService'
 import { handleMediaRequest } from './mediaProtocol'
 import { mergeSettingsForSave } from './services/productSettings'
 import { repairQualityHeldStatuses } from './services/transitionStatusRepair'
@@ -3960,13 +3960,21 @@ function testExportFormats(): void {
   // with black bars down both sides. Cropping a little off the top and
   // bottom is the better trade. Neither format pads; neither stretches.
   const computer = applyExportFormat(base, 'computer')
-  assert.strictEqual(computer.defaults.aspectRatio, '16:9', 'desktop keeps the project shape')
+  assert.strictEqual(computer.defaults.aspectRatio, '16:9', 'Standard is landscape')
   assert.strictEqual(computer.fit, 'cover', 'and fills the frame rather than padding it')
   assert.deepStrictEqual(
     outputDims(computer.defaults),
     { w: 1920, h: 1080 },
     'at the existing dimensions'
   )
+
+  // ── BOTH DELIVERABLES RUN AT THE SAME RATE ─────────────────────────
+  //
+  // The provider returns 24 fps and a slow camera move at 24 judders on
+  // a phone. 120 is what the operator judged best against 60 and 90 on
+  // real material. Pinned here because it is a product decision, not a
+  // tuning constant: changing it changes every file a customer receives.
+  assert.strictEqual(CUSTOMER_EXPORT_FPS, 120, 'customer exports are delivered at 120 fps')
 
   // Instagram is vertical and fills the phone screen.
   const insta = applyExportFormat(base, 'instagram')
@@ -3987,6 +3995,17 @@ function testExportFormats(): void {
   // before formats existed still renders correctly.
   assert.strictEqual(applyExportFormat(base, undefined).fit, 'cover')
   assert.strictEqual(applyExportFormat(base, null).defaults.aspectRatio, '16:9')
+
+  // Standard must remain 16:9 even when the project/editor uses another shape.
+  for (const aspectRatio of ['9:16', '1:1', '4:5'] as const) {
+    const projectDefaults = { ...base, aspectRatio }
+    for (const format of ['computer', undefined, null] as const) {
+      const standard = applyExportFormat(projectDefaults, format)
+      assert.deepStrictEqual(outputDims(standard.defaults), { w: 1920, h: 1080 })
+      assert.strictEqual(standard.fit, 'cover')
+      assert.strictEqual(projectDefaults.aspectRatio, aspectRatio, 'project is unchanged')
+    }
+  }
 
   // ── AND THE FORMAT HAS TO SURVIVE THE JOB ──────────────────────────
   //
@@ -9496,7 +9515,12 @@ async function testWatermarkedTimelineExport(createdProjects: string[]): Promise
   resumeQueue()
   await waitFor(
     () => ['completed', 'failed'].includes(listJobs().find((j) => j.id === job.id)?.status ?? ''),
-    180_000,
+    // THIS IS A CUSTOMER EXPORT, so it is interpolated to the delivery
+    // rate and encoded at the delivery quality. Three minutes used to be
+    // ample and is now marginal — it passed one run and timed out the
+    // next on the same code. The limit exists to stop a hang, not to
+    // police the encoder's speed, so it is generous on purpose.
+    20 * 60_000,
     'watermarked timeline export'
   )
   const finished = listJobs().find((j) => j.id === job.id)!
@@ -14996,6 +15020,22 @@ async function testEditorPreview(workDir: string, created: string[]): Promise<vo
     timeout: 30_000
   })
   assert.match(`${probe.stderr}`, /Video: h264/, 'a real H.264 preview')
+
+  // ── THE PREVIEW IS NOT A DELIVERABLE ─────────────────────────────────
+  //
+  // Customer exports are interpolated to CUSTOMER_EXPORT_FPS, which costs
+  // minutes of motion estimation per export. A preview is rebuilt after
+  // every trim and nobody receives it, so it must follow its sources.
+  // If this ever reads the delivery rate, the working file has silently
+  // inherited it and every rebuild the operator waits through just got
+  // minutes longer for something only they will ever see.
+  const previewFps = probeStreamInfo(resolved!).fps
+  assert.notStrictEqual(
+    previewFps,
+    CUSTOMER_EXPORT_FPS,
+    'the editor preview does not inherit the customer delivery rate'
+  )
+  assert.strictEqual(previewFps, 25, 'it follows its own 25 fps sources')
 
   // ── It reaches no provider ───────────────────────────────────────────
   assert.strictEqual(

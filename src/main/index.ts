@@ -19,6 +19,7 @@ import { runUiProbe } from './uiProbe'
 import { pinUserDataDir } from './paths'
 import { runReanalyseProof } from './reanalyseProof'
 import { runExportProof } from './exportProof'
+import { runRealExportProof } from './realExportProof'
 import { repairRetiredPromptOntology } from './services/promptOntologyRepair'
 
 /**
@@ -268,6 +269,27 @@ app.whenReady().then(async () => {
       console.error('[export-proof] FAILED:', err)
       code = 1
     }
+    app.exit(code)
+    return
+  }
+
+  // Real customer export proof: `electron . --f2f-real-export-proof`.
+  //
+  // Runs the EXPORT VIDEO path the product uses — startExport, the queue
+  // job, the registered runner, exportAssembly, the filter graph — and
+  // reads the pixels of the MP4 that comes out. The only substitution is
+  // the native save dialog, via the F2F_EXPORT_DEST seam the product
+  // already has. It WRITES projects and settings, so point it at a
+  // scratch directory with --user-data-dir.
+  if (process.argv.includes('--f2f-real-export-proof')) {
+    let code = 0
+    try {
+      code = await runRealExportProof()
+    } catch (err) {
+      console.error('[real-export] FAILED:', err)
+      code = 1
+    }
+    flushNow()
     app.exit(code)
     return
   }

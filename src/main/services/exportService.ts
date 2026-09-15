@@ -3,6 +3,7 @@ import { qualityAllowsActive } from '../../shared/qualityValidation'
 import type { GenerationRecord, JobMetadata } from '../../shared/types'
 import {
   applyExportFormat,
+  CUSTOMER_EXPORT_FPS,
   DEFAULT_EXPORT_FORMAT,
   type ExportFormatId
 } from '../../shared/exportFormat'
@@ -487,6 +488,10 @@ export async function buildEditorPreview(
     // The watermark belongs to the customer preview export.
     overlayPngPaths: [],
     outputPath,
+    // A working file, rebuilt after every trim. The delivery encode is
+    // near-lossless and slow; making the operator wait for that on a
+    // preview they are about to invalidate buys nothing on screen.
+    quality: 'standard',
     seamBlend: defaults.seamBlend ?? 'subtle'
   }).done
 
@@ -619,6 +624,11 @@ const runExportJob = async (
       defaults: formatDefaults,
       fit,
       padColor,
+      // BOTH customer formats ship at the same rate. This is the only
+      // caller that sets it: the editor preview and Compare Assembly
+      // below deliberately stay at their sources' rate, because they are
+      // working files and interpolation would cost minutes per rebuild.
+      targetFps: CUSTOMER_EXPORT_FPS,
       overlayPngPaths,
       outputPath,
       onProgress: ctx.onProgress

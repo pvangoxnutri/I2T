@@ -22,9 +22,8 @@ import type { AspectRatio, ExportDefaults } from './types'
  *            evenly from both sides. Nothing is distorted; the edges are
  *            outside the frame.
  *
- * Desktop keeps CONTAIN because the material was shot for it and the
- * bars are usually nothing. Vertical uses COVER, because a 9:16 export
- * that is two thirds black is not a vertical video.
+ * Standard/Computer uses 16:9 COVER; Instagram uses 9:16 COVER.
+ * Both fill the output frame without padding or stretching the source.
  *
  * This choice belongs to the EXPORT. Source files, the project's own
  * aspect ratio and everything the editor previews are untouched.
@@ -41,24 +40,13 @@ export interface ExportFormat {
   /** Shown under the label in the export panel. */
   description: string
   /**
-   * Null means "whatever the project is set to" — the desktop export is
-   * deliberately not pinned to one shape.
+   * Null allows a future format to inherit the project shape. Both
+   * customer-facing formats explicitly choose their output aspect ratio.
    */
   aspectRatio: AspectRatio | null
   fit: FrameFit
   /**
-   * What fills the frame where the picture cannot.
-   *
-   * A PROPERTY OF THE FORMAT, not a global setting. The desktop export
-   * has always padded black and looks wrong any other way — it is a
-   * letterbox, and letterboxes are black. A vertical Reel is supposed to
-   * be full-bleed and never pads at all; white is declared only so that
-   * if a source ever could not fill it, the result reads as deliberate
-   * margin rather than as missing picture.
-   *
-   * This was briefly set globally to white, which changed every desktop
-   * export the operator makes — their sources are 3:2 in a 16:9 frame,
-   * so every one of them gained white pillarboxing.
+   * Background for contain fits only. Cover never reaches padding.
    */
   padColor: 'black' | 'white'
 }
@@ -67,8 +55,8 @@ export const EXPORT_FORMATS: ExportFormat[] = [
   {
     id: 'computer',
     label: 'Computer',
-    description: 'Original / landscape format',
-    aspectRatio: null,
+    description: 'Landscape · 16:9 · cropped to fill',
+    aspectRatio: '16:9',
     // ── FULL BLEED, LIKE THE REEL ─────────────────────────────────
     //
     // This was `contain`, and the operator's sources are about 3:2 in a
@@ -98,6 +86,30 @@ export const EXPORT_FORMATS: ExportFormat[] = [
 ]
 
 export const DEFAULT_EXPORT_FORMAT: ExportFormatId = 'computer'
+
+/**
+ * THE RATE EVERY CUSTOMER DELIVERABLE IS ENCODED AT.
+ *
+ * ── WHY A DELIVERED FILE RUNS FASTER THAN ITS SOURCES ────────────────
+ *
+ * The provider returns 24 fps. A slow continuous camera move through a
+ * property at 24 fps judders on a phone screen, which is where most of
+ * these are watched, and judder reads as "cheap video" however clean the
+ * picture is. Interpolating to 120 removes it: the operator compared 60,
+ * 90 and 120 on real material and 120 was decisively the best, most
+ * visibly on mobile.
+ *
+ * THIS IS NOT FRAME DUPLICATION. Duplicating frames to 120 would change
+ * the file's header and nothing a viewer can see. The assembly runs
+ * motion-compensated interpolation per segment — see ffmpegService — so
+ * the added frames carry real intermediate motion.
+ *
+ * It costs encode time, and deliberately so: an export is rendered once
+ * and watched many times. Internal renders (the editor preview, the
+ * assembly comparison) do NOT use this; they stay at their sources' rate
+ * and stay fast, because nobody receives them.
+ */
+export const CUSTOMER_EXPORT_FPS = 120
 
 export function exportFormat(id: ExportFormatId | null | undefined): ExportFormat {
   return EXPORT_FORMATS.find((f) => f.id === id) ?? EXPORT_FORMATS[0]

@@ -252,7 +252,7 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
             disabled={!canExport}
             title={
               canExport
-                ? 'Assemble the TIMELINE and export it in the project format'
+                ? 'Export the timeline as a 16:9 landscape video, cropped centrally to fill the frame'
                 : 'Requires at least two images and a clip on every transition'
             }
             onClick={() => void runExport('computer')}
@@ -287,7 +287,8 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
           {exportNote && <p className="export-note">{exportNote}</p>}
           <p className="field-hint">
             Both export the TIMELINE below the Feed — its order, its trims and whatever you
-            removed. The Reel is 1080×1920 and crops the sides to fill the frame rather than
+            removed. Standard is 16:9 and crops centrally to fill the frame without stretching.
+            The Reel is 1080×1920 and crops the sides to fill the frame rather than
             padding it. The checkboxes above decide what branding this file carries; Settings
             decide which asset, where, how big and how opaque.
           </p>
