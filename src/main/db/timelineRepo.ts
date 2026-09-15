@@ -55,6 +55,7 @@ interface ItemRow {
   start_offset_sec: number
   end_offset_sec: number
   seam_after_sec: number | null
+  playback_rate: number | null
 }
 
 /** The stored timeline, or null when this project has never had one. */
@@ -87,7 +88,10 @@ export function readTimeline(projectId: string): Timeline | null {
         endOffsetSec: r.end_offset_sec,
         // NULL survives as null — it means "the project's seam setting
         // decides", which is not the same as a stored zero.
-        seamAfterSec: r.seam_after_sec
+        seamAfterSec: r.seam_after_sec,
+        // NULL reads as normal speed. Stored as a number only once an
+        // operator has actually retimed the item.
+        playbackRate: r.playback_rate ?? undefined
       })
     )
   }
@@ -122,8 +126,9 @@ export function saveTimeline(timeline: Timeline): void {
         db,
         `INSERT INTO timeline_items
            (id, project_id, position, source_type, source_id, source_generation_id,
-            source_clip_name, source_image_name, start_offset_sec, end_offset_sec, seam_after_sec)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            source_clip_name, source_image_name, start_offset_sec, end_offset_sec, seam_after_sec,
+            playback_rate)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.id,
           timeline.projectId,
@@ -135,7 +140,8 @@ export function saveTimeline(timeline: Timeline): void {
           item.sourceImageName,
           item.startOffsetSec,
           item.endOffsetSec,
-          item.seamAfterSec
+          item.seamAfterSec,
+          item.playbackRate ?? null
         ]
       )
     }

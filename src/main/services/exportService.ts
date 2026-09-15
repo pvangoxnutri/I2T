@@ -3,13 +3,16 @@ import { qualityAllowsActive } from '../../shared/qualityValidation'
 import type { GenerationRecord, JobMetadata } from '../../shared/types'
 import {
   applyExportFormat,
-  CUSTOMER_EXPORT_FPS,
   DEFAULT_EXPORT_FORMAT,
-  type ExportFormatId
+  DEFAULT_MOTION_QUALITY,
+  motionQualityFps,
+  type ExportFormatId,
+  type MotionQuality
 } from '../../shared/exportFormat'
 import { getFeedImages } from '../../shared/feedSequence'
 import { motionSegmentLabel, motionSegments } from '../../shared/motionSegment'
 import { readTimeline } from '../db/timelineRepo'
+import { itemDurationSec, itemPlaybackRate } from '../../shared/timeline'
 import { app, BrowserWindow, dialog } from 'electron'
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -164,13 +167,21 @@ export function exportAssembly(project: Project): {
             path,
             // A still's "source range" IS its hold: splitting one just
             // makes two shorter holds of the same photograph.
-            holdSeconds: Math.max(0, item.endOffsetSec - item.startOffsetSec)
+            //
+            // Asked for at its FINISHED length. A photograph has no
+            // motion to retime, so a speed on a still is simply a
+            // shorter or longer hold, and `itemDurationSec` has already
+            // worked that out.
+            holdSeconds: itemDurationSec(item)
           }
         : {
             kind: 'clip',
             path,
             sourceStartSec: item.startOffsetSec,
-            sourceEndSec: item.endOffsetSec
+            sourceEndSec: item.endOffsetSec,
+            // The item's own speed. The assembly converts between source
+            // and timeline seconds from here on.
+            speed: itemPlaybackRate(item)
           }
     )
     if (i < timeline.items.length - 1) seams.push(item.seamAfterSec)
@@ -628,7 +639,7 @@ const runExportJob = async (
       // caller that sets it: the editor preview and Compare Assembly
       // below deliberately stay at their sources' rate, because they are
       // working files and interpolation would cost minutes per rebuild.
-      targetFps: CUSTOMER_EXPORT_FPS,
+      targetFps: motionQualityFps(job.metadata.motionQuality),
       overlayPngPaths,
       outputPath,
       onProgress: ctx.onProgress
@@ -673,14 +684,18 @@ export function exportJobMetadata(
   kind: ExportKind,
   outputPath: string,
   overlayFiles: string[],
-  format: ExportFormatId | undefined
+  format: ExportFormatId | undefined,
+  motionQuality: MotionQuality | undefined
 ): JobMetadata {
-  return { exportKind: kind, outputPath, overlayFiles, exportFormat: format }
+  return { exportKind: kind, outputPath, overlayFiles, exportFormat: format, motionQuality }
 }
 
 /** Test seam: the metadata a real export of this format would queue. */
-export function exportJobMetadataForTests(format: ExportFormatId): JobMetadata {
-  return exportJobMetadata('final', 'C:/out.mp4', [], format)
+export function exportJobMetadataForTests(
+  format: ExportFormatId,
+  motionQuality: MotionQuality = DEFAULT_MOTION_QUALITY
+): JobMetadata {
+  return exportJobMetadata('final', 'C:/out.mp4', [], format, motionQuality)
 }
 
 export async function startExport(
@@ -688,7 +703,8 @@ export async function startExport(
   kind: ExportKind,
   overlays: ExportOverlays,
   scheduledFor?: number | null,
-  format?: ExportFormatId
+  format?: ExportFormatId,
+  motionQuality?: MotionQuality
 ): Promise<ExportStartResult> {
   const project = listProjects().find((p) => p.id === projectId)
   if (!project) return { ok: false, missing: [], reason: 'Project not found' }
@@ -783,7 +799,7 @@ export async function startExport(
     // It survived a passing proof because the proof called assemble()
     // directly with the right arguments. It was testing the layer BELOW
     // the fault.
-    metadata: exportJobMetadata(kind, save.filePath, overlayFiles, format)
+    metadata: exportJobMetadata(kind, save.filePath, overlayFiles, format, motionQuality)
   })
 
   return { ok: true, jobId: job.id }

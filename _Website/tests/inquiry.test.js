@@ -116,3 +116,35 @@ test('rate limit is per trusted client and expires, with a bounded client map', 
   assert.equal(rateLimit('a', 1000), 0);
   assert.equal(rateLimit('c', 1000), 0);
 });
+
+/**
+ * THE MOTION LEVEL THE VISITOR PRICED IS THE ONE WE QUOTE BACK.
+ *
+ * The surcharge shown in the calculator depends on this field, so it has
+ * to survive the trip: chosen in the form, carried in the payload, and
+ * stated in the email that reaches the inbox. An inquiry that arrives
+ * without it is a Standard inquiry, which is what every inquiry sent
+ * before the choice existed was.
+ */
+test('video smoothness travels from the form into the email', async () => {
+  const premium = fixture();
+  await premium.handle(request({ ...good, motionQuality: 'premium120' }));
+  const premiumMail = JSON.parse(premium.calls[0][1].body);
+  assert.match(premiumMail.text, /Video smoothness: Premium Smooth — 120 FPS \(\+10%\)/);
+  assert.match(premiumMail.html, /Premium Smooth — 120 FPS/);
+
+  const standard = fixture();
+  await standard.handle(request({ ...good, motionQuality: 'standard60' }));
+  assert.match(JSON.parse(standard.calls[0][1].body).text, /Video smoothness: Standard — 60 FPS/);
+
+  // Omitted reads as Standard rather than failing or inventing a surcharge.
+  const absent = fixture();
+  await absent.handle(request({ ...good }));
+  assert.match(JSON.parse(absent.calls[0][1].body).text, /Video smoothness: Standard — 60 FPS/);
+
+  // An unknown level is refused, not coerced: it decides a price.
+  const bogus = fixture();
+  const refused = await bogus.handle(request({ ...good, motionQuality: 'ultra240' }));
+  assert.equal(refused.status, 400);
+  assert.equal(bogus.calls.length, 0, 'a bad level never reaches the provider');
+});

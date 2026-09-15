@@ -133,6 +133,7 @@ import {
   getTimeline,
   rebuildTimeline,
   reorderTimelineItem,
+  setTimelineItemSpeed,
   splitTimelineAt
 } from './services/timelineService'
 import { FAL_MODEL_REGISTRY } from './providers/fal/falModels'
@@ -1536,6 +1537,12 @@ export function registerIpc(): void {
     'timeline:split',
     (_e, projectId: string, itemId: string, atSec: number) =>
       splitTimelineAt(projectId, itemId, atSec)
+  )
+
+  ipcMain.handle(
+    'timeline:speed',
+    (_e, projectId: string, itemId: string, playbackRate: number) =>
+      setTimelineItemSpeed(projectId, itemId, playbackRate)
   )
 
   ipcMain.handle('timeline:delete', (_e, projectId: string, itemId: string) =>

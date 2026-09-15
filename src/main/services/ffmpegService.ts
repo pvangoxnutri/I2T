@@ -217,6 +217,19 @@ export interface AssembleSegment {
    */
   sourceStartSec?: number
   sourceEndSec?: number
+  /**
+   * HOW FAST THIS SEGMENT PLAYS. Absent or 1 is the footage's own speed.
+   *
+   * A creative edit belonging to the timeline item, not to the file: 2
+   * means the same frames pass in half the time. It is applied as a
+   * timestamp transformation immediately after the trim, so everything
+   * downstream — the interpolation, the seams, the total length — is
+   * working in finished timeline time.
+   *
+   * Stills never carry it. A held photograph has no motion to retime;
+   * its hold is simply asked for at the length the timeline wants.
+   */
+  speed?: number
 }
 
 export interface AssembleOptions {
@@ -322,11 +335,23 @@ export function assemble(options: AssembleOptions): AssembleHandle {
   const probes = segments.map((s) =>
     s.kind === 'still' ? { durationSec: 0, fps: 0 } : probeStreamInfo(s.path)
   )
+  // A segment's SPEED. Clamped and defaulted here so the filter graph and
+  // the seam arithmetic below can never see a zero and divide by it.
+  const speeds = segments.map((s) => {
+    const raw = s.kind === 'still' ? 1 : s.speed
+    return typeof raw === 'number' && Number.isFinite(raw) && raw > 0
+      ? Math.min(4, Math.max(0.25, raw))
+      : 1
+  })
+  // Durations are in TIMELINE seconds, which is what the seam planner and
+  // every offset below are measured in. A clip's source span divided by
+  // its speed is the time it actually occupies in the finished film.
   const durations = segments.map((s, i) => {
     if (s.kind === 'still') return s.holdSeconds ?? 1.5
     const full = probes[i].durationSec
     const end = s.sourceEndSec !== undefined ? Math.min(s.sourceEndSec, full) : full
-    return Math.max(0, Math.round((end - sourceIn[i]) * 1000) / 1000)
+    const sourceSpan = Math.max(0, end - sourceIn[i])
+    return Math.max(0, Math.round((sourceSpan / speeds[i]) * 1000) / 1000)
   })
   // ── TWO RATES, AND THEY ARE NOT THE SAME QUESTION ──────────────────
   //
@@ -353,6 +378,31 @@ export function assemble(options: AssembleOptions): AssembleHandle {
   // Progress is measured against the OUTPUT timeline, which is shorter than
   // the sum of inputs once seams overlap.
   const totalSec = plan.totalSec > 0 ? plan.totalSec : durations.reduce((s, d) => s + d, 0)
+
+  // ── WHAT THE TIMELINE ASKED FOR, SEGMENT BY SEGMENT ────────────────
+  //
+  // Printed before a frame is encoded, because a timing fault is a fault
+  // in this arithmetic and waiting an hour for the file to find out is
+  // no way to debug one. Every number an export's length depends on is
+  // here: what each source is, what the timeline asked of it, what the
+  // seam planner trimmed, and what the segment must therefore contribute.
+  console.info(
+    `[assemble] timeline ${totalSec.toFixed(3)}s, ${segments.length} segment(s), ` +
+      `source ${sourceFps} fps -> output ${outputFps} fps, ${w}x${h}, ` +
+      `${overlayPngPaths.length} overlay(s)`
+  )
+  segments.forEach((segment, i) => {
+    console.info(
+      `[assemble]   ${i} ${segment.kind} fps=${probes[i].fps || 'n/a'} ` +
+        `file=${probes[i].durationSec.toFixed(3)}s ` +
+        `in=${sourceIn[i].toFixed(3)} out=${(segment.sourceEndSec ?? NaN).toFixed(3)} ` +
+        `requested=${durations[i].toFixed(3)}s ` +
+        `trim=[${plan.trimStartSec[i].toFixed(3)},${plan.trimEndSec[i].toFixed(3)}] ` +
+        `contributes=${plan.effectiveSec[i].toFixed(3)}s ` +
+        `seamAfter=${(plan.seamSec[i] ?? 0).toFixed(3)} ` +
+        `xfadeOffset=${(plan.offsetSec[i] ?? 0).toFixed(3)}`
+    )
+  })
 
   const args: string[] = ['-y', '-hide_banner']
   for (const segment of segments) {
@@ -391,11 +441,34 @@ export function assemble(options: AssembleOptions): AssembleHandle {
     // blended joint compose instead of one silently overwriting the
     // other. Written against `sourceIn[i]`, which is 0 for every caller
     // that does not use source ranges — so their output is unchanged.
-    const start = plan.trimStartSec[i] + sourceIn[i]
-    const end = sourceIn[i] + durations[i] - plan.trimEndSec[i]
+    //
+    // ── AND THE TRIM IS IN SOURCE SECONDS, NOT TIMELINE SECONDS ────
+    //
+    // `durations` and the seam plan are measured in finished timeline
+    // time. `trim` cuts the FILE. At any speed but 1 those are different
+    // clocks, so the span and both seam trims are converted back into
+    // source seconds by multiplying by the speed. Getting this wrong
+    // would cut the wrong footage AND make the segment the wrong length.
+    const speed = speeds[i]
+    const start = sourceIn[i] + plan.trimStartSec[i] * speed
+    const end = sourceIn[i] + (durations[i] - plan.trimEndSec[i]) * speed
+    // ── THEN THE SPEED ITSELF, AS A TIMESTAMP TRANSFORMATION ───────
+    //
+    // Dividing the presentation times by the speed is what actually
+    // retimes the motion: at 2x every frame arrives twice as soon, so
+    // the same footage passes in half the time. It happens HERE, before
+    // scaling and before interpolation, so everything downstream is
+    // already working in finished timeline time — which is what lets the
+    // interpolator draw the retimed movement smoothly instead of
+    // smoothing the original movement and then stretching the result.
+    const retime = speed === 1 ? 'PTS-STARTPTS' : `(PTS-STARTPTS)/${speed}`
     const trimmed =
-      plan.trimStartSec[i] > 0 || plan.trimEndSec[i] > 0 || sourceIn[i] > 0 || hasOutPoint[i]
-        ? `trim=start=${start.toFixed(3)}:end=${end.toFixed(3)},setpts=PTS-STARTPTS,`
+      plan.trimStartSec[i] > 0 ||
+      plan.trimEndSec[i] > 0 ||
+      sourceIn[i] > 0 ||
+      hasOutPoint[i] ||
+      speed !== 1
+        ? `trim=start=${start.toFixed(3)}:end=${end.toFixed(3)},setpts=${retime},`
         : ''
     // ── FIT THE FRAME WITHOUT DISTORTING IT ─────────────────────────
     //
@@ -462,7 +535,11 @@ export function assemble(options: AssembleOptions): AssembleHandle {
     // straight through. The one repeated frame it adds at the tail is
     // not an invention — during that interval the source shows that same
     // frame held, which is what is reproduced.
-    const clipFps = probes[i].fps || sourceFps
+    // After retiming, the stream's effective rate is the source's rate
+    // multiplied by the speed: played at 2x, a 24 fps clip presents 48
+    // frames per second of timeline. That, not the file's own rate, is
+    // what the output rate has to be compared against.
+    const clipFps = (probes[i].fps || sourceFps) * speed
     const interpolated = segments[i].kind === 'clip' && outputFps > clipFps + 0.001
     const rateChain = interpolated
       ? `minterpolate=fps=${outputFps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir,fps=${outputFps}`
@@ -575,6 +652,10 @@ export function assemble(options: AssembleOptions): AssembleHandle {
     outputPath
   )
 
+  // The graph itself, once, so a timing fault can be read rather than
+  // inferred. It carries no secrets: file paths and filter names only.
+  console.info(`[assemble] filter_complex: ${chains.join(';')}`)
+
   let child: ChildProcess | null = null
   let cancelled = false
 
@@ -601,6 +682,34 @@ export function assemble(options: AssembleOptions): AssembleHandle {
       if (cancelled) {
         reject(new Error('Cancelled'))
       } else if (code === 0) {
+        // ── THE TIMELINE'S LENGTH IS A CONTRACT ──────────────────────
+        //
+        // Raising the frame rate must add frames BETWEEN existing ones,
+        // never stretch the time they occupy: a 38s timeline is a 38s
+        // film at any rate. A retiming fault does not corrupt the file,
+        // so nothing downstream would notice — it just quietly hands the
+        // customer a slow-motion export of the wrong length.
+        //
+        // Half a second of tolerance covers the final frame's rounding
+        // and the millisecond rounding in the seam plan, and is far
+        // tighter than any real retiming error, which scales with the
+        // whole timeline rather than with one frame.
+        const encoded = probeStreamInfo(outputPath).durationSec
+        const drift = Math.abs(encoded - totalSec)
+        if (totalSec > 0 && drift > 0.5) {
+          reject(
+            new Error(
+              `Export timing is wrong: the timeline is ${totalSec.toFixed(2)}s but the file ` +
+                `is ${encoded.toFixed(2)}s (drift ${drift.toFixed(2)}s). The export was not ` +
+                `delivered. This is a frame-rate or timestamp fault, not an encoding failure.`
+            )
+          )
+          return
+        }
+        console.info(
+          `[assemble] duration check: timeline ${totalSec.toFixed(3)}s, ` +
+            `file ${encoded.toFixed(3)}s, drift ${drift.toFixed(3)}s`
+        )
         onProgress?.(100)
         resolve()
       } else {

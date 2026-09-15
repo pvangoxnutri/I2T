@@ -526,6 +526,166 @@ label {
   -webkit-appearance:none
 }
 
+/* ── THE TWO MOTION LEVELS ────────────────────────────────────────────
+   Standard is the default and must not read as the cheap option: same
+   weight, same type, same border. Premium earns a badge, not a downgrade
+   of the other one. */
+.quality-choice {
+  border:1px solid var(--line);
+  border-radius:6px;
+  padding:12px 14px 10px;
+  margin:18px 0 0;
+  min-width:0
+}
+
+.quality-choice legend {
+  padding:0 6px;
+  font-size:11px;
+  font-weight:600
+}
+
+.quality-option {
+  display:flex;
+  align-items:flex-start;
+  gap:10px;
+  padding:9px 0;
+  cursor:pointer
+}
+
+.quality-option+.quality-option {
+  border-top:1px solid var(--line)
+}
+
+.quality-option input {
+  width:16px;
+  height:16px;
+  margin-top:2px;
+  flex:none;
+  accent-color:var(--navy);
+  cursor:pointer
+}
+
+/* A fieldset inside a narrow column will not shrink below its content
+   unless every level of the nesting is told it may. Missing one link in
+   that chain is what put six pixels of horizontal scroll on the page at
+   768, with no single element visibly sticking out. */
+/* `break-word`, never `anywhere`: `anywhere` also shrinks the element's
+   MIN-CONTENT width to a single character, and a flex item that may
+   shrink to its min-content then collapses into a one-letter column.
+   That is exactly what happened here. */
+.quality-option>span {
+  display:flex;
+  flex-direction:column;
+  gap:2px;
+  flex:1 1 auto;
+  min-width:0;
+  overflow-wrap:break-word
+}
+
+.quality-option strong {
+  font-size:12px;
+  font-weight:600
+}
+
+.quality-option small {
+  font-size:11px;
+  color:var(--muted);
+  line-height:1.45
+}
+
+.quality-option em {
+  flex:none;
+  font-style:normal;
+  font-size:11px;
+  font-weight:600;
+  white-space:nowrap
+}
+
+.estimate-lines {
+  margin:16px 0 0
+}
+
+.estimate-lines div {
+  display:flex;
+  justify-content:space-between;
+  gap:16px;
+  padding:6px 0;
+  font-size:12px
+}
+
+.estimate-lines dt {
+  color:var(--muted)
+}
+
+.estimate-lines dd {
+  margin:0;
+  font-variant-numeric:tabular-nums
+}
+
+.quality-cards {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:16px;
+  margin-top:34px
+}
+
+.quality-card {
+  position:relative;
+  border:1px solid var(--line);
+  border-radius:8px;
+  padding:20px 18px 18px;
+  background:var(--white)
+}
+
+.quality-card.is-premium {
+  border-color:var(--navy)
+}
+
+.quality-card-badge {
+  position:absolute;
+  top:-9px;
+  left:18px;
+  padding:3px 9px;
+  background:var(--navy);
+  color:white;
+  border-radius:3px;
+  font-size:9px;
+  font-weight:650;
+  letter-spacing:.14em;
+  text-transform:uppercase
+}
+
+.quality-card h3 {
+  font-size:17px;
+  font-weight:600;
+  letter-spacing:-.02em
+}
+
+.quality-card-fps {
+  margin-top:3px!important;
+  font:italic 20px var(--serif);
+  color:var(--blue)
+}
+
+.quality-card-copy {
+  margin-top:10px!important;
+  font-size:12px;
+  color:var(--muted);
+  line-height:1.6
+}
+
+.quality-card-price {
+  margin-top:14px!important;
+  font-size:12px;
+  font-weight:600
+}
+
+.quality-note {
+  margin-top:16px!important;
+  font-size:11px;
+  color:var(--muted)
+}
+
 .assembly-option {
   display:flex;
   justify-content:space-between;
@@ -741,7 +901,10 @@ input[type="checkbox"] {
   margin:0
 }
 
-input:not([type="checkbox"]),select,textarea {
+/* Text fields only. A radio is a control, not a field: left in this rule
+   it took `width:100%` and `min-height:46px`, filled the whole flex row
+   and squeezed its own label down to one character per line. */
+input:not([type="checkbox"]):not([type="radio"]),select,textarea {
   display:block;
   width:100%;
   min-width:0;
@@ -1080,6 +1243,16 @@ legend {
     grid-template-columns:1fr;
     gap:18px
   }
+  .quality-cards {
+    grid-template-columns:1fr
+  }
+  .quality-option {
+    flex-wrap:wrap
+  }
+  .quality-option em {
+    width:100%;
+    padding-left:26px
+  }
   .partner-types div {
     padding:20px
   }
@@ -1145,12 +1318,48 @@ legend {
     </div>
   </section>
   <section class="section pricing" id="pricing" aria-labelledby="pricing-title"><div class="shell pricing-grid">
-    <div class="pricing-copy"><span class="eyebrow">Simple, transparent pricing</span><h2 id="pricing-title">Small investment.<br /><span class="serif">A different impression.</span></h2><p>Pay for the transitions you need. Add an assembled video when you want the complete property story.</p><div class="price-list"><div class="price-row"><strong>€5</strong><span>per image-to-image transition</span></div><div class="price-row"><strong>+€10</strong><span>for full video assembly</span></div></div></div>
+    <div class="pricing-copy"><span class="eyebrow">Simple, transparent pricing</span><h2 id="pricing-title">Small investment.<br /><span class="serif">A different impression.</span></h2><p>Pay for the transitions you need. Add an assembled video when you want the complete property story.</p><div class="price-list"><div class="price-row"><strong>€5</strong><span>per image-to-image transition</span></div><div class="price-row"><strong>+€10</strong><span>for full video assembly</span></div></div>
+    <!-- Two finished levels, same picture. Only the smoothness differs, and
+         Standard is written as the professional default it is. -->
+    <div class="quality-cards">
+      <div class="quality-card">
+        <h3>Standard</h3>
+        <p class="quality-card-fps">60 FPS</p>
+        <p class="quality-card-copy">Smooth professional motion.</p>
+        <p class="quality-card-price">Included</p>
+      </div>
+      <div class="quality-card is-premium">
+        <span class="quality-card-badge">Premium</span>
+        <h3>Premium Smooth</h3>
+        <p class="quality-card-fps">120 FPS</p>
+        <p class="quality-card-copy">Ultra-smooth movement for premium property marketing and high-end presentation. The best master output we produce.</p>
+        <p class="quality-card-price">+10%</p>
+      </div>
+    </div>
+    <p class="quality-note">Same resolution and same image quality in both. The difference is how smoothly the movement is drawn.</p></div>
     <div class="calculator" aria-labelledby="calculator-title">
       <h3 id="calculator-title">Build your estimate</h3><p>Choose your transitions. See your price.</p>
       <label for="calc-transitions">Number of transitions</label><div class="stepper"><button type="button" id="decrease" aria-label="Decrease number of transitions">−</button><input id="calc-transitions" type="number" min="1" step="1" value="8" inputmode="numeric" aria-describedby="calc-help calc-error" /><button type="button" id="increase" aria-label="Increase number of transitions">+</button></div>
       <p class="field-help" id="calc-help">A simple sequence of 9 photos has 8 transitions.</p><p class="field-error" id="calc-error" role="status" hidden>Enter a whole number of transitions, at least 1.</p>
       <label class="assembly-option" for="calc-assembly"><span>Full video assembly <small>One finished video · +€10</small></span><input type="checkbox" id="calc-assembly" checked /></label>
+      <fieldset class="quality-choice">
+        <legend>Video smoothness</legend>
+        <label class="quality-option">
+          <input type="radio" name="calcQuality" value="standard60" checked />
+          <span><strong>Standard — 60 FPS</strong><small>Smooth professional motion</small></span>
+          <em>Included</em>
+        </label>
+        <label class="quality-option">
+          <input type="radio" name="calcQuality" value="premium120" />
+          <span><strong>Premium Smooth — 120 FPS</strong><small>Ultra-smooth movement for premium property marketing</small></span>
+          <em>+10%</em>
+        </label>
+      </fieldset>
+      <dl class="estimate-lines">
+        <div><dt>Transitions</dt><dd id="calc-line-transitions">€40</dd></div>
+        <div><dt>Full video</dt><dd id="calc-line-assembly">€10</dd></div>
+        <div id="calc-premium-row" hidden><dt>Premium Smooth +10%</dt><dd id="calc-line-premium">€5.00</dd></div>
+      </dl>
       <div class="estimate"><span>Estimated total</span><output id="calc-total" for="calc-transitions calc-assembly" aria-live="polite">€50</output></div><a class="button" href="#contact" data-inquiry="video">Request this video <span aria-hidden="true">↗</span></a><p class="estimate-note">Estimate in EUR. We’ll confirm the scope before starting.</p>
     </div>
   </div></section>
@@ -1172,6 +1381,19 @@ legend {
           <div class="field"><label for="email">Email *</label><input id="email" name="email" type="email" autocomplete="email" required maxlength="254" placeholder="you@company.com" /></div>
         </div>
         <div class="field"><label for="company">Company (optional)</label><input id="company" name="company" autocomplete="organization" maxlength="200" placeholder="Company or agency name" /></div>
+        <fieldset class="quality-choice quality-choice-form">
+          <legend>Video smoothness</legend>
+          <label class="quality-option">
+            <input type="radio" name="motionQuality" value="standard60" checked />
+            <span><strong>Standard — 60 FPS</strong><small>Smooth professional motion</small></span>
+            <em>Included</em>
+          </label>
+          <label class="quality-option">
+            <input type="radio" name="motionQuality" value="premium120" />
+            <span><strong>Premium Smooth — 120 FPS</strong><small>Ultra-smooth movement</small></span>
+            <em>+10%</em>
+          </label>
+        </fieldset>
         <div class="field"><label for="message">Message *</label><textarea id="message" name="message" required maxlength="4000" placeholder="Tell us what you have in mind."></textarea></div>
         <div class="inquiry-trap" aria-hidden="true"><label for="inquiry-website">Leave this field empty</label><input id="inquiry-website" name="website" tabindex="-1" autocomplete="off" maxlength="500" /></div>
       </fieldset>

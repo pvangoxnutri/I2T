@@ -5,7 +5,13 @@ import { resolveBranding } from '../../../../shared/branding'
 import { formatPrice, priceSnapshot } from '../../../../shared/pricing'
 import { rasterizeSignature, rasterizeWatermark } from '../../utils/rasterizeOverlays'
 import { getFeedImages } from '../../../../shared/feedSequence'
-import { applyExportFormat, type ExportFormatId } from '../../../../shared/exportFormat'
+import {
+  applyExportFormat,
+  DEFAULT_MOTION_QUALITY,
+  MOTION_QUALITIES,
+  type ExportFormatId,
+  type MotionQuality
+} from '../../../../shared/exportFormat'
 import {
   Field,
   ImagePickerButton,
@@ -109,6 +115,15 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
    * Saved Branding Settings still own the asset, position, size and
    * opacity; these own only whether it is included.
    */
+  /**
+   * SMOOTHNESS FOR THIS EXPORT. Standard by default.
+   *
+   * Local to the panel, like the branding checkboxes: it is a decision
+   * about one export, and storing it would make the next one inherit a
+   * choice nobody made. The value travels with the queued job, so a
+   * retry or a restart reproduces what was chosen here.
+   */
+  const [motionQuality, setMotionQuality] = useState<MotionQuality>(DEFAULT_MOTION_QUALITY)
   const [exportWatermark, setExportWatermark] = useState(true)
   const [exportStamp, setExportStamp] = useState(true)
 
@@ -137,7 +152,8 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
         'final',
         { watermarkPng, signaturePng },
         null,
-        format
+        format,
+        motionQuality
       )
       if (result.ok) {
         setExportNote('Export queued — follow progress under Queue.')
@@ -220,6 +236,32 @@ export function BrandingExportPanel({ project }: { project: Project }): React.JS
             </div>
           )}
         </div>
+
+        {/* ── HOW SMOOTH THE MOTION IS ────────────────────────────────
+            Smoothness only. Neither level changes how long the film runs
+            or how fast anything in it moves — that is the timeline's
+            Speed, and the two are deliberately separate. */}
+        <fieldset className="export-quality">
+          <legend>Export quality</legend>
+          {(Object.keys(MOTION_QUALITIES) as MotionQuality[]).map((id) => (
+            <label className="export-quality-option" key={id}>
+              <input
+                type="radio"
+                name="export-quality"
+                value={id}
+                checked={motionQuality === id}
+                onChange={() => setMotionQuality(id)}
+              />
+              <span>
+                <strong>{MOTION_QUALITIES[id].label}</strong>
+                <small>{MOTION_QUALITIES[id].note}</small>
+                {MOTION_QUALITIES[id].caveat ? (
+                  <small className="export-quality-caveat">{MOTION_QUALITIES[id].caveat}</small>
+                ) : null}
+              </span>
+            </label>
+          ))}
+        </fieldset>
 
         {/* ── BRANDING FOR THIS EXPORT ────────────────────────────────
             Not the timeline preview's checkboxes. Those decide what is

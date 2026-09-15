@@ -19,7 +19,7 @@ import { runUiProbe } from './uiProbe'
 import { pinUserDataDir } from './paths'
 import { runReanalyseProof } from './reanalyseProof'
 import { runExportProof } from './exportProof'
-import { runRealExportProof } from './realExportProof'
+import { runRealExportProof, runTimingProof } from './realExportProof'
 import { repairRetiredPromptOntology } from './services/promptOntologyRepair'
 
 /**
@@ -290,6 +290,23 @@ app.whenReady().then(async () => {
       code = 1
     }
     flushNow()
+    app.exit(code)
+    return
+  }
+
+  // Export timing proof: .
+  //
+  // Raising the frame rate must add frames between the existing ones and
+  // never stretch the time they occupy. One case per way of joining
+  // segments: a cut, a crossfade, a still, a split, and a mixed timeline.
+  if (process.argv.includes('--f2f-timing-proof')) {
+    let code = 0
+    try {
+      code = await runTimingProof()
+    } catch (err) {
+      console.error('[timing-proof] FAILED:', err)
+      code = 1
+    }
     app.exit(code)
     return
   }

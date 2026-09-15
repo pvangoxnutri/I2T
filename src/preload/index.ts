@@ -526,6 +526,18 @@ const api = {
         itemId: string,
         atSec: number
       ): Promise<TimelineEditResult> => ipcRenderer.invoke('timeline:split', projectId, itemId, atSec),
+      /**
+       * Retime ONE item. 1 is the footage's own speed, 2 plays it in half
+       * the time, 0.5 takes twice as long. No file is written and nothing
+       * upstream is regenerated: the two halves of a split can run at
+       * different speeds over the same source.
+       */
+      speed: (
+        projectId: string,
+        itemId: string,
+        playbackRate: number
+      ): Promise<TimelineEditResult> =>
+        ipcRenderer.invoke('timeline:speed', projectId, itemId, playbackRate),
       /** Remove one segment from the video. The clip and its history stay. */
       delete: (projectId: string, itemId: string): Promise<TimelineEditResult> =>
         ipcRenderer.invoke('timeline:delete', projectId, itemId),
@@ -800,9 +812,11 @@ const api = {
       overlays: ExportOverlaysPayload,
       scheduledFor: number | null = null,
       /** Output shape — see shared/exportFormat. Omitted is the desktop one. */
-      format: 'computer' | 'instagram' = 'computer'
+      format: 'computer' | 'instagram' = 'computer',
+      /** Smoothness only. Never changes duration or speed — see exportFormat. */
+      motionQuality: 'standard60' | 'premium120' = 'premium120'
     ): Promise<ExportStartResult> =>
-      ipcRenderer.invoke('exports:run', projectId, kind, overlays, scheduledFor, format),
+      ipcRenderer.invoke('exports:run', projectId, kind, overlays, scheduledFor, format, motionQuality),
     /**
      * DEVELOPMENT/EVALUATION. Re-assembles the clips already on disk twice
      * — hard cuts and seamless — so the seam work can be judged by eye.

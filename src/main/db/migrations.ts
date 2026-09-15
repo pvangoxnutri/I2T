@@ -960,6 +960,30 @@ const MIGRATIONS: Migration[] = [
            ON timeline_items(project_id, position)`
       )
     }
+  },
+  {
+    /**
+     * HOW FAST EACH TIMELINE ITEM PLAYS.
+     *
+     * ── THE BUG THIS EXISTS BECAUSE OF ───────────────────────────────
+     *
+     * `playbackRate` was added to the item type, the service validated
+     * it, the export honoured it and the UI offered it — and none of it
+     * survived a save, because the column was not here. The write simply
+     * dropped the field, the read returned items without it, and every
+     * reader defaulted it back to 1. Nothing failed: the operator set a
+     * speed, the panel showed 1.00x again, and the export was normal
+     * speed.
+     *
+     * NULL is the default and reads as 1, so every timeline written
+     * before this migration keeps playing exactly as it did.
+     */
+    version: 33,
+    up: (db) => {
+      const columns = db.exec('PRAGMA table_info(timeline_items)')[0]
+      const has = columns?.values.some((row) => row[1] === 'playback_rate')
+      if (!has) db.run('ALTER TABLE timeline_items ADD COLUMN playback_rate REAL')
+    }
   }
 ]
 

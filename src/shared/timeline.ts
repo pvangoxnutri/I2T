@@ -71,6 +71,22 @@ export interface TimelineItem {
   /** OUT point, seconds into the source. Exclusive. */
   endOffsetSec: number
   /**
+   * HOW FAST THIS ITEM PLAYS. 1 is the footage's own speed.
+   *
+   * A creative decision about THIS piece of the timeline, which is why
+   * it sits beside the in and out points rather than on the generation
+   * that produced the file: split an item and each half can be retimed
+   * on its own, over the same untouched source.
+   *
+   * Absent means 1 — see `itemPlaybackRate`, which every reader must go
+   * through rather than reading this field directly.
+   *
+   * NOT to be confused with the export's frame rate. Speed is how fast
+   * the camera moves; the export rate is how smoothly that movement is
+   * drawn. See shared/exportFormat.
+   */
+  playbackRate?: number
+  /**
    * The blend into the NEXT item, in seconds.
    *
    * 0 is a hard cut — two clips meeting, occupying no extra time. A
@@ -96,9 +112,71 @@ export interface Timeline {
   updatedAt: number
 }
 
-/** How long one item occupies, before any seam overlap is subtracted. */
-export function itemDurationSec(item: TimelineItem): number {
+/**
+ * HOW FAST AN ITEM PLAYS, AND WHAT IS ALLOWED.
+ *
+ * ── SPEED IS A TIMELINE EDIT, NOT A PROPERTY OF THE FOOTAGE ──────────
+ *
+ * It lives on the ITEM, so the two halves of a split can run at
+ * different speeds over the same file — the operator can let a doorway
+ * approach linger at 0.75x and then carry the next room at 1.25x without
+ * anything being re-generated or re-encoded upstream.
+ *
+ * The range is deliberately narrow. Below 0.5x a 24 fps source has too
+ * few real frames left to invent motion from convincingly; above 2x a
+ * slow architectural move stops reading as a camera and starts reading
+ * as a scrub.
+ */
+export const MIN_PLAYBACK_RATE = 0.5
+export const MAX_PLAYBACK_RATE = 2
+
+/** The rates the inspector offers. A slider may land between them. */
+export const PLAYBACK_RATE_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const
+
+/**
+ * An item's speed, defaulted and clamped.
+ *
+ * ABSENT MEANS 1. Every timeline written before speed existed reads as
+ * normal speed, which is what it was, so no migration is needed and no
+ * stored edit changes meaning. A stored value outside the range — a hand
+ * edited file, a future wider range read by an older build — is clamped
+ * rather than trusted, because a zero or negative rate would divide the
+ * timeline's own arithmetic by zero.
+ */
+export function itemPlaybackRate(item: TimelineItem): number {
+  const rate = item.playbackRate
+  if (typeof rate !== 'number' || !Number.isFinite(rate) || rate <= 0) return 1
+  return Math.min(MAX_PLAYBACK_RATE, Math.max(MIN_PLAYBACK_RATE, rate))
+}
+
+/**
+ * The span of SOURCE this item plays, in source seconds.
+ *
+ * This is what `startOffsetSec` and `endOffsetSec` describe, and it is
+ * unaffected by speed: retiming changes how long those frames take to
+ * play, never which frames are played.
+ */
+export function itemSourceSpanSec(item: TimelineItem): number {
   return Math.max(0, round3(item.endOffsetSec - item.startOffsetSec))
+}
+
+/**
+ * How long one item occupies on the timeline, before any seam overlap is
+ * subtracted.
+ *
+ * ── THE ONE PLACE SPEED ENTERS THE ARITHMETIC ────────────────────────
+ *
+ * Every other length in this file is built from this function: the
+ * film's total, where each item starts, and which item a given moment
+ * belongs to. Dividing here means the ruler, the playhead, the export
+ * plan and the crossfade offsets all learn about speed at once and
+ * cannot disagree about it.
+ *
+ *   2x plays the same footage in half the time
+ *   0.5x takes twice as long
+ */
+export function itemDurationSec(item: TimelineItem): number {
+  return Math.max(0, round3(itemSourceSpanSec(item) / itemPlaybackRate(item)))
 }
 
 /**
@@ -170,7 +248,14 @@ export function locateAtTime(
         index: i,
         item: items[i],
         localSec: bounded,
-        sourceSec: round3(items[i].startOffsetSec + bounded)
+        // ── TIMELINE TIME IS NOT SOURCE TIME ──────────────────────
+        //
+        // At 2x, one second on the ruler is two seconds of footage.
+        // Seeking the raw offset would put the playhead and the picture
+        // in different places, and a split taken from that position
+        // would cut the wrong frame. One multiplication, in the one
+        // function preview and split both ask.
+        sourceSec: round3(items[i].startOffsetSec + bounded * itemPlaybackRate(items[i]))
       }
     }
   }
@@ -215,7 +300,10 @@ export function splitItemAt(
   if (index === -1) return { ok: false, reason: 'That clip is no longer on the timeline.' }
 
   const item = items[index]
-  const cut = round3(item.startOffsetSec + localSec)
+  // `localSec` is where the playhead is on the TIMELINE. The cut is made
+  // in the SOURCE, and at any speed but 1 those are different numbers —
+  // at 2x, two seconds along the ruler is four seconds into the footage.
+  const cut = round3(item.startOffsetSec + localSec * itemPlaybackRate(item))
   const left = round3(cut - item.startOffsetSec)
   const right = round3(item.endOffsetSec - cut)
 

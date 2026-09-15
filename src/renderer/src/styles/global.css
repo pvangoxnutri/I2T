@@ -6986,6 +6986,91 @@ select {
 
 /* ── SELECTED CLIP INFO ────────────────────────────────────────────── */
 
+/* ── SPEED FOR THE SELECTED CLIP ──────────────────────────────────────
+   Sits under the clip's facts, not on the strip: the strip has to stay
+   readable as order and length at a glance. */
+.tl-speed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.tl-speed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tl-speed-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.tl-speed-stepper {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tl-speed-stepper button {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tl-speed-stepper button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.tl-speed-stepper output {
+  min-width: 52px;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tl-speed-slider {
+  width: 100%;
+  accent-color: var(--accent, #5c87b0);
+}
+
+.tl-speed-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tl-speed-steps button {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.tl-speed-steps button.is-active {
+  border-color: var(--accent, #5c87b0);
+  color: inherit;
+}
+
 .tl-clip-info {
   display: flex;
   flex-wrap: wrap;
@@ -7120,6 +7205,7 @@ select {
 
    These are NOT the timeline preview's toggles — those live in
    `.tl-layers` and decide what is on screen. */
+.export-quality,
 .export-branding {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -7128,6 +7214,51 @@ select {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.export-quality legend {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 0 4px;
+}
+
+.export-quality-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 2px;
+  cursor: pointer;
+}
+
+.export-quality-option input {
+  margin-top: 2px;
+  flex: none;
+  cursor: pointer;
+}
+
+.export-quality-option span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.export-quality-option strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.export-quality-option small {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* The one thing an operator pays for choosing 120: their own waiting. */
+.export-quality-caveat {
+  color: var(--warn, #c89b3c);
 }
 
 .export-branding legend {

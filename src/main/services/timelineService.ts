@@ -12,6 +12,8 @@ import { motionSegments } from '../../shared/motionSegment'
 import {
   feedFingerprintOf,
   locateAtTime,
+  MAX_PLAYBACK_RATE,
+  MIN_PLAYBACK_RATE,
   removeItem,
   reorderItems,
   splitItemAt,
@@ -264,6 +266,51 @@ export function deleteTimelineItem(projectId: string, itemId: string): EditResul
     return { ok: false, reason: 'That clip is no longer on the timeline.' }
   }
   return commit(projectId, removeItem(view.timeline.items, itemId))
+}
+
+/**
+ * RETIME ONE ITEM.
+ *
+ * ── WHY THIS EDITS THE ITEM AND NOTHING ELSE ─────────────────────────
+ *
+ * Speed is a decision about one piece of the finished edit, so it is
+ * stored on that piece. No file is touched, nothing is re-encoded and
+ * nothing upstream is consulted: the same clip can appear twice on the
+ * timeline at two different speeds, and a split leaves two halves that
+ * can be retimed independently.
+ *
+ * Marking the timeline manually edited is what stops a later rebuild
+ * from the feed silently discarding the operator's retiming, the same
+ * protection splits and deletions already have.
+ */
+export function setTimelineItemSpeed(
+  projectId: string,
+  itemId: string,
+  playbackRate: number
+): EditResult {
+  const view = getTimeline(projectId)
+  if (!view?.timeline) return { ok: false, reason: 'This project has no timeline yet.' }
+  if (!view.timeline.items.some((i) => i.id === itemId)) {
+    return { ok: false, reason: 'That clip is no longer on the timeline.' }
+  }
+  if (!Number.isFinite(playbackRate)) {
+    return { ok: false, reason: 'That speed is not a number.' }
+  }
+  if (playbackRate < MIN_PLAYBACK_RATE || playbackRate > MAX_PLAYBACK_RATE) {
+    return {
+      ok: false,
+      reason:
+        `Speed must be between ${MIN_PLAYBACK_RATE}x and ${MAX_PLAYBACK_RATE}x. ` +
+        `Outside that range a generated clip has too few real frames to retime convincingly.`
+    }
+  }
+  // Rounded to two decimals: the inspector offers steps and a slider, and
+  // storing 1.2999999 would make the readout disagree with itself.
+  const rate = Math.round(playbackRate * 100) / 100
+  return commit(
+    projectId,
+    view.timeline.items.map((item) => (item.id === itemId ? { ...item, playbackRate: rate } : item))
+  )
 }
 
 export function reorderTimelineItem(

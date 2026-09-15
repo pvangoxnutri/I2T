@@ -370,6 +370,18 @@ export interface JobMetadata {
    */
   exportFormat?: 'computer' | 'instagram'
   /**
+   * HOW SMOOTH THE DELIVERED MOTION IS, as chosen when the job was queued.
+   *
+   * Carried on the job for the same reason the format is: a queued export
+   * must render what the operator chose, and a retry or a recovery after
+   * a restart must reproduce that choice rather than read whatever the
+   * renderer happens to be showing now.
+   *
+   * Absent reads as premium — every export queued before the choice
+   * existed was 120 fps, and an unmarked job must still deliver one.
+   */
+  motionQuality?: 'standard60' | 'premium120'
+  /**
    * What the post-generation inspection concluded, for the queue row.
    *
    * Copied onto the job so History can show provider outcome and content

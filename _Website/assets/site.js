@@ -10,26 +10,93 @@
   const fields = $('inquiry-fields');
   const calcCount = $('calc-transitions');
   const assembly = $('calc-assembly');
+  /**
+   * THE PRICE, IN ONE PLACE.
+   *
+   * Every number the page quotes comes from here and from `quote()` below
+   * — the calculator, its breakdown, the message the pricing CTA drafts
+   * and the summary the form sends. A second copy of the surcharge is how
+   * a page ends up showing one total and emailing another.
+   */
+  const PRICING = Object.freeze({
+    transition: 5,
+    assembly: 10,
+    /** Premium Smooth is +10% of the WHOLE service price, not of one part. */
+    premiumSmoothMultiplier: 1.10
+  });
+
+  /** The two motion levels, and what the customer is told about each. */
+  const QUALITY = Object.freeze({
+    standard60: { label: 'Standard', fps: 60, summary: 'Standard — 60 FPS' },
+    premium120: { label: 'Premium Smooth', fps: 120, summary: 'Premium Smooth — 120 FPS (+10%)' }
+  });
+
+  /**
+   * What a given selection costs.
+   *
+   * Cents, not floats, for the surcharge: 10% of €55 is €5.50 and
+   * `55 * 1.1` is 60.50000000000001. Rounding at the end of a chain of
+   * binary fractions is what puts a stray cent on an invoice.
+   */
+  function quote(transitions, withAssembly, quality) {
+    const base = transitions * PRICING.transition + (withAssembly ? PRICING.assembly : 0);
+    const baseCents = Math.round(base * 100);
+    const totalCents = quality === 'premium120'
+      ? Math.round(baseCents * PRICING.premiumSmoothMultiplier)
+      : baseCents;
+    return {
+      transitionsCost: transitions * PRICING.transition,
+      assemblyCost: withAssembly ? PRICING.assembly : 0,
+      base,
+      surcharge: (totalCents - baseCents) / 100,
+      total: totalCents / 100
+    };
+  }
+
   const euro = new Intl.NumberFormat('en-IE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
+  /** The surcharge is rarely a whole euro, so it gets cents. */
+  const euroExact = new Intl.NumberFormat('en-IE', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2 });
+  const money = (n) => (Number.isInteger(n) ? euro.format(n) : euroExact.format(n));
   const types = new Set(['video', 'agency', 'partnership', 'other']);
   let sending = false;
   let attemptId = null;
 
   function countOf() {
     const n = calcCount.valueAsNumber;
-    return calcCount.validity.valid && Number.isSafeInteger(n) && n >= 1 && Number.isSafeInteger(n * 5 + 10) ? n : null;
+    return calcCount.validity.valid && Number.isSafeInteger(n) && n >= 1
+      && Number.isSafeInteger(n * PRICING.transition + PRICING.assembly) ? n : null;
+  }
+  /** Which smoothness the calculator is quoting. Standard unless chosen. */
+  function selectedQuality() {
+    const picked = document.querySelector('input[name="calcQuality"]:checked');
+    return picked && picked.value === 'premium120' ? 'premium120' : 'standard60';
   }
   function updateQuote() {
     const count = countOf();
-    $('calc-total').textContent = count === null ? '—' : euro.format(count * 5 + (assembly.checked ? 10 : 0));
+    const quality = selectedQuality();
+    const q = count === null ? null : quote(count, assembly.checked, quality);
+    $('calc-total').textContent = q === null ? '—' : money(q.total);
+    // The breakdown exists so the surcharge is a line the customer can
+    // see and check, not a number that silently appeared in the total.
+    $('calc-line-transitions').textContent = q === null ? '—' : money(q.transitionsCost);
+    $('calc-line-assembly').textContent = q === null ? '—' : money(q.assemblyCost);
+    $('calc-line-premium').textContent = q === null ? '—' : money(q.surcharge);
+    $('calc-premium-row').hidden = quality !== 'premium120';
     $('calc-error').hidden = count !== null;
     $('decrease').disabled = count !== null && count <= 1;
+    // The form's own selector follows the calculator, so a visitor who
+    // priced Premium does not then send a Standard inquiry by accident.
+    const formQuality = document.querySelector(`input[name="motionQuality"][value="${quality}"]`);
+    if (formQuality) formQuality.checked = true;
   }
   for (const input of [calcCount, assembly]) input.addEventListener('input', updateQuote);
+  document.querySelectorAll('input[name="calcQuality"]').forEach((radio) =>
+    radio.addEventListener('change', updateQuote)
+  );
   $('decrease').addEventListener('click', () => { calcCount.value = String(Math.max(1, (countOf() ?? 2) - 1)); updateQuote(); });
   $('increase').addEventListener('click', () => {
     const next = (countOf() ?? 0) + 1;
-    if (Number.isSafeInteger(next * 5 + 10)) calcCount.value = String(next);
+    if (Number.isSafeInteger(next * PRICING.transition + PRICING.assembly)) calcCount.value = String(next);
     updateQuote();
   });
 
@@ -48,7 +115,7 @@
     // The pricing CTA carries its estimate in the visible message, without
     // overwriting a visitor's existing draft or expanding the small form.
     if (link.closest('.calculator') && !message.value.trim() && countOf() !== null) {
-      message.value = `Video request: ${countOf()} transitions. Full video assembly: ${assembly.checked ? 'yes' : 'no'}. Estimated total: ${$('calc-total').textContent}.\n\n`;
+      message.value = `Video request: ${countOf()} transitions. Full video assembly: ${assembly.checked ? 'yes' : 'no'}. Video smoothness: ${QUALITY[selectedQuality()].summary}. Estimated total: ${$('calc-total').textContent}.\n\n`;
     }
     if (link.getAttribute('href') === '#contact') $('name').focus({ preventScroll: true });
   }));

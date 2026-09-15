@@ -13,7 +13,13 @@ import {
 import { deleteProjectFiles, projectTransitionsDir } from './files'
 import { projectImagesDir } from './paths'
 import { exportAssembly, startExport } from './services/exportService'
-import { ffmpegPath, outputDims, probeStreamInfo } from './services/ffmpegService'
+import {
+  assemble,
+  ffmpegPath,
+  outputDims,
+  probeStreamInfo,
+  type AssembleSegment
+} from './services/ffmpegService'
 import { initQueue, listJobs, resumeQueue, stopQueue } from './services/queueService'
 import {
   applyExportFormat,
@@ -21,7 +27,7 @@ import {
   type ExportFormatId
 } from '../shared/exportFormat'
 import type { TransitionMode } from '../shared/transitionMode'
-import type { AspectRatio, Project } from '../shared/types'
+import type { AspectRatio, ExportDefaults, Project } from '../shared/types'
 
 /**
  * THE STANDARD EXPORT, PROVEN THROUGH THE PATH THE PRODUCT USES.
@@ -720,6 +726,161 @@ async function runExistingProject(projectId: string, dir: string): Promise<numbe
   log(`PASS real project ${projectId}: ${w}x${h}, full bleed across ${frames.length} frames`)
   writeFileSync(join(dir, 'real-project-output.txt'), outputPath)
   return 0
+}
+
+/**
+ * THE TIMING CONTRACT, CASE BY CASE.
+ *
+ * ── WHY THESE ARE SEPARATE FROM THE GEOMETRY CASES ───────────────────
+ *
+ * Raising the frame rate must add frames BETWEEN the existing ones and
+ * never change how long they are on screen. That is one sentence, and it
+ * has one failure mode per way of joining segments — a cut, a crossfade,
+ * a still, a split — so each gets its own arithmetic here, with the
+ * expected length written out rather than derived from the code under
+ * test.
+ *
+ * Rendered at 720p on purpose: timing is resolution-independent, and
+ * motion estimation at 1080p would make this too slow to run often.
+ */
+export async function runTimingProof(): Promise<number> {
+  const dir = join(app.getPath('temp'), `f2f-timing-${Date.now()}`)
+  mkdirSync(dir, { recursive: true })
+  const defaults: ExportDefaults = {
+    aspectRatio: '16:9',
+    resolution: '720p',
+    fps: 25,
+    defaultTransitionDurationSec: 5,
+    seamBlend: 'off'
+  }
+  const SOURCE_FPS = 24
+  const frame = 1 / SOURCE_FPS
+
+  /** A 24 fps clip of `sec` seconds with real movement to interpolate. */
+  const clip = (name: string, sec: number): string => {
+    const file = join(dir, `${name}.mp4`)
+    ff(
+      ['-f', 'lavfi', '-i', `testsrc2=size=640x426:rate=${SOURCE_FPS}:duration=${sec}`,
+       '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', file],
+      `clip ${name}`
+    )
+    return file
+  }
+  const stillImage = (name: string): string => {
+    const file = join(dir, `${name}.png`)
+    ff(['-f', 'lavfi', '-i', 'color=c=teal:s=640x426:d=1', '-frames:v', '1', file], `still ${name}`)
+    return file
+  }
+
+  const five = clip('five', 5)
+  const image = stillImage('hold')
+  let failures = 0
+
+  const check = async (
+    name: string,
+    expectedSec: number,
+    segments: AssembleSegment[],
+    seamOverrideSec?: (number | null)[]
+  ): Promise<void> => {
+    const outputPath = join(dir, `${name}.mp4`)
+    try {
+      await assemble({
+        clipPaths: [],
+        segments,
+        seamOverrideSec,
+        defaults,
+        fit: 'cover',
+        padColor: 'black',
+        targetFps: CUSTOMER_EXPORT_FPS,
+        overlayPngPaths: [],
+        outputPath
+      }).done
+      const { durationSec, fps } = probeStreamInfo(outputPath)
+      const frames = decodedFrameCount(outputPath)
+      const expectedFrames = expectedSec * CUSTOMER_EXPORT_FPS
+      assert.equal(fps, CUSTOMER_EXPORT_FPS, `${name}: encoded at ${CUSTOMER_EXPORT_FPS} fps`)
+      assert.ok(
+        Math.abs(durationSec - expectedSec) <= 0.05,
+        `${name}: expected ${expectedSec.toFixed(3)}s, got ${durationSec.toFixed(3)}s`
+      )
+      assert.ok(
+        Math.abs(frames - expectedFrames) <= 6,
+        `${name}: expected ~${expectedFrames.toFixed(0)} frames, got ${frames}`
+      )
+      log(
+        `PASS ${name}: ${durationSec.toFixed(3)}s (expected ${expectedSec.toFixed(3)}), ` +
+          `${frames} frames at ${fps} fps`
+      )
+    } catch (err) {
+      failures++
+      console.error(`[real-export] FAIL ${name}:`, err instanceof Error ? err.message : err)
+    }
+  }
+
+  // A. One clip, unchanged length. 24 fps in, 120 fps out, same 5 seconds.
+  await check('A-single-5s', 5, [{ kind: 'clip', path: five }])
+
+  // B. Two hard-cut clips. No seam, so nothing is trimmed: 5 + 5.
+  await check('B-hard-cut', 10, [
+    { kind: 'clip', path: five },
+    { kind: 'clip', path: five }
+  ], [0])
+
+  // C. Two clips with a one-second crossfade. 5 + 5 − 1, less the one
+  //    SOURCE frame the seam planner trims from each side of the joint,
+  //    which is 1/24s and not 1/120s — that distinction is the whole
+  //    reason the seam arithmetic runs on the source rate.
+  await check('C-crossfade-1s', 10 - 1 - 2 * frame, [
+    { kind: 'clip', path: five },
+    { kind: 'clip', path: five }
+  ], [1])
+
+  // D. A held photograph followed by a clip. A still has no motion to
+  //    interpolate and must come out exactly as long as it was held.
+  await check('D-still-plus-clip', 8, [
+    { kind: 'still', path: image, holdSeconds: 3 },
+    { kind: 'clip', path: five }
+  ], [0])
+
+  // E. One source split into two timeline items. The pieces must add up
+  //    to what the whole was, with no gap and no overlap.
+  await check('E-split-2s-3s', 5, [
+    { kind: 'clip', path: five, sourceStartSec: 0, sourceEndSec: 2 },
+    { kind: 'clip', path: five, sourceStartSec: 2, sourceEndSec: 5 }
+  ], [0, 0])
+
+  // F. A mixed timeline: still, crossfade, a short split piece, hard cut.
+  //
+  // ── TWO DOCUMENTED CLAMPS DECIDE THIS NUMBER ────────────────────
+  //
+  // The 2s piece is short enough to engage both safety rules in the seam
+  // planner, and the expectation has to account for them or the test is
+  // just asserting a guess:
+  //
+  //   1. A seam may not exceed 40% of the shorter segment it joins, so
+  //      the 1s crossfade against a 2s neighbour is clamped to 0.8s.
+  //   2. A segment too short to give a frame away is not trimmed at all,
+  //      so the 2s piece keeps its full length while the 5s one loses
+  //      its one source frame.
+  //
+  //   3 + (5 − 1/24) + 2 + 5 − 0.8 = 14.158
+  //
+  // Both rules exist so that seamless mode degrades to a hard cut rather
+  // than eating a short clip, and both are worth pinning.
+  await check('F-mixed-timeline', 3 + (5 - frame) + 2 + 5 - 0.8, [
+    { kind: 'still', path: image, holdSeconds: 3 },
+    { kind: 'clip', path: five },
+    { kind: 'clip', path: five, sourceStartSec: 0, sourceEndSec: 2 },
+    { kind: 'clip', path: five }
+  ], [0, 1, 0])
+
+  try {
+    rmSync(dir, { recursive: true, force: true })
+  } catch {
+    /* best effort */
+  }
+  log(failures === 0 ? 'TIMING: all cases hold' : `TIMING: ${failures} case(s) FAILED`)
+  return failures === 0 ? 0 : 1
 }
 
 export async function runRealExportProof(): Promise<number> {

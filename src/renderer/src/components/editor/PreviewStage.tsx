@@ -4,7 +4,7 @@ import { useAppState } from '../../state/AppState'
 import type { Project } from '../../types'
 import { SEAM_SECONDS, type SeamBlend } from '../../../../shared/seamBlend'
 import type { EditorSelection, PreviewMode } from '../../../../shared/editorSelection'
-import { itemStartTimes, type TimelineItem } from '../../../../shared/timeline'
+import { itemPlaybackRate, itemStartTimes, type TimelineItem } from '../../../../shared/timeline'
 import { resolvePreviewSource, statusWordFor } from '../../../../shared/previewSource'
 import {
   BRAND_MARGIN_FRACTION,
@@ -481,9 +481,19 @@ export function PreviewStage({
 
     // Ordinary playback: report the ABSOLUTE position, derived from how
     // far into this item's source we are.
+    //
+    // ── AND SOURCE SECONDS ARE NOT TIMELINE SECONDS ────────────────
+    //
+    // The element reports where it is in the FILE. At 2x the item takes
+    // half as long on the ruler, so the same number of source seconds is
+    // half as many timeline seconds. Dividing by the rate is the inverse
+    // of what `locateAtTime` does when it seeks, and using the raw
+    // difference here would make the playhead run at the wrong speed
+    // relative to the picture — drifting further out with every second
+    // of a retimed clip.
     const idx = timeline.items.findIndex((i) => i.id === item.id)
     const starts = itemStartTimes(timeline.items, timeline.defaultSeamSec)
-    const intoItem = el.currentTime - item.startOffsetSec
+    const intoItem = (el.currentTime - item.startOffsetSec) / itemPlaybackRate(item)
     onTimelineSeek(Math.max(0, starts[idx] + intoItem), true)
   }
 
@@ -560,6 +570,32 @@ export function PreviewStage({
     playing,
     source.kind === 'timeline' ? source.sourceSec : null,
     source.kind === 'timeline' ? source.itemId : null
+  ])
+
+  /**
+   * THE PREVIEW PLAYS AT THE ITEM'S SPEED.
+   *
+   * ── AND THIS IS ONLY HALF OF IT ──────────────────────────────────
+   *
+   * Setting the element's rate is what the eye sees, but on its own it
+   * would be a lie: the element would race ahead while the playhead and
+   * the ruler still counted in source seconds. The other half is the
+   * mapping in `onTimeUpdate` and in `locateAtTime`, which convert
+   * between the file's clock and the timeline's. Both have to agree, or
+   * the picture and the position drift apart on every retimed clip.
+   *
+   * Re-applied on every item change because a handover remounts the
+   * element, and a fresh element starts at 1.
+   */
+  useEffect(() => {
+    const el = videoRef.current
+    if (!el || source.kind !== 'timeline') return
+    const item = timeline?.items.find((i) => i.id === source.itemId)
+    el.playbackRate = item ? itemPlaybackRate(item) : 1
+  }, [
+    source.kind === 'timeline' ? source.itemId : null,
+    source.kind === 'timeline' ? source.sourceSec : null,
+    timeline
   ])
 
   /**

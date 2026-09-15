@@ -4,7 +4,11 @@ const MAX_BODY_BYTES = 32 * 1024;
 const SUCCESS = { ok: true, message: 'Thank you. Your inquiry has been sent.' };
 const SEND_ERROR = 'We couldn’t send your inquiry. Please try again or email contact@image2transition.com.';
 const TYPES = { video: 'Create a video', agency: 'Software / Agency', partnership: 'Partnership', other: 'Other' };
-const ALLOWED_FIELDS = new Set(['name', 'email', 'company', 'message', 'website', 'inquiryType']);
+const ALLOWED_FIELDS = new Set(['name', 'email', 'company', 'message', 'website', 'inquiryType', 'motionQuality']);
+// Customer-facing wording for the two motion levels. Standard is the
+// default for an inquiry that does not name one, which is what every
+// inquiry sent before the choice existed did.
+const QUALITIES = { standard60: 'Standard — 60 FPS', premium120: 'Premium Smooth — 120 FPS (+10%)' };
 const ENV_NAMES = ['RESEND_API_KEY', 'CONTACT_TO_EMAIL', 'CONTACT_FROM_EMAIL'];
 // Development conveniences, never production values. `onboarding@resend.dev`
 // is Resend's sandbox sender and may only deliver to the Resend account's own
@@ -69,18 +73,24 @@ function validatePayload(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
   if (Object.keys(payload).some(key => !ALLOWED_FIELDS.has(key))) return null;
   for (const key of ['name', 'email', 'message']) if (typeof payload[key] !== 'string') return null;
-  for (const key of ['company', 'website', 'inquiryType']) {
+  for (const key of ['company', 'website', 'inquiryType', 'motionQuality']) {
     if (payload[key] !== undefined && typeof payload[key] !== 'string') return null;
   }
   const data = {
     name: payload.name.trim(), email: payload.email.trim(), company: (payload.company ?? '').trim(),
     message: payload.message.replace(/\r\n?/g, '\n').trim(), website: (payload.website ?? '').trim(),
-    inquiryType: payload.inquiryType ?? 'other'
+    inquiryType: payload.inquiryType ?? 'other',
+    // Absent reads as Standard: that is what an inquiry sent before the
+    // choice existed asked for, and what the form pre-selects now.
+    motionQuality: payload.motionQuality ?? 'standard60'
   };
   if (!data.name || data.name.length > 120 || /[\x00-\x1f\x7f]/.test(data.name)) return null;
   if (!validEmail(data.email) || data.company.length > 200 || /[\x00-\x1f\x7f]/.test(data.company)) return null;
   if (!data.message || data.message.length > 4000 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(data.message)) return null;
   if (data.website.length > 500 || !Object.hasOwn(TYPES, data.inquiryType)) return null;
+  // An unknown level is refused rather than coerced — the surcharge the
+  // visitor was shown depends on it, so it must be exactly one of two.
+  if (!Object.hasOwn(QUALITIES, data.motionQuality)) return null;
   return data;
 }
 
@@ -180,7 +190,8 @@ export function createInquiryHandler({ fetchImpl = fetch, now = () => Date.now()
     const timestamp = new Date(now()).toISOString();
     const details = [
       ['Name', data.name], ['Email', data.email], ['Company', data.company || 'Not provided'],
-      ['Inquiry', TYPES[data.inquiryType]], ['Timestamp (UTC)', timestamp]
+      ['Inquiry', TYPES[data.inquiryType]], ['Video smoothness', QUALITIES[data.motionQuality]],
+      ['Timestamp (UTC)', timestamp]
     ];
     const text = details.map(([label, value]) => `${label}: ${value}`).join('\n') + '\n\nMessage:\n' + data.message;
     const html = '<!doctype html><html><body style="font-family:Arial,sans-serif;color:#111c33;line-height:1.6">' +

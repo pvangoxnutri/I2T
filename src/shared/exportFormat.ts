@@ -111,6 +111,77 @@ export const DEFAULT_EXPORT_FORMAT: ExportFormatId = 'computer'
  */
 export const CUSTOMER_EXPORT_FPS = 120
 
+/**
+ * HOW SMOOTH THE DELIVERED MOTION IS.
+ *
+ * ── SMOOTHNESS, NOT QUALITY ──────────────────────────────────────────
+ *
+ * Both levels are the SAME picture: same resolution, same CRF, same
+ * preset, same scaler, same branding, same full-bleed crop. The only
+ * difference is how many frames the movement is drawn with, and both
+ * reach their rate by real motion-compensated interpolation rather than
+ * by repeating frames.
+ *
+ * ── AND NEITHER CHANGES HOW FAST ANYTHING MOVES ──────────────────────
+ *
+ * This is the distinction to keep hold of. The export rate decides
+ * smoothness. A timeline item's `playbackRate` decides speed. A 1.5x
+ * item moves 50% faster in both levels; a 60 fps export of it is the
+ * same movement drawn with half as many frames as the 120. They are
+ * independent, and conflating them is what produces slow motion.
+ */
+export type MotionQuality = 'standard60' | 'premium120'
+
+export const MOTION_QUALITIES: Record<
+  MotionQuality,
+  { fps: number; label: string; note: string; caveat: string | null }
+> = {
+  standard60: {
+    fps: 60,
+    label: 'Standard',
+    note: '60 fps · Smooth · Recommended',
+    caveat: null
+  },
+  premium120: {
+    fps: 120,
+    label: 'Premium Smooth',
+    note: '120 fps · Ultra-smooth',
+    // Stated in the panel because it is the operator's own time. A 38s
+    // film takes roughly twice as long to interpolate at 120 as at 60.
+    caveat: 'Longer processing'
+  }
+}
+
+/**
+ * WHAT THE EXPORT PANEL PRE-SELECTS.
+ *
+ * Standard, deliberately. 120 fps is correct in the file — a 38.47s
+ * timeline exports as a 38.47s file, proven by decoded frame count — but
+ * a 120 fps upload has been seen to come back from Instagram running
+ * long and slow. Until that is understood, the rate that every player
+ * and platform handles without argument is the one an operator gets
+ * without choosing, and 120 is something they opt into.
+ */
+export const DEFAULT_MOTION_QUALITY: MotionQuality = 'standard60'
+
+/**
+ * WHAT AN UNMARKED JOB WAS QUEUED AS. Not the same question.
+ *
+ * Every export queued before this choice existed rendered at 120, so an
+ * unmarked job must still deliver 120. Reading the panel's new default
+ * here instead would silently re-render someone's queued or recovered
+ * export at a rate they never chose — which is exactly the class of bug
+ * that made the format travel on the job in the first place.
+ */
+const LEGACY_JOB_QUALITY: MotionQuality = 'premium120'
+
+/**
+ * The rate a job should encode at, from what the job itself carries.
+ */
+export function motionQualityFps(quality: MotionQuality | null | undefined): number {
+  return MOTION_QUALITIES[quality ?? LEGACY_JOB_QUALITY]?.fps ?? CUSTOMER_EXPORT_FPS
+}
+
 export function exportFormat(id: ExportFormatId | null | undefined): ExportFormat {
   return EXPORT_FORMATS.find((f) => f.id === id) ?? EXPORT_FORMATS[0]
 }

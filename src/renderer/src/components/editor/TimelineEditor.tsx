@@ -7,6 +7,11 @@ import {
 } from '../../../../shared/editorSelection'
 import {
   itemDurationSec,
+  itemPlaybackRate,
+  itemSourceSpanSec,
+  MAX_PLAYBACK_RATE,
+  MIN_PLAYBACK_RATE,
+  PLAYBACK_RATE_STEPS,
   itemStartTimes,
   locateAtTime,
   timelineDurationSec,
@@ -206,6 +211,22 @@ export function TimelineEditor({
       return
     }
     const res = await window.f2f.projects.timeline.split(project.id, selectedId, playheadSec)
+    if (res.ok) {
+      onViewChanged(res.view)
+      setError(null)
+    } else setError(res.reason)
+  }
+
+  /**
+   * RETIME THE SELECTED ITEM.
+   *
+   * The playhead is deliberately left where it is. Retiming changes how
+   * long this item takes, so everything after it shifts — but the
+   * operator's attention is on the clip they are adjusting, and yanking
+   * the playhead each time they nudge the speed would fight them.
+   */
+  const applySpeed = async (itemId: string, rate: number): Promise<void> => {
+    const res = await window.f2f.projects.timeline.speed(project.id, itemId, rate)
     if (res.ok) {
       onViewChanged(res.view)
       setError(null)
@@ -542,12 +563,19 @@ export function TimelineEditor({
           Small on purpose: what it is, where it came from, and the exact
           in/out points a split produced. */}
       {selectedId && (
-        <SelectedClipInfo
-          item={items.find((i) => i.id === selectedId) ?? null}
-          project={project}
-          playheadSec={playheadSec}
-          startSec={starts[items.findIndex((i) => i.id === selectedId)] ?? 0}
-        />
+        <>
+          <SelectedClipInfo
+            item={items.find((i) => i.id === selectedId) ?? null}
+            project={project}
+            playheadSec={playheadSec}
+            startSec={starts[items.findIndex((i) => i.id === selectedId)] ?? 0}
+          />
+          <SpeedControl
+            item={items.find((i) => i.id === selectedId) ?? null}
+            disabled={false}
+            onChange={(rate) => void applySpeed(selectedId, rate)}
+          />
+        </>
       )}
 
       {/* NO <video> HERE.
@@ -603,7 +631,12 @@ function SelectedClipInfo({
       </div>
       <div>
         <dt>Timeline duration</dt>
-        <dd>{itemDurationSec(item).toFixed(2)}s</dd>
+        {/* Both numbers, because the pair is the whole point: this much
+            footage, taking this long. At 1x they are the same and the
+            arrow reads as confirmation rather than noise. */}
+        <dd>
+          {itemSourceSpanSec(item).toFixed(2)}s → {itemDurationSec(item).toFixed(2)}s
+        </dd>
       </div>
       <div>
         <dt>Playhead in clip</dt>
@@ -612,3 +645,87 @@ function SelectedClipInfo({
     </dl>
   )
 }
+
+/**
+ * SPEED FOR THE SELECTED ITEM.
+ *
+ * ── WHY IT IS HERE AND NOT ON THE TIMELINE ITSELF ────────────────────
+ *
+ * The strip has to stay readable at a glance; a control on every clip
+ * would bury the one thing it is for, which is seeing the order and the
+ * lengths. This belongs with the other facts about the selected item.
+ *
+ * ── AND WHY IT IS NOT THE EXPORT'S FRAME RATE ────────────────────────
+ *
+ * Speed is a creative edit: how fast the camera moves. The export's
+ * 60/120 choice is how smoothly that movement is drawn. Changing speed
+ * changes the film's length; changing the export rate never does.
+ */
+function SpeedControl({
+  item,
+  disabled,
+  onChange
+}: {
+  item: TimelineItem | null
+  disabled: boolean
+  onChange: (rate: number) => void
+}): React.JSX.Element {
+  if (!item) return <></>
+  const rate = itemPlaybackRate(item)
+  const step = (delta: number): void => {
+    const next = Math.min(MAX_PLAYBACK_RATE, Math.max(MIN_PLAYBACK_RATE, round2(rate + delta)))
+    if (next !== rate) onChange(next)
+  }
+  return (
+    <div className="tl-speed">
+      <div className="tl-speed-head">
+        <span className="tl-speed-label">Speed</span>
+        <div className="tl-speed-stepper">
+          <button
+            type="button"
+            onClick={() => step(-0.05)}
+            disabled={disabled || rate <= MIN_PLAYBACK_RATE}
+            aria-label="Slower"
+          >
+            −
+          </button>
+          <output>{rate.toFixed(2)}×</output>
+          <button
+            type="button"
+            onClick={() => step(0.05)}
+            disabled={disabled || rate >= MAX_PLAYBACK_RATE}
+            aria-label="Faster"
+          >
+            +
+          </button>
+        </div>
+      </div>
+      <input
+        className="tl-speed-slider"
+        type="range"
+        min={MIN_PLAYBACK_RATE}
+        max={MAX_PLAYBACK_RATE}
+        step={0.05}
+        value={rate}
+        disabled={disabled}
+        aria-label="Playback speed"
+        onChange={(e) => onChange(round2(Number(e.target.value)))}
+      />
+      <div className="tl-speed-steps">
+        {PLAYBACK_RATE_STEPS.map((preset) => (
+          <button
+            type="button"
+            key={preset}
+            className={preset === rate ? 'is-active' : ''}
+            disabled={disabled}
+            onClick={() => onChange(preset)}
+          >
+            {preset.toFixed(2)}×
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+const round2 = (n: number): number => Math.round(n * 100) / 100
